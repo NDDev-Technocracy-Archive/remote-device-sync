@@ -2943,7 +2943,7 @@ dependencies = [
  "noq",
  "noq-proto",
  "postcard",
- "rand 0.9.5",
+ "rand 0.10.3",
  "rds-core",
  "rds-discovery",
  "serde",
