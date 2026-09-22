@@ -9,7 +9,7 @@ use openh264::encoder::{
     BitRate, EncodedBitStream, Encoder as OhEncoder, EncoderConfig, FrameRate, IntraFramePeriod,
     RateControlMode, UsageType,
 };
-use openh264::formats::{YUVBuffer, YUVSource};
+use openh264::formats::{BGRA8Source, RGB8Source, RGBSource, YUVBuffer, YUVSource};
 use openh264::{Error as OhError, OpenH264API};
 use rds_core::Codec;
 
@@ -43,7 +43,13 @@ impl H264Encoder {
 
     fn build(bitrate_bps: u32, fps: f32) -> Result<OhEncoder, DesktopError> {
         let config = EncoderConfig::new()
-            .usage_type(UsageType::CameraVideoRealTime)
+            // Screen content: the desktop is text and sharp edges, not
+            // camera footage — this tunes QP/mode decisions for it.
+            .usage_type(UsageType::ScreenContentRealTime)
+            // Unsupported for screen content — OpenH264 disables them
+            // with a warning; set explicitly instead.
+            .adaptive_quantization(false)
+            .background_detection(false)
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(bitrate_bps))
             .max_frame_rate(FrameRate::from_hz(fps))
@@ -189,16 +195,63 @@ impl Decoder for H264Decoder {
     }
 }
 
-/// BGRA8 → I420 (BT.601 studio swing). Encoder input for OpenH264.
+/// BGRA8 → I420 (BT.601 studio swing) for OpenH264, via the encoder
+/// crate's own converter — it dispatches to AVX2 at runtime on x86-64
+/// (scalar elsewhere), honors arbitrary row strides, and box-averages
+/// chroma. Stride-incompatible buffers take the scalar path.
 pub fn bgra_to_i420(frame: &RawFrame) -> YUVBuffer {
-    let w = frame.width as usize;
-    let h = frame.height as usize;
+    let stride = frame.stride as usize;
+    if stride.is_multiple_of(4) && frame.data.len() >= stride * frame.height as usize {
+        return YUVBuffer::from_bgra8_source(StridedBgra(frame));
+    }
+    bgra_to_i420_scalar(frame)
+}
+
+/// `RawFrame` as an `openh264` BGRA source, carrying its real stride so
+/// padded capture buffers need no intermediate copy.
+struct StridedBgra<'a>(&'a RawFrame);
+
+impl RGBSource for StridedBgra<'_> {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.0.width as usize, self.0.height as usize)
+    }
+
+    fn pixel_f32(&self, x: usize, y: usize) -> (f32, f32, f32) {
+        let o = y * self.0.stride as usize + x * 4;
+        let px = &self.0.data[o..o + 4];
+        (px[2] as f32, px[1] as f32, px[0] as f32)
+    }
+}
+
+impl RGB8Source for StridedBgra<'_> {
+    fn dimensions_padded(&self) -> (usize, usize) {
+        (self.0.stride as usize / 4, self.0.height as usize)
+    }
+
+    fn rgb8_data(&self) -> &[u8] {
+        &self.0.data
+    }
+
+    fn pixel_stride(&self) -> usize {
+        4
+    }
+
+    fn rgb_channel_offsets(&self) -> (usize, usize, usize) {
+        (2, 1, 0)
+    }
+}
+
+impl BGRA8Source for StridedBgra<'_> {}
+
+/// Scalar fallback for strides that are not whole pixels — also the
+/// test reference for the SIMD path's output.
+fn bgra_to_i420_scalar(frame: &RawFrame) -> YUVBuffer {
+    let (w, h) = (frame.width as usize, frame.height as usize);
     let stride = frame.stride as usize;
     let mut yuv = vec![0u8; w * h * 3 / 2];
     let (y_plane, uv) = yuv.split_at_mut(w * h);
     let (u_plane, v_plane) = uv.split_at_mut(w * h / 4);
     let src = &frame.data;
-
     for row in 0..h {
         let srow = &src[row * stride..row * stride + w * 4];
         let yrow = &mut y_plane[row * w..row * w + w];
@@ -265,5 +318,87 @@ mod tests {
         // Past it: the rebuilt encoder's first frame is an IDR.
         enc.set_bitrate(2_000_000);
         assert!(enc.encode(&frame()).unwrap().keyframe);
+    }
+
+    /// The SIMD/dispatched converter must agree with the scalar
+    /// reference: identical luma (same BT.601 coefficients), chroma
+    /// within box-average-vs-nearest tolerance.
+    #[test]
+    fn simd_conversion_matches_scalar() {
+        let (w, h) = (64u32, 64u32);
+        let mut data = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let o = (y * w as usize + x) * 4;
+                if x < 32 {
+                    // Solid red half: box-average == nearest-sample.
+                    data[o..o + 4].copy_from_slice(&[0, 0, 255, 255]);
+                } else {
+                    data[o] = (x % 256) as u8;
+                    data[o + 1] = ((y * 3) % 256) as u8;
+                    data[o + 2] = ((x * 2) % 256) as u8;
+                    data[o + 3] = 255;
+                }
+            }
+        }
+        let raw = RawFrame {
+            width: w,
+            height: h,
+            stride: w * 4,
+            data: Bytes::from(data),
+        };
+        let fast = bgra_to_i420(&raw);
+        let slow = bgra_to_i420_scalar(&raw);
+        assert_eq!(fast.dimensions(), slow.dimensions());
+        for (a, b) in fast.y().iter().zip(slow.y()) {
+            assert!((i32::from(*a) - i32::from(*b)).abs() <= 2, "Y diverges");
+        }
+        // Solid half: chroma must match tightly.
+        for row in 0..h as usize / 2 {
+            for x in 0..16 {
+                let i = row * (w as usize / 2) + x;
+                assert!(
+                    (i32::from(fast.u()[i]) - i32::from(slow.u()[i])).abs() <= 2,
+                    "U diverges on solid region"
+                );
+                assert!(
+                    (i32::from(fast.v()[i]) - i32::from(slow.v()[i])).abs() <= 2,
+                    "V diverges on solid region"
+                );
+            }
+        }
+        // Gradient half: same colorspace, different chroma sampling —
+        // bounded divergence only.
+        for (a, b) in fast.u().iter().zip(slow.u()) {
+            assert!((i32::from(*a) - i32::from(*b)).abs() <= 32, "U diverges");
+        }
+    }
+
+    /// Padded strides must be honored — padding bytes never leak into
+    /// the planes (filled with a sentinel).
+    #[test]
+    fn strided_input_ignores_padding() {
+        let (w, h, pad) = (64u32, 64u32, 32u32);
+        let tight = frame();
+        let stride = (w * 4 + pad) as usize;
+        let mut data = vec![0u8; stride * h as usize];
+        for row in 0..h as usize {
+            data[row * stride..row * stride + (w * 4) as usize]
+                .copy_from_slice(&tight.data[row * w as usize * 4..(row + 1) * w as usize * 4]);
+            for b in &mut data[row * stride + (w * 4) as usize..(row + 1) * stride] {
+                *b = 0xAA;
+            }
+        }
+        let padded = RawFrame {
+            width: w,
+            height: h,
+            stride: stride as u32,
+            data: Bytes::from(data),
+        };
+        let a = bgra_to_i420(&padded);
+        let b = bgra_to_i420(&tight);
+        assert_eq!(a.y(), b.y());
+        assert_eq!(a.u(), b.u());
+        assert_eq!(a.v(), b.v());
     }
 }
