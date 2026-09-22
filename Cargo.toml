@@ -47,7 +47,7 @@ noq = "1"
 noq-proto = "1"
 postcard = "1"
 proptest = "1"
-rand = "0.9"
+rand = "0.10"
 rds-agent = { path = "crates/rds-agent" }
 rds-audio = { path = "crates/rds-audio" }
 rds-bench = { path = "crates/rds-bench" }
