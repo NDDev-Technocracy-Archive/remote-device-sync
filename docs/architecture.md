@@ -25,6 +25,14 @@ policy comparison and dialing. Parsing has no DNS or socket side effects.
 Role-level authority/service policy, negotiated session limits and lifecycle
 configuration remain W2 work; the endpoint schema does not claim to cover them.
 
+Owned noq endpoints now track path-policy tasks. A weak QUIC closure notification
+ends each driver without retaining the connection; endpoint close seals task
+admission, closes QUIC connections and waits for policy-task cleanup. Streams
+may legitimately outlive a Connection wrapper. Completed drivers are removed
+immediately, and `active_path_drivers()` exposes the owned endpoint's count.
+This boundary does not yet own every agent, relay or disk task; see the
+[lifecycle receipt](reports/rds-driver-lifecycle-20260925.md) for its tested scope.
+
 ## Research summary
 
 ### Connectivity models surveyed

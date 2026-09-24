@@ -114,9 +114,10 @@ pub fn initiate_traversal_round(conn: &noq::Connection, metrics: &crate::metrics
 /// `Path` objects hold a connection reference internally. Handles are
 /// upgraded only inside event handling and selection, then dropped.
 ///
-/// Both event streams are broadcast receivers owned by the connection
-/// internals; they end when the connection tears down, which ends the
-/// task. `seed_paths` carries the `PathId`s already open at wiring time
+/// The weak `on_closed` notification ends the task even while closed handles
+/// remain alive. It also observes implicit closure after the last I/O handle
+/// drops. The interval cannot keep the task alive after either closure or both
+/// event streams ending. `seed_paths` carries the `PathId`s open at wiring time
 /// (their `Established` events fired before we subscribed).
 pub async fn connection_driver(
     conn: noq::WeakConnectionHandle,
@@ -126,6 +127,12 @@ pub async fn connection_driver(
     metrics: crate::metrics::Registry,
 ) {
     use tokio_stream::StreamExt;
+
+    // Register without retaining a strong Connection across any await.
+    let Some(closed) = conn.upgrade().map(|owner| owner.on_closed()) else {
+        return;
+    };
+    tokio::pin!(closed);
 
     let mut paths: HashMap<noq::PathId, noq::WeakPathHandle> = HashMap::new();
     // Paths opened to QNT-learned candidates — an Established event on
@@ -147,6 +154,7 @@ pub async fn connection_driver(
 
     loop {
         tokio::select! {
+            _ = &mut closed => break,
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
                     if let Some(id) = open_learned_path(&conn, &mut paths, addr) {
@@ -164,7 +172,7 @@ pub async fn connection_driver(
             },
             event = path_events.next(), if events_open => match event {
                 Some(Ok(noq::PathEvent::Established { id, .. })) => {
-                    if qnt_paths.contains(&id) {
+                    if qnt_paths.remove(&id) {
                         metrics.qnt_success();
                     }
                     if let Some(c) = conn.upgrade()
@@ -176,6 +184,7 @@ pub async fn connection_driver(
                 Some(Ok(noq::PathEvent::Abandoned { id, .. }))
                 | Some(Ok(noq::PathEvent::Discarded { id, .. })) => {
                     paths.remove(&id);
+                    qnt_paths.remove(&id);
                     if selected == Some(id) {
                         selected = None;
                     }
@@ -189,6 +198,15 @@ pub async fn connection_driver(
             _ = tick.tick() => {}
             else => break,
         }
+        if !qnt_open && !events_open {
+            break;
+        }
+        let Some(owner) = conn.upgrade() else {
+            break;
+        };
+        // Lost/lagged path events cannot accumulate stale QNT history.
+        qnt_paths.retain(|id| owner.path(*id).is_some());
+        drop(owner);
         reselect(&conn, &mut paths, &mut selected);
     }
 }
@@ -227,7 +245,9 @@ fn reselect(
     if !conn.is_alive() {
         return;
     }
-    paths.retain(|_, weak| weak.upgrade().is_some());
+    // A WeakPathHandle can upgrade even after its path closes: it retains
+    // final statistics until dropped. Upgrade alone is not a liveness check.
+    paths.retain(|_, weak| weak.upgrade().is_some_and(|path| path.status().is_ok()));
     if paths.is_empty() {
         *selected = None;
         return;

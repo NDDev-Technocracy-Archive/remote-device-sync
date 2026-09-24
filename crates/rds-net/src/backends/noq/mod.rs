@@ -18,6 +18,7 @@
 //! Until this backend reaches parity (same-harness benchmarks vs the
 //! iroh backend), `iroh` remains the default selected at bind time.
 
+mod drivers;
 mod hmac;
 pub mod policy;
 pub mod relay;
@@ -174,6 +175,7 @@ pub async fn bind_with_socket(
         alpns: config.alpns,
         relay,
         metrics: crate::metrics::Registry::default(),
+        drivers: Arc::new(drivers::Drivers::default()),
     })
 }
 
@@ -231,6 +233,7 @@ pub struct Endpoint {
     /// Endpoint metrics — the connection driver records QNT progress
     /// here; the facade surfaces it via `Endpoint::metrics`.
     metrics: crate::metrics::Registry,
+    drivers: Arc<drivers::Drivers>,
 }
 
 impl fmt::Debug for Endpoint {
@@ -247,6 +250,12 @@ impl Endpoint {
     /// per-connection drivers).
     pub fn metrics(&self) -> crate::metrics::Registry {
         self.metrics.clone()
+    }
+
+    /// Policy tasks still running, including their final cleanup. Completed
+    /// tasks release storage immediately; endpoint close waits for zero.
+    pub fn active_path_drivers(&self) -> usize {
+        self.drivers.len()
     }
 
     /// This endpoint's public identity.
@@ -318,7 +327,7 @@ impl Endpoint {
             let open = conn.open_path_ensure(syn, noq::PathStatus::Available);
             seeds.extend(open.path_id());
         }
-        self.wire_connection(&conn, seeds);
+        self.wire_connection(&conn, seeds)?;
 
         Ok(Connection {
             inner: conn,
@@ -335,10 +344,11 @@ impl Endpoint {
         }
         let relay = self.relay.clone();
         let metrics = self.metrics.clone();
+        let drivers = self.drivers.clone();
         async move {
             accept
                 .await
-                .map(|i| Incoming::new(i, our_addrs, relay, metrics))
+                .map(|i| Incoming::with_drivers(i, our_addrs, relay, metrics, drivers))
         }
     }
 
@@ -375,25 +385,26 @@ impl Endpoint {
     /// opens paths to its in-band advertised candidates and keeps the
     /// best path selected. `seed_paths` are the PathIds open at wiring
     /// time (their Established events predate subscription).
-    fn wire_connection(&self, conn: &noq::Connection, seed_paths: Vec<noq::PathId>) {
+    fn wire_connection(
+        &self,
+        conn: &noq::Connection,
+        seed_paths: Vec<noq::PathId>,
+    ) -> anyhow::Result<()> {
         let mut ours = self.advertised_socket_addrs();
         if self.relay.is_some() {
             ours.push(relay::synthetic_for(&self.id));
         }
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
-        tokio::spawn(policy::connection_driver(
-            conn.weak_handle(),
-            conn.nat_traversal_updates(),
-            conn.path_events(),
-            seed_paths,
-            self.metrics.clone(),
-        ));
+        self.drivers.spawn(conn, seed_paths, self.metrics.clone())
     }
 
-    /// Close all connections and the endpoint.
+    /// Close all connections and wait for this endpoint's policy tasks.
+    /// Relay tunnel pumps and QUIC packet draining have separate lifecycles.
     pub async fn close(&self) {
+        self.drivers.close_admission();
         self.inner.close(0u32.into(), b"closed");
+        self.drivers.wait().await;
     }
 }
 
@@ -408,6 +419,7 @@ pub struct Incoming {
     relay: Option<relay::RelayHandle>,
     /// Endpoint metrics — the driver records QNT progress here.
     metrics: crate::metrics::Registry,
+    drivers: Arc<drivers::Drivers>,
 }
 
 impl Incoming {
@@ -418,12 +430,29 @@ impl Incoming {
         relay: Option<relay::RelayHandle>,
         metrics: crate::metrics::Registry,
     ) -> Self {
+        Self::with_drivers(
+            incoming,
+            our_addrs,
+            relay,
+            metrics,
+            Arc::new(drivers::Drivers::default()),
+        )
+    }
+
+    fn with_drivers(
+        incoming: noq::Incoming,
+        our_addrs: Vec<SocketAddr>,
+        relay: Option<relay::RelayHandle>,
+        metrics: crate::metrics::Registry,
+        drivers: Arc<drivers::Drivers>,
+    ) -> Self {
         Self {
             incoming: Some(incoming),
             connecting: None,
             our_addrs,
             relay,
             metrics,
+            drivers,
         }
     }
 
@@ -457,14 +486,9 @@ impl Future for Incoming {
                             // its Established event predates our
                             // subscription, so seed it explicitly.
                             let seeds = vec![noq::PathId::ZERO];
-                            tokio::spawn(policy::connection_driver(
-                                inner.weak_handle(),
-                                inner.nat_traversal_updates(),
-                                inner.path_events(),
-                                seeds,
-                                self.metrics.clone(),
-                            ));
-                            Ok(Connection { inner, remote_id })
+                            self.drivers
+                                .spawn(&inner, seeds, self.metrics.clone())
+                                .map(|()| Connection { inner, remote_id })
                         }
                         None => Err(anyhow::anyhow!("peer presented no identity")),
                     },

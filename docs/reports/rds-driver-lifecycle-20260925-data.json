@@ -1,0 +1,134 @@
+{
+  "source_base": "a89e7dc",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "b0ddffa4374e1f9e7d3d93b50ff1f2af2b2d37b624b407b7c09182a3c64f00bd",
+    "Cargo.toml": "2ab4721607639e2cb02f0f89f7f600a62428af68d22b0de4b09c8be66d4a491a",
+    "crates/rds-net/Cargo.toml": "24d50cf923c88352b66c7c32d7fc20a1c2369ffd988ccfc95f0797b6ef25ee59",
+    "crates/rds-net/src/backends/noq/drivers.rs": "cf1b50ff2989de75e6a981e9894ab024f90c5a80c1264daa732ee710e81d6452",
+    "crates/rds-net/src/backends/noq/mod.rs": "db10ffa033fc71ed60908b2b75d3c2df170db82759dd6ab7c8c7768ec669850a",
+    "crates/rds-net/src/backends/noq/policy.rs": "0a2714e7f76df2a563906a13a41f31347d8265180459e28e26f105d7ce465253",
+    "crates/rds-net/tests/driver_lifecycle.rs": "401b57f6e9f9eb7d57d2de97e042b2e8cd94bb1076dfccb9e26b94f0abb9b381"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.5404267640551552,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 20.48973061691504,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 21.863371722982265,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 18.105356867890805,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 258.5532853769837,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 204.71113380696625,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 301,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 54
+    },
+    "test-owned": {
+      "passed": 86,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 25
+    }
+  },
+  "before_fix_failures": [
+    "closed_connection_driver_finishes_with_live_handles",
+    "last_io_handle_drop_finishes_driver"
+  ],
+  "focused_tests": 5,
+  "connection_churn_cycles": 32,
+  "retained_connection_pairs_during_shutdown": 8,
+  "dependency_change": "Optional direct tokio-util 0.7.19 TaskTracker, already present at this version in Cargo.lock; no package or version added.",
+  "limits": [
+    "Policy tasks only; agent/service, relay pumps and disk workers remain open",
+    "No validated-path or large address-churn load qualification",
+    "No native macOS, real NAT/failover, latency percentile or RSS/FD qualification",
+    "R08 relay framing and R09 candidate fallback remain open",
+    "No deployment or wave closure"
+  ]
+}

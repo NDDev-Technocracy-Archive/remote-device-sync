@@ -24,7 +24,8 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
-| W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
+| W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
+| W2.5 | Partial; owned path-driver lifecycle | Weak QUIC closure terminates policy tasks, completed tasks release storage, and endpoint close seals admission and waits for their cleanup. Agent/service task groups, resource budgets, relay queues and disk cancellation remain open. |
 
 ## Authorization change
 
@@ -604,3 +605,27 @@ Final formatting and three Clippy lanes passed, as did **296 workspace tests**,
 The initial full-feature failure and its deterministic reproduction are retained
 in private evidence; only the corrected final matrix supports these totals.
 No deployment or remediation wave closure occurred.
+
+## Owned connection-driver teardown
+
+Audit T05 / W2.5 now uses a weak QUIC closure notification to terminate the
+path-policy loop, including when closed handles remain alive or the last I/O
+handle drops. Endpoint-owned tracking seals admission before closing connections
+and waits for policy-task cleanup. Completed tasks are removed immediately.
+Pending QNT history and closed weak path handles are pruned.
+
+Both lifecycle regressions failed before the correction. Five focused tests
+also cover stream-only ownership, 32 connection cycles returning to zero tasks,
+and concurrent endpoint close with eight retained connection pairs. Final
+formatting, three Clippy lanes, **296 workspace tests** and **86 all-feature
+network/agent/CLI/relay tests** passed. See the
+[receipt](reports/rds-driver-lifecycle-20260925.md). Existing locked `tokio-util`
+becomes an optional direct dependency for task tracking; no package version,
+wire protocol, unsafe code or runtime helper program was added.
+
+W2.5 remains partial for uni-stream routing, agent/service task groups, global
+and per-session budgets, relay queues and disk cancellation. Validated path
+selection and larger churn/load qualification remain W3.6. R08 concerns relay
+Drain framing and stays open, as does R09 candidate fallback. The next local
+lifecycle work is the uni-stream router's ownership and pending-task bounds.
+No wave or deployed release is closed by this increment.
