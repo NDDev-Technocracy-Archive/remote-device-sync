@@ -74,6 +74,10 @@ pub enum Scenario {
     /// Cold `rds ssh <name>`: registry name → record → connect →
     /// first byte, fresh client endpoint per iteration (G3).
     ResolveConnect,
+    /// Mid-connection relay failover on a two-attachment world: drain
+    /// and hard-kill lanes, recovery latency onto the surviving slot.
+    /// noq-only.
+    Migration,
     /// All of the above.
     All,
 }
@@ -88,6 +92,7 @@ pub const LANES: &[Scenario] = &[
     Scenario::RelayFallback,
     Scenario::Impaired,
     Scenario::ResolveConnect,
+    Scenario::Migration,
 ];
 
 impl Scenario {
@@ -101,6 +106,7 @@ impl Scenario {
             Scenario::RelayFallback => "relay-fallback",
             Scenario::Impaired => "impaired",
             Scenario::ResolveConnect => "resolve-connect",
+            Scenario::Migration => "migration",
             Scenario::All => "all",
         }
     }
@@ -181,6 +187,7 @@ async fn run_one(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
             Ok(reports)
         }
         Scenario::ResolveConnect => resolve_connect(p).await.map(|r| vec![r]),
+        Scenario::Migration => migration(p).await,
         Scenario::All => unreachable!("handled in run"),
     }
 }
@@ -399,7 +406,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     let mut iroh_relay_url: Option<String> = None;
     #[cfg(feature = "transport-noq")]
     let mut owned_relay_addr: Option<rds_net::EndpointAddr> = None;
-    let _relay_keepalive: WorldRelay = match backend {
+    let _relay_keepalive: Vec<WorldRelay> = match backend {
         rds_net::Backend::Iroh => {
             let mut relay_config = iroh_relay::server::ServerConfig::default();
             relay_config.relay = Some(iroh_relay::server::RelayConfig::new(
@@ -407,7 +414,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
             ));
             let relay = iroh_relay::server::Server::spawn(relay_config).await?;
             iroh_relay_url = Some(format!("http://{}", relay.http_addr().unwrap()));
-            WorldRelay::Iroh(relay)
+            vec![WorldRelay::Iroh(relay)]
         }
         #[cfg(feature = "transport-noq")]
         rds_net::Backend::Noq => {
@@ -423,10 +430,10 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
             .await
             .context("spawn owned relay")?;
             owned_relay_addr = Some(server.endpoint_addr());
-            WorldRelay::Owned(server)
+            vec![WorldRelay::Owned(server)]
         }
         #[allow(unreachable_patterns)]
-        _ => WorldRelay::None,
+        _ => Vec::new(),
     };
 
     // Per-backend endpoint config: iroh attaches by relay URL, noq by
@@ -442,7 +449,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         }
         #[cfg(feature = "transport-noq")]
         {
-            config.relay_endpoint = owned_relay_addr.clone();
+            config.relay_endpoints = owned_relay_addr.clone().into_iter().collect();
         }
         Ok(config)
     };
@@ -559,6 +566,171 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         notes,
     })
 }
+/// Mid-connection relay failover, measured on both failure modes:
+/// `drain` (graceful notice, relay keeps forwarding through its grace
+/// window) and `kill` (tunnel torn down outright). Each lane reports
+/// recovery latency onto the surviving slot plus per-relay datagram
+/// counters proving which attachment carried traffic.
+async fn migration(p: &Params) -> anyhow::Result<Vec<BenchReport>> {
+    #[cfg(feature = "transport-noq")]
+    if p.transport_backend()? == rds_net::Backend::Noq {
+        let mut reports = Vec::new();
+        for graceful in [true, false] {
+            match migration_one(p, graceful).await {
+                Ok(r) => reports.push(r),
+                Err(e) => {
+                    let mut r = failed(Scenario::Migration.name(), p, e);
+                    r.meta.path = failover_mode(graceful).into();
+                    reports.push(r);
+                }
+            }
+        }
+        return Ok(reports);
+    }
+    Ok(vec![skipped(
+        Scenario::Migration.name(),
+        p,
+        "relay-failover",
+        "multi-relay failover requires the owned noq transport (--backend noq)",
+    )])
+}
+
+#[cfg(feature = "transport-noq")]
+fn failover_mode(graceful: bool) -> &'static str {
+    if graceful {
+        "relay-failover-drain"
+    } else {
+        "relay-failover-kill"
+    }
+}
+
+/// One failover lane: two-attachment relay-only world, warmup probes,
+/// identify the forwarding relay by its datagram-counter delta, fail
+/// it, then probe until the selected path lands on the surviving slot.
+/// Recovery latency is fail-start → first successful probe observed on
+/// a different path id.
+#[cfg(feature = "transport-noq")]
+async fn migration_one(p: &Params, graceful: bool) -> anyhow::Result<BenchReport> {
+    /// Upper bound for re-selection on the surviving slot; the relay
+    /// drain grace is 2s, so migration must beat it by a wide margin.
+    const MIGRATION_BUDGET: Duration = Duration::from_secs(10);
+
+    let world = tokio::time::timeout(
+        p.timeout,
+        World::spawn(Path::RelayFailover, rds_net::Backend::Noq),
+    )
+    .await
+    .context("world startup timed out")?
+    .context("spawn world")?;
+    let conn = tokio::time::timeout(
+        p.timeout,
+        rds_cli::connect(&world.client, world.target.clone()),
+    )
+    .await
+    .context("connect timed out")?
+    .context("connect failed")?;
+    for i in 0..5 {
+        rds_cli::ping(&conn, i).await?;
+    }
+
+    // Fail whichever relay slot the client's egress path rides. The two
+    // directions can pick different slots (server counters cannot identify
+    // egress), and `selected` is suppressed while both paths stay
+    // Available — so identify the path by its datagram-counter delta.
+    let marker_seq = unix_ts() + 100;
+    let sent0: std::collections::BTreeMap<u64, u64> = conn
+        .path_stats()
+        .iter()
+        .map(|s| (s.path_id, s.sent))
+        .collect();
+    for i in 0..3 {
+        rds_cli::ping(&conn, marker_seq + i).await?;
+    }
+    let active = conn
+        .path_stats()
+        .iter()
+        .filter(|s| s.via_relay)
+        .max_by_key(|s| s.sent - sent0.get(&s.path_id).copied().unwrap_or(0))
+        .and_then(|s| s.relay_slot)
+        .context("client has no relay path to fail")?;
+    anyhow::ensure!(active < 2, "world attached relays beyond slot 1");
+    let survivor = active ^ 1;
+    let started = Instant::now();
+    let probe = async {
+        let mut failed = 0u64;
+        // Nonce seeds must not be literals (code-scanning `hard-coded
+        // cryptographic value`); derive from the run timestamp.
+        let mut seq = unix_ts();
+        loop {
+            if started.elapsed() >= MIGRATION_BUDGET {
+                anyhow::bail!("selected path never moved off the failed relay slot");
+            }
+            let ok = matches!(
+                tokio::time::timeout(Duration::from_secs(2), rds_cli::ping(&conn, seq)).await,
+                Ok(Ok(_))
+            );
+            seq += 1;
+            if ok {
+                let now = conn.current_path_stats().and_then(|s| s.relay_slot);
+                if now == Some(survivor) {
+                    return anyhow::Ok((started.elapsed(), failed, now));
+                }
+            } else {
+                failed += 1;
+            }
+        }
+    };
+    // drain() only resolves once the grace window ends — run it
+    // concurrently so the probe loop measures in-flight migration.
+    let (fail_res, probe_res) =
+        tokio::join!(world.fail_relay(usize::from(active), graceful), probe);
+    fail_res.context("relay failover op")?;
+    let (recovery, failed_probes, after) = probe_res?;
+
+    // Post-migration steady state on the surviving attachment.
+    let mut samples = Vec::new();
+    for i in 0..5 {
+        let rtt = rds_cli::ping(&conn, unix_ts() + i).await?;
+        samples.push(rtt.as_nanos() as u64);
+    }
+    anyhow::ensure!(
+        conn.close_kind().is_none(),
+        "connection must survive the relay failure"
+    );
+
+    let mut metrics = world.metrics_snapshot(Some(&conn));
+    world.close().await;
+    world
+        .enforce_path_integrity(&metrics, 8)
+        .context("path integrity")?;
+
+    metrics.insert("migration_recovery_ns".into(), recovery.as_nanos() as u64);
+    metrics.insert("migration_failed_probes".into(), failed_probes);
+    metrics.insert("migration_slot_before".into(), u64::from(active));
+    if let Some(slot) = after {
+        metrics.insert("migration_slot_after".into(), u64::from(slot));
+    }
+    for (slot, (fwd, _, bytes)) in world.owned_relay_stats().iter().enumerate() {
+        metrics.insert(format!("relay{slot}_forwarded_datagrams"), *fwd);
+        metrics.insert(format!("relay{slot}_forwarded_bytes"), *bytes);
+    }
+    let mode = failover_mode(graceful);
+    let mut meta = meta(Scenario::Migration.name(), p, mode, None);
+    meta.impairment = None;
+    Ok(BenchReport {
+        meta,
+        rtt: Percentiles::of(&samples),
+        throughput_mib_s: None,
+        attempts: None,
+        metrics,
+        notes: vec![format!(
+            "{mode}: slot {active} failed → resumed {recovery:?} on slot \
+             {survivor}, {failed_probes} probes lost in flight; \
+             post-migration RTT from the surviving slot"
+        )],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

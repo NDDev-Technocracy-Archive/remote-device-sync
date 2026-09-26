@@ -53,7 +53,7 @@ Neither increment closes these product gaps or any wave.
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
-| W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
+| W3.3 | Done on Linux loopback; real-network open | Multiple owned-relay attachments (≤8 slots), slot-scoped synthetic routing, drain-before-death mask, immediate `PeerGone` invalidation, endpoint-scoped watchers; measured drain ~10ms / kill ~120-190ms recovery with 0 lost probes (`docs/reports/noq-relay-failover-20260926.md`). WAN/lossy migration timing remains unqualified. |
 | W3.6 | Partial; validated selection and local child failure isolation | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link route loss and known tunnel closure retire stale relay selection. Mux child send/receive failures are isolated; policy withdraws failed advertisements, excludes failed routes even when last-path close is refused, and closes held connections after all-child loss. Real loopback fixtures preserve open-stream traffic and accept new connections on the surviving child. Policy-observed telemetry exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics, interface/socket recreation, per-service scheduling and physical-network qualification remain open. |
 | W4.4 | Partial; directional service boundaries | Real iroh/noq agents refuse writes with `SyncRead` and reads with `SyncWrite`, permit authorized transfers, and remain usable after refusal/cancellation. A view-only desktop never calls its input sink; failed injection never emits a success ACK. Linux/macOS account isolation, per-path policy, native seat/focus boundaries, consent and concurrent-role qualification remain open. See [receipt](reports/rds-service-scopes-20260926.md). |
 | W5.1/W5.3/W5.5 | Partial; native SSH client and standard PTY | `rds-ssh` uses russh 0.63.3 over pinned managed/direct streams. Explicit host pins, key/agent authentication, PTY/exec acknowledgements, terminal restoration, resize, cancellation and complete exit/output handling have Linux regression coverage and an OpenSSH interop fixture. SSH-specific fixed telemetry names are accepted by Vector; JSON uses a separate private file and terminal console logging pauses during SSH. GDS host/account provisioning, certificates/MFA, native macOS, broker/reattachment and mixed-load/network qualification remain open. See [contract](ssh.md). |
@@ -1767,3 +1767,48 @@ migration predicate (first/no-op/change/move-back).
 Verified: fmt, clippy default + x11 + `transport-noq` lanes, full
 workspace suite green including the new rds-observe/rds-net/rds-agent
 tests.
+
+## 2026-09-26 — warm secondary relays and measured migration (W3.3)
+
+Endpoints attach to up to 8 owned relays (`--owned-relay` repeatable;
+`route` in endpoint settings accepts a string or a list — singular
+legacy values lower to a one-element attachment). Each attachment owns
+a slot; synthetic peer addresses encode it in the third octet
+(`198.19.<slot>.<host>:<port>`), so per-(relay,peer) remotes are
+distinct QUIC paths and the mux routes synthetic destinations to the
+socket owning that slot. Relays are warm secondaries: candidates open
+eagerly under the multipath cap, RTT selection picks a carrier, and a
+dead or draining relay retires only its own slot's paths, candidates
+and advertisements.
+
+Relay health is an endpoint-level `u64` mask: bits 0..8 mark
+unavailable slots, bits 8..16 mark slots that announced `Drain`.
+`Drain` is observable before tunnel death (watch channel, not a
+flag); the endpoint watcher resolves on either signal so shutdown
+cannot park on a drain that never arrives, and a hard failure beats a
+stale drain in the mask. `PeerGone` invalidates the peer's mappings
+immediately instead of letting them age out. Endpoint-scoped watchers
+live on their own task tracker — they share admission/shutdown
+lifecycle but are not path drivers, so `active_path_drivers()` still
+counts only connection work.
+
+`PathStats` gained `relay_slot`, which makes failover tests and
+measurement deterministic: the client's egress slot is identifiable
+without server-side counters (client→agent and agent→client may ride
+different slots) and without relying on `selected`, which is
+suppressed while two paths are Available. The warm-failover e2e and
+the new `migration` bench lane both pin `Transports::RelayOnly` so a
+direct path cannot satisfy the assertion vacuously — an ambiguity the
+first version of the failover test had.
+
+Evidence: `warm_failover` e2e (drain and kill, path integrity
+asserted on the surviving slot); `migration` bench lane reports
+`relay-failover-drain` ~10ms and `relay-failover-kill` ~120-190ms
+recovery, 0 lost probes —
+`docs/reports/noq-relay-failover-20260926.md`. Peer-registry tests
+cover slot-scoped synthetics, collision isolation, pinned leases,
+automatic-lease lifetime and capacity refusal. Config tests cover
+string-or-list routes and the 8-slot bound.
+
+Verified: fmt, clippy default + x11 lanes, full workspace suite
+(`transport-noq`) green; measured report committed.
