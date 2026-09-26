@@ -292,22 +292,34 @@ async fn invalid_or_misapplied_relay_flags_do_not_initialize_state() {
     }
 }
 
-#[cfg(not(feature = "owned-relay"))]
 #[tokio::test]
 async fn unavailable_backend_is_explicit_and_does_not_initialize_state() {
     let scratch = Scratch::new();
-    let error = rejected(
-        &scratch,
-        args(&[
-            "--relay-backend",
-            "noq",
-            "--development-open-relay",
-            "--relay-key-file",
-            &scratch.key(),
-        ]),
-    )
-    .await;
-    assert!(error.contains("backend unavailable"), "{error}");
+    // Probe the relay library, not this package's own feature flag:
+    // workspace feature unification can compile the owned backend into
+    // the spawned binary while `rds-server`'s `owned-relay` flag is off,
+    // and then a valid owned flag set starts a live relay instead of
+    // being rejected. Either way the contract is the same — an explicit
+    // rejection that creates no state.
+    let (values, needle) = if rds_relay::OWNED_BACKEND_COMPILED {
+        (
+            args(&["--relay-backend", "noq"]),
+            "owned relay requires",
+        )
+    } else {
+        (
+            args(&[
+                "--relay-backend",
+                "noq",
+                "--development-open-relay",
+                "--relay-key-file",
+                &scratch.key(),
+            ]),
+            "backend unavailable",
+        )
+    };
+    let error = rejected(&scratch, values).await;
+    assert!(error.contains(needle), "{error}");
 }
 
 #[tokio::test]

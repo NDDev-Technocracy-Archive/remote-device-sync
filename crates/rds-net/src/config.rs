@@ -306,6 +306,23 @@ impl EndpointConfig {
                 "iroh relay origins must be distinct and at most 8",
             ));
         }
+        match self.transports {
+            crate::Transports::All => {}
+            crate::Transports::DirectOnly => {
+                if !self.relays.is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "direct-only transports reject configured relays",
+                    ));
+                }
+            }
+            crate::Transports::RelayOnly => {
+                if backend == Backend::Iroh && self.relays.is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "relay-only transports require at least one relay",
+                    ));
+                }
+            }
+        }
         for url in &self.relays {
             if url.as_str().len() > 512
                 || !matches!(url.scheme(), "http" | "https")
@@ -343,9 +360,22 @@ impl EndpointConfig {
             if backend != Backend::Noq {
                 return Err(ConfigError::Invalid("owned relay requires the noq backend"));
             }
+            if self.transports == crate::Transports::DirectOnly {
+                return Err(ConfigError::Invalid(
+                    "direct-only transports reject an owned relay attachment",
+                ));
+            }
             if relay.addrs.len() != 1 || !relay.addrs.iter().all(|a| matches!(a, crate::TransportAddr::Ip(addr) if addr.port() != 0 && !addr.ip().is_unspecified() && !addr.ip().is_multicast())) {
                 return Err(ConfigError::Invalid("owned relay bootstrap requires exactly one usable direct IP address"));
             }
+        }
+        if self.transports == crate::Transports::RelayOnly
+            && backend == Backend::Noq
+            && self.relay_endpoint.is_none()
+        {
+            return Err(ConfigError::Invalid(
+                "relay-only transports require an owned relay attachment",
+            ));
         }
         Ok(())
     }

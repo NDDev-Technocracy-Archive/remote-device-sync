@@ -119,6 +119,7 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
             client.local_addrs().to_vec(),
             Vec::new(),
             None,
+            true,
         );
         let task = tokio::spawn(async move {
             let _guard = guard;

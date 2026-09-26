@@ -18,6 +18,19 @@ pub use runtime::{
 #[cfg(feature = "owned-relay")]
 pub mod server;
 
+/// Whether the owned QUIC relay backend (`--relay-backend noq`) was
+/// compiled into this build.
+///
+/// Workspace feature unification can enable it on this library while a
+/// depending package's own `owned-relay` flag stays off — for example
+/// `cargo test --workspace` builds `rds-bench`'s dev-dependency edge
+/// (`transport-noq`), which turns the backend on inside the `rds-server`
+/// binary even though `rds-server`'s flag is unset. Tests that spawn
+/// the composed binary must probe this constant rather than their own
+/// `cfg!(feature = "owned-relay")`, which would answer for the wrong
+/// package.
+pub const OWNED_BACKEND_COMPILED: bool = cfg!(feature = "owned-relay");
+
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;

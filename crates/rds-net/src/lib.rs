@@ -81,6 +81,31 @@ pub enum Backend {
     Noq,
 }
 
+/// Which peer-path kinds an endpoint may use.
+///
+/// Both backends run QUIC NAT traversal in-band: endpoints advertise
+/// their own direct addresses to the peer, which can then open direct
+/// paths that were never in the dialed ticket. Bounding transports is
+/// the only hard pin — caps and disabled reports still leave the
+/// in-band exchange open.
+///
+/// - `All` (default): direct UDP plus relay attachment, with traversal.
+/// - `DirectOnly`: no relay transport — iroh clears relay transports;
+///   noq simply never attaches one (`relay_endpoint` must be unset).
+/// - `RelayOnly`: no direct endpoint-to-endpoint paths. iroh clears IP
+///   transports outright; noq still binds its UDP socket (the relay
+///   attachment rides on it) but suppresses direct candidates from
+///   `addr()`, dialing, and in-band advertisement — and never opens
+///   paths to direct addrs the peer advertises.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transports {
+    #[default]
+    All,
+    DirectOnly,
+    RelayOnly,
+}
+
 /// How an endpoint reaches the network.
 #[derive(Debug, Clone)]
 pub struct EndpointConfig {
@@ -103,10 +128,30 @@ pub struct EndpointConfig {
     /// path. Default `true`.
     pub discovery: bool,
     /// Cap on concurrent QUIC multipath paths. `Some(1)` pins every
-    /// connection to its established path — impairment tests use this to
+    /// connection to its handshake path — impairment tests use this to
     /// keep traffic on a proxied link instead of migrating to a
-    /// discovered direct path. `None` uses the backend default.
+    /// discovered clean path. `None` uses the backend default.
+    /// Note: iroh ignores transport-config values below its multipath
+    /// floor (14) and its in-band traversal exchange cannot be capped
+    /// either, so for `Some(1)` the iroh backend additionally installs a
+    /// path selector that never re-selects — the pin holds even after an
+    /// in-band-learned path opens.
     pub max_multipath_paths: Option<u32>,
+    /// QUIC observed-address reports (iroh backend). When false the
+    /// endpoint neither sends nor receives in-band address reports, so
+    /// peers cannot learn each other's reachable addresses through the
+    /// connection itself — required for strict ticket-exact path
+    /// pinning in measurement worlds. Note this covers only the
+    /// observed-address frames; iroh's NAT-traversal candidate exchange
+    /// cannot be disabled through transport config (its floor is 8) —
+    /// `transports` bounds which path kinds can exist at all. `noq`
+    /// honors that bound through its own candidate policy and ignores
+    /// this flag. Default `true`.
+    pub observed_address_reports: bool,
+    /// Peer-path kinds this endpoint may use. Default `All`.
+    /// Measurement worlds set this to the advertised path so traffic
+    /// cannot silently escape onto a kind the report does not claim.
+    pub transports: Transports,
     /// Owned-relay attachment (`noq` backend only): the relay server's
     /// endpoint address. When set, a relay tunnel socket joins the
     /// socket mux and the endpoint advertises it as
@@ -130,6 +175,8 @@ impl Default for EndpointConfig {
             relays: Vec::new(),
             discovery: true,
             max_multipath_paths: None,
+            observed_address_reports: true,
+            transports: Transports::default(),
             #[cfg(feature = "transport-noq")]
             relay_endpoint: None,
             #[cfg(feature = "transport-noq")]

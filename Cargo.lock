@@ -3410,6 +3410,7 @@ dependencies = [
  "rds-discovery",
  "rds-net",
  "rds-observe",
+ "rds-relay",
  "serde",
  "serde_json",
  "tokio",

@@ -29,6 +29,17 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(key);
     }
+    builder = match config.transports {
+        // Hard bound on reachable path kinds: iroh's in-band NAT
+        // traversal (QNT) advertises direct addrs over any connection
+        // upon which the peer can open unadvertised direct paths. Its
+        // transport config cannot disable that exchange (floor of 8),
+        // so the transport itself is removed — escape is then
+        // impossible rather than merely unobserved.
+        crate::Transports::All => builder,
+        crate::Transports::DirectOnly => builder.clear_relay_transports(),
+        crate::Transports::RelayOnly => builder.clear_ip_transports(),
+    };
     // Tuning on top of iroh's multipath-aware defaults:
     // - BBRv3: paced, bufferbloat-resistant — the low-latency choice for
     //   interactive desktop + bulk sync over real WAN paths (upstream
@@ -45,6 +56,22 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
         .send_window(32 * 1024 * 1024);
     if let Some(max_paths) = config.max_multipath_paths {
         transport = transport.max_concurrent_multipath_paths(max_paths);
+        if max_paths == 1 {
+            // iroh floors the multipath cap at 14 and its QNT exchange
+            // cannot be switched off, so a single-path endpoint still
+            // migrates: the in-band advertisement lets the peer open a
+            // path to any reachable addr and the RTT-biased default
+            // selector moves traffic onto it — straight past an impaired
+            // proxy. `PinnedSelector` selects the handshake path once
+            // and keeps returning it, so later paths are never picked
+            // for payload.
+            builder = builder.path_selector(std::sync::Arc::new(PinnedSelector));
+        }
+    }
+    if !config.observed_address_reports {
+        transport = transport
+            .send_observed_address_reports(false)
+            .receive_observed_address_reports(false);
     }
     builder = builder.transport_config(transport.build());
     // iroh manages its own sockets; a single bind address is all it
@@ -54,6 +81,44 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     }
     let endpoint = builder.alpns(config.alpns).bind().await?;
     Ok(endpoint)
+}
+
+/// Path selector that pins each remote to the path its handshake
+/// established. This is how `max_multipath_paths = 1` pins an iroh
+/// connection: the transport config cannot express it (multipath floor
+/// is 14; QNT cannot be disabled below 8 advertised addresses), and
+/// merely returning an empty selection leaves every opened path usable
+/// at the QUIC layer. Actively re-selecting the handshake path lets
+/// iroh mark the rest as backup.
+///
+/// The first `select` call for a remote runs on its first path event —
+/// only the dialed path can exist then (in-band-learned paths require
+/// an established connection), so the first candidate is the handshake
+/// path. Afterwards `ctx.current()` is that path and is kept.
+#[derive(Debug)]
+struct PinnedSelector;
+
+impl iroh::endpoint::transports::PathSelector for PinnedSelector {
+    fn select(
+        &self,
+        ctx: &iroh::endpoint::transports::PathSelectionContext<'_>,
+    ) -> iroh::endpoint::transports::PathSelection {
+        let mut selection = iroh::endpoint::transports::PathSelection::none();
+        for path in ctx.paths() {
+            // Once a path is selected, keep selecting it while it
+            // exists. If it is gone, select nothing — the connection
+            // stalls rather than silently escaping onto a clean path.
+            let keep = match ctx.current() {
+                Some(current) => path.network_path() == current,
+                None => true,
+            };
+            if keep {
+                selection.set(&path);
+                break;
+            }
+        }
+        selection
+    }
 }
 
 // Compatibility path; persistent identity is shared by every backend.
