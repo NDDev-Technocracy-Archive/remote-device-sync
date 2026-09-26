@@ -78,6 +78,16 @@ pub enum Scenario {
     /// and hard-kill lanes, recovery latency onto the surviving slot.
     /// noq-only.
     Migration,
+    /// Verified transfer over a rate-capped impaired path; measured
+    /// goodput must land inside the declared band of the cap, proving
+    /// the measurement reports the imposed ceiling rather than a
+    /// fabricated or unbounded figure (W0.2).
+    Calibration,
+    /// Path-loss mid-transfer: verified upload starts clean, then 40%
+    /// loss + delay are imposed on the live sockets; the receipt must
+    /// still verify and the drop counter must prove loss engaged
+    /// (W0.3). noq only — needs runtime-tunable socket impairment.
+    Recovery,
     /// All of the above.
     All,
 }
@@ -93,6 +103,8 @@ pub const LANES: &[Scenario] = &[
     Scenario::Impaired,
     Scenario::ResolveConnect,
     Scenario::Migration,
+    Scenario::Calibration,
+    Scenario::Recovery,
 ];
 
 impl Scenario {
@@ -107,6 +119,8 @@ impl Scenario {
             Scenario::Impaired => "impaired",
             Scenario::ResolveConnect => "resolve-connect",
             Scenario::Migration => "migration",
+            Scenario::Calibration => "calibration",
+            Scenario::Recovery => "recovery",
             Scenario::All => "all",
         }
     }
@@ -188,6 +202,8 @@ async fn run_one(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
         }
         Scenario::ResolveConnect => resolve_connect(p).await.map(|r| vec![r]),
         Scenario::Migration => migration(p).await,
+        Scenario::Calibration => calibration(p).await.map(|r| vec![r]),
+        Scenario::Recovery => recovery(p).await.map(|r| vec![r]),
         Scenario::All => unreachable!("handled in run"),
     }
 }
@@ -295,6 +311,7 @@ async fn ping(
     let world = World::spawn(path, p.transport_backend()?)
         .await
         .context("spawn world")?;
+    let t_connect = Instant::now();
     let conn = tokio::time::timeout(
         p.timeout,
         rds_cli::connect(&world.client, world.target.clone()),
@@ -302,6 +319,7 @@ async fn ping(
     .await
     .context("connect timed out")?
     .context("connect failed")?;
+    let connect_elapsed = t_connect.elapsed();
     // Warmup probes are excluded: the first streams pay one-time setup
     // that would otherwise pollute the tail.
     for i in 0..5 {
@@ -312,7 +330,8 @@ async fn ping(
         let rtt = rds_cli::ping(&conn, 1000 + i as u64).await?;
         samples.push(rtt.as_nanos() as u64);
     }
-    let metrics = world.metrics_snapshot(Some(&conn));
+    let mut metrics = world.metrics_snapshot(Some(&conn));
+    metrics.insert("phase_connect_ns".into(), connect_elapsed.as_nanos() as u64);
     world.close().await;
     world
         .enforce_path_integrity(&metrics, p.iterations as u64 * 8)
@@ -329,6 +348,16 @@ async fn ping(
 
 /// `transfer_mib` MiB over one forwarded stream, ending at a verified receipt.
 async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
+    let (report, _measurement) = transfer_on(p, Path::Direct).await?;
+    Ok(report)
+}
+
+/// Shared transfer body: `path` selects the ticket shape so calibration
+/// lanes can impose a known impairment.
+async fn transfer_on(
+    p: &Params,
+    path: Path,
+) -> anyhow::Result<(BenchReport, crate::transfer::Measurement)> {
     let total = p
         .transfer_mib
         .checked_mul(1024 * 1024)
@@ -337,27 +366,44 @@ async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
     anyhow::ensure!(!p.timeout.is_zero(), "transfer timeout must be positive");
     let world = tokio::time::timeout(
         p.timeout,
-        World::spawn(Path::Direct, p.transport_backend()?),
+        World::spawn(path, p.transport_backend()?),
     )
     .await
     .context("world startup timed out")?
     .context("spawn world")?;
     // A single deadline covers connect, OpenTcp, upload, receipt and EOF.
     let outcome = tokio::time::timeout(p.timeout, async {
+        let t_connect = Instant::now();
         let conn = rds_cli::connect(&world.client, world.target.clone())
             .await
             .context("connect failed")?;
+        let connect_elapsed = t_connect.elapsed();
         let (host, port) = world.transfer_target();
+        let t_open = Instant::now();
         let (mut send, mut recv) = rds_cli::open_tcp(&conn, &host, port).await?;
+        let open_elapsed = t_open.elapsed();
         let measurement = crate::transfer::send_verified(&mut send, &mut recv, total).await?;
-        anyhow::Ok((measurement, world.metrics_snapshot(Some(&conn))))
+        anyhow::Ok((
+            measurement,
+            connect_elapsed,
+            open_elapsed,
+            world.metrics_snapshot(Some(&conn)),
+        ))
     })
     .await
     .context("transfer operation timed out")
     .and_then(|result| result);
     let cleanup = tokio::time::timeout(Duration::from_secs(5), world.close()).await;
-    let (measurement, mut metrics) = outcome?;
+    let (measurement, connect_elapsed, open_elapsed, mut metrics) = outcome?;
     cleanup.context("world shutdown timed out")?;
+    // Phase split (W0.2): connect, service open/authorize, payload
+    // completion — measured separately so regression attribution does
+    // not need re-derivation from a single aggregate.
+    metrics.insert("phase_connect_ns".into(), connect_elapsed.as_nanos() as u64);
+    metrics.insert(
+        "phase_service_open_ns".into(),
+        open_elapsed.as_nanos() as u64,
+    );
     let mib_s = measurement.bytes as f64 / (1024.0 * 1024.0) / measurement.elapsed.as_secs_f64();
     metrics.insert("transfer_verified_bytes".into(), measurement.bytes);
     metrics.insert(
@@ -375,14 +421,25 @@ async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
     world
         .enforce_path_integrity(&metrics, total)
         .context("path integrity")?;
-    Ok(BenchReport {
-        meta: meta(Scenario::Transfer.name(), p, world.path.label(), None),
-        rtt: None,
-        throughput_mib_s: Some(mib_s),
-        attempts: None,
-        metrics,
-        notes,
-    })
+    let scenario_name = match world.path {
+        Path::Direct => Scenario::Transfer.name(),
+        _ => Scenario::Calibration.name(),
+    };
+    let impairment = match world.path {
+        Path::DirectImpaired(i) => Some(i),
+        _ => None,
+    };
+    Ok((
+        BenchReport {
+            meta: meta(scenario_name, p, world.path.label(), impairment),
+            rtt: None,
+            throughput_mib_s: Some(mib_s),
+            attempts: None,
+            metrics,
+            notes,
+        },
+        measurement,
+    ))
 }
 
 /// Cold `rds ssh <name>`: the estate-signed registry maps a device
@@ -518,6 +575,9 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     anyhow::ensure!(published, "agent record never reached the directory");
 
     let mut samples = Vec::with_capacity(p.iterations);
+    let mut resolve_ns = Vec::with_capacity(p.iterations);
+    let mut connect_ns = Vec::with_capacity(p.iterations);
+    let mut first_byte_ns = Vec::with_capacity(p.iterations);
     let mut ok = 0u64;
     // Client endpoints are per-iteration; accumulate their registries
     // so the report keeps total connection/path counters (G7).
@@ -527,16 +587,29 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         // cold, matching a new `rds ssh` invocation.
         let client_ep = bind_endpoint(endpoint_config(client_key.clone())?).await?;
         let timed = tokio::time::timeout(p.timeout, async {
-            let t0 = Instant::now();
+            let t_resolve = Instant::now();
             let addr = rds_net::resolve_target(Some(directory.clone()), "bench-agent").await?;
+            let d_resolve = t_resolve.elapsed();
+            let t_connect = Instant::now();
             let conn = rds_cli::connect(&client_ep, addr).await?;
+            let d_connect = t_connect.elapsed();
+            let t_first = Instant::now();
             rds_cli::ping(&conn, 1).await?;
+            let d_first = t_first.elapsed();
             client_ep.metrics().sampler(conn.clone()).sample();
-            Ok::<_, anyhow::Error>(t0.elapsed())
+            Ok::<_, anyhow::Error>((
+                d_resolve,
+                d_connect,
+                d_first,
+                t_resolve.elapsed(),
+            ))
         })
         .await;
-        if let Ok(Ok(d)) = timed {
-            samples.push(d.as_nanos() as u64);
+        if let Ok(Ok((d_resolve, d_connect, d_first, d_total))) = timed {
+            resolve_ns.push(d_resolve.as_nanos() as u64);
+            connect_ns.push(d_connect.as_nanos() as u64);
+            first_byte_ns.push(d_first.as_nanos() as u64);
+            samples.push(d_total.as_nanos() as u64);
             ok += 1;
         }
         for (k, v) in client_ep.metrics().snapshot() {
@@ -556,6 +629,19 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     let mut metrics = client_metrics;
     for (k, v) in agent.endpoint.metrics().snapshot() {
         metrics.insert(format!("agent_{k}"), v);
+    }
+    // Phase split (W0.2): resolve, connect, first-service-byte as
+    // separate percentile series so regression attribution does not
+    // need re-derivation from the aggregate `rtt` field.
+    for (phase, samples) in [
+        ("resolve", &resolve_ns),
+        ("connect", &connect_ns),
+        ("first_byte", &first_byte_ns),
+    ] {
+        if let Some(px) = Percentiles::of(samples) {
+            metrics.insert(format!("phase_{phase}_p50_ns"), px.p50_ns);
+            metrics.insert(format!("phase_{phase}_p95_ns"), px.p95_ns);
+        }
     }
     Ok(BenchReport {
         meta: meta("resolve-connect", p, "discovered", None),
@@ -622,6 +708,7 @@ async fn migration_one(p: &Params, graceful: bool) -> anyhow::Result<BenchReport
     .await
     .context("world startup timed out")?
     .context("spawn world")?;
+    let t_connect = Instant::now();
     let conn = tokio::time::timeout(
         p.timeout,
         rds_cli::connect(&world.client, world.target.clone()),
@@ -629,6 +716,7 @@ async fn migration_one(p: &Params, graceful: bool) -> anyhow::Result<BenchReport
     .await
     .context("connect timed out")?
     .context("connect failed")?;
+    let connect_elapsed = t_connect.elapsed();
     for i in 0..5 {
         rds_cli::ping(&conn, i).await?;
     }
@@ -713,6 +801,7 @@ async fn migration_one(p: &Params, graceful: bool) -> anyhow::Result<BenchReport
         metrics.insert(format!("relay{slot}_forwarded_bytes"), *bytes);
     }
     let mode = failover_mode(graceful);
+    metrics.insert("phase_connect_ns".into(), connect_elapsed.as_nanos() as u64);
     let mut meta = meta(Scenario::Migration.name(), p, mode, None);
     meta.impairment = None;
     Ok(BenchReport {
@@ -727,6 +816,155 @@ async fn migration_one(p: &Params, graceful: bool) -> anyhow::Result<BenchReport
              post-migration RTT from the surviving slot"
         )],
     })
+}
+
+/// Known-rate calibration (W0.2): transfer over a direct path capped
+/// at `--rate-mbps` (default 10 Mbps — deliberately below the loopback
+/// transport ceiling so the cap is the binding constraint; on hardware
+/// too slow to reach it the lane correctly reports miscalibration).
+/// Measured verified goodput must land within `[cap*0.4, cap*1.2]`
+/// bytes/s: below the floor means the transport under-performs the
+/// imposed ceiling, above the cap means the limiter or the measurement
+/// is fabricating throughput.
+async fn calibration(p: &Params) -> anyhow::Result<BenchReport> {
+    let rate_mbps = p.impairment.rate_mbps.unwrap_or(10.0);
+    let imp = Impairment {
+        rate_mbps: Some(rate_mbps),
+        ..Impairment::clean()
+    };
+    let (mut report, measurement) = transfer_on(p, Path::DirectImpaired(imp)).await?;
+    let expected_bps = rate_mbps * 1e6 / 8.0;
+    let measured_bps = measurement.bytes as f64 / measurement.elapsed.as_secs_f64();
+    let ratio = measured_bps / expected_bps;
+    report.metrics.insert(
+        "calibration_expected_bytes_s".into(),
+        expected_bps as u64,
+    );
+    report.metrics.insert(
+        "calibration_measured_bytes_s".into(),
+        measured_bps as u64,
+    );
+    report
+        .metrics
+        .insert("calibration_ratio_milli".into(), (ratio * 1000.0) as u64);
+    if p.impairment.rate_mbps.is_none() {
+        report
+            .notes
+            .push("no --rate-mbps given; calibrated at the built-in 10 Mbps".into());
+    }
+    anyhow::ensure!(
+        (0.4..=1.2).contains(&ratio),
+        "calibration out of band: measured {measured_bps:.0} B/s vs cap {expected_bps:.0} B/s (ratio {ratio:.3}; expected 0.4..=1.2)"
+    );
+    Ok(report)
+}
+
+/// Path-loss mid-transfer (W0.3): the upload starts on a clean
+/// socket-impaired path; once a third of the payload has crossed the
+/// impairment device, 40% loss + 25ms delay are imposed on both
+/// endpoints' live sockets. The verified receipt must still arrive —
+/// QUIC retransmission is the recovery mechanism — and the drop
+/// counter must prove the loss actually engaged (not a vacuous pass).
+/// noq only: iroh's impairment is a static proxy leg created at spawn.
+async fn recovery(p: &Params) -> anyhow::Result<BenchReport> {
+    #[cfg(not(feature = "transport-noq"))]
+    {
+        let _ = p;
+        anyhow::bail!("recovery requires --features transport-noq (socket-level live impairment)");
+    }
+    #[cfg(feature = "transport-noq")]
+    {
+        if p.backend != "noq" {
+            return Ok(skipped(
+                "recovery",
+                p,
+                "direct-impaired",
+                "live socket impairment is a noq-path device; iroh impairment is a static spawn-time proxy",
+            ));
+        }
+        let total = p
+            .transfer_mib
+            .checked_mul(1024 * 1024)
+            .context("transfer size overflow")?;
+        anyhow::ensure!(total > 0, "transfer size must be positive");
+        let world = World::spawn(
+            Path::DirectImpaired(Impairment::clean()),
+            p.transport_backend()?,
+        )
+        .await
+        .context("spawn world")?;
+        let outcome = tokio::time::timeout(p.timeout, async {
+            let conn = rds_cli::connect(&world.client, world.target.clone())
+                .await
+                .context("connect failed")?;
+            let (host, port) = world.transfer_target();
+            let (mut send, mut recv) = rds_cli::open_tcp(&conn, &host, port).await?;
+            let upload = tokio::spawn(async move {
+                crate::transfer::send_verified(&mut send, &mut recv, total).await
+            });
+            // Impose loss once the transfer is in flight: trigger at
+            // ~1/3 of payload crossing the impairment devices, with a
+            // ceiling poll so a slow ramp cannot starve the trigger.
+            let trigger = total / 3;
+            loop {
+                if world.impair_totals().bytes >= trigger {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let imposed = Impairment {
+                loss: 0.4,
+                delay_ms: 25,
+                ..Impairment::clean()
+            };
+            world.set_socket_impairment(imposed);
+            let measurement = upload.await.context("upload task")??;
+            anyhow::Ok((measurement, world.metrics_snapshot(Some(&conn))))
+        })
+        .await
+        .context("recovery operation timed out")
+        .and_then(|result| result);
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), world.close()).await;
+        let (measurement, mut metrics) = outcome?;
+        cleanup.context("world shutdown timed out")?;
+        let dropped = metrics
+            .get("bench_impair_dropped_datagrams")
+            .copied()
+            .unwrap_or(0);
+        anyhow::ensure!(
+            dropped > 0,
+            "imposed loss never engaged — no datagrams dropped; scenario would pass vacuously"
+        );
+        metrics.insert("transfer_verified_bytes".into(), measurement.bytes);
+        metrics.insert(
+            "transfer_completion_ns".into(),
+            measurement.elapsed.as_nanos().try_into().unwrap_or(u64::MAX),
+        );
+        metrics.insert("recovery_loss_milli".into(), 400);
+        metrics.insert("recovery_delay_ms".into(), 25);
+        Ok(BenchReport {
+            meta: meta(
+                "recovery",
+                p,
+                world.path.label(),
+                Some(Impairment {
+                    loss: 0.4,
+                    delay_ms: 25,
+                    ..Impairment::clean()
+                }),
+            ),
+            rtt: None,
+            throughput_mib_s: Some(
+                measurement.bytes as f64 / (1024.0 * 1024.0)
+                    / measurement.elapsed.as_secs_f64(),
+            ),
+            attempts: None,
+            metrics,
+            notes: vec![format!(
+                "path loss imposed mid-transfer at ~1/3 payload                  (loss=0.4, delay=25ms on both endpoint sockets);                  verified receipt still arrived; {dropped} datagrams                  dropped under the imposed loss"
+            )],
+        })
+    }
 }
 
 #[cfg(test)]

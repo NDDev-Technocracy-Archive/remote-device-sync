@@ -30,7 +30,10 @@ use super::{Counters, Impairment, Pipe, ProxyStats, Queued, Rng};
 /// Shared enqueue side: one seeded schedule per socket, so all senders
 /// draw loss/jitter from a single deterministic stream.
 struct Schedule {
-    cfg: Impairment,
+    /// Live impairment config — [`StatsHandle::set_impairment`] swaps it
+    /// mid-run so recovery scenarios can impose loss on an established
+    /// connection rather than only from t=0.
+    cfg: Arc<Mutex<Impairment>>,
     rng: Mutex<Rng>,
     seq: AtomicU64,
 }
@@ -52,17 +55,26 @@ pub struct ImpairingSocket {
 /// Live counters for an [`ImpairingSocket`]; cloneable so it survives
 /// boxing the socket into the endpoint.
 #[derive(Clone)]
-pub struct StatsHandle(Arc<Counters>);
+pub struct StatsHandle {
+    counters: Arc<Counters>,
+    cfg: Arc<Mutex<Impairment>>,
+}
 
 impl StatsHandle {
     /// Datagrams actually released vs dropped so far — the proof a test
     /// needs that impairment engaged (`dropped > 0` when `loss > 0`).
     pub fn get(&self) -> ProxyStats {
         ProxyStats {
-            forwarded: self.0.forwarded.load(Ordering::Relaxed),
-            dropped: self.0.dropped.load(Ordering::Relaxed),
-            bytes: self.0.bytes.load(Ordering::Relaxed),
+            forwarded: self.counters.forwarded.load(Ordering::Relaxed),
+            dropped: self.counters.dropped.load(Ordering::Relaxed),
+            bytes: self.counters.bytes.load(Ordering::Relaxed),
         }
+    }
+
+    /// Replace the live impairment. Takes effect on the next datagram —
+    /// already-queued packets keep their sampled fate.
+    pub fn set_impairment(&self, cfg: Impairment) {
+        *self.cfg.lock().unwrap() = cfg;
     }
 }
 
@@ -72,22 +84,26 @@ impl ImpairingSocket {
     pub fn wrap(inner: Box<dyn AsyncUdpSocket>, cfg: Impairment) -> (Self, StatsHandle) {
         let pipe = Arc::new(Pipe::new());
         let counters = Arc::new(Counters::default());
+        let schedule = Arc::new(Schedule {
+            cfg: Arc::new(Mutex::new(cfg)),
+            rng: Mutex::new(Rng(cfg.seed)),
+            seq: AtomicU64::new(0),
+        });
         let pump = tokio::spawn(dispatch(
             inner.create_sender(),
             pipe.clone(),
-            cfg,
+            schedule.clone(),
             counters.clone(),
         ));
-        let stats = StatsHandle(counters.clone());
+        let stats = StatsHandle {
+            counters: counters.clone(),
+            cfg: schedule.cfg.clone(),
+        };
         (
             Self {
                 inner,
                 pipe,
-                schedule: Arc::new(Schedule {
-                    cfg,
-                    rng: Mutex::new(Rng(cfg.seed)),
-                    seq: AtomicU64::new(0),
-                }),
+                schedule,
                 counters,
                 pump,
             },
@@ -162,20 +178,21 @@ impl UdpSender for ImpairingSender {
         _cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
         let sched = &self.schedule;
+        let cfg = *sched.cfg.lock().unwrap();
         let mut rng = sched.rng.lock().unwrap();
-        if sched.cfg.loss > 0.0 && rng.next_f64() < sched.cfg.loss {
+        if cfg.loss > 0.0 && rng.next_f64() < cfg.loss {
             self.counters.dropped.fetch_add(1, Ordering::Relaxed);
             return Poll::Ready(Ok(()));
         }
-        let extra = if sched.cfg.jitter_ms > 0 {
-            Duration::from_millis((rng.next_f64() * sched.cfg.jitter_ms as f64) as u64)
+        let extra = if cfg.jitter_ms > 0 {
+            Duration::from_millis((rng.next_f64() * cfg.jitter_ms as f64) as u64)
         } else {
             Duration::ZERO
         };
         drop(rng);
         let seq = sched.seq.fetch_add(1, Ordering::Relaxed);
         self.pipe.heap.lock().unwrap().push(Queued {
-            release: Instant::now() + Duration::from_millis(sched.cfg.delay_ms) + extra,
+            release: Instant::now() + Duration::from_millis(cfg.delay_ms) + extra,
             seq,
             dest: transmit.destination,
             data: transmit.contents.to_vec(),
@@ -196,7 +213,7 @@ impl UdpSender for ImpairingSender {
 async fn dispatch(
     sender: Pin<Box<dyn UdpSender>>,
     pipe: Arc<Pipe>,
-    cfg: Impairment,
+    schedule: Arc<Schedule>,
     counters: Arc<Counters>,
 ) {
     let mut sender = sender;
@@ -221,6 +238,7 @@ async fn dispatch(
             }
             continue;
         };
+        let cfg = *schedule.cfg.lock().unwrap();
         if let Some(rate) = cfg.rate_mbps {
             let bytes_per_sec = rate * 1_000_000.0 / 8.0;
             let cost = Duration::from_secs_f64(q.data.len() as f64 / bytes_per_sec);

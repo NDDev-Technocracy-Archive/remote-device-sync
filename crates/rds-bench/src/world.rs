@@ -92,6 +92,17 @@ impl World {
         ("127.0.0.1".into(), self.transfer_port)
     }
 
+    /// Replace the live impairment on every socket-level device in this
+    /// world (noq endpoints). Mid-run changes take effect on the next
+    /// datagram — the mechanism behind recovery-path scenarios (W0.3).
+    /// iroh proxy legs are created static and are unaffected.
+    #[cfg(feature = "transport-noq")]
+    pub fn set_socket_impairment(&self, cfg: Impairment) {
+        for h in &self.socket_stats {
+            h.set_impairment(cfg);
+        }
+    }
+
     /// Graceful endpoint shutdown; scenarios call this before the
     /// report so drop-aborts don't pollute logs with ungraceful-close
     /// errors.
