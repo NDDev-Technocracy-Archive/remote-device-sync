@@ -463,10 +463,9 @@ once at its first actionable position.
    reset it); dialer's `Dialed` guard instruments every command under
    the session span. Stage timings ride `observe(Operation::…)`; `peer`
    stays span-local and never serializes.
-3. **W3.3 — warm secondary relay and measured migration** *(next)*. The owned
-   relay has Drain/PeerGone/grace traffic verified; add a second
-   attachment, measured active-session migration under interruption
-   budget, and the bench lane that proves it.
+3. ~~W3.3 — warm secondary relay and measured migration~~ **done
+   (multi-attachment slots, drain/death mask, e2e drain+kill failover,
+   `migration` bench lane: drain ~10ms, kill ~120-190ms, 0 lost probes).**
 4. **W0 closures.** W0.2 phase timings (connect/auth/first-byte/payload)
    and known-rate calibration; W0.3 recovery-path scenarios
    (kill/rebind/path-loss mid-transfer); W0.4 historical report
