@@ -192,7 +192,10 @@ impl Decoder for H264Decoder {
         // I420→RGBA in one SIMD pass (AVX2 on x86-64), then swap R↔B
         // in place for the RawFrame BGRA contract — the swap vectorizes
         // trivially and avoids a separate 3-byte-per-pixel scratch.
-        let mut bgra = vec![0u8; w * h * 4];
+        let length = crate::frame_bytes(w, h).ok_or_else(|| {
+            DesktopError::Decode("decoded dimensions exceed receive limit".into())
+        })?;
+        let mut bgra = vec![0u8; length];
         yuv.write_rgba8(&mut bgra);
         for px in bgra.as_chunks_mut::<4>().0.iter_mut() {
             px.swap(0, 2);

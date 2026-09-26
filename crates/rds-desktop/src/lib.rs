@@ -48,6 +48,16 @@ pub struct RawFrame {
     pub data: Bytes,
 }
 
+/// Local software receive limit: up to 8K pixels, no side above 8192.
+/// Check before allocating BGRA output; native codec internal memory is separate.
+pub(crate) fn frame_bytes(width: usize, height: usize) -> Option<usize> {
+    if width == 0 || height == 0 || width > 8192 || height > 8192 {
+        return None;
+    }
+    let pixels = width.checked_mul(height)?;
+    (pixels <= 7680 * 4320).then_some(pixels)?.checked_mul(4)
+}
+
 /// One encoded frame ready for the wire.
 #[derive(Debug)]
 pub struct EncodedFrame {
