@@ -84,7 +84,7 @@ below; `README.md` must link this file.
 |---|---|---|---|
 | measure:handshake | implemented | loopback agent | `docs/reports/` |
 | measure:ping | implemented | loopback agent | `docs/reports/` |
-| measure:transfer | implemented | loopback agent + TCP discard target | `docs/reports/` |
+| measure:transfer-receiver-ack-v1 | implemented | loopback agent + verified-receipt TCP target | `docs/reports/` |
 | measure:multiconnect | implemented | impairment profile | `docs/reports/` |
 | measure:relay-fallback | implemented | local iroh relay | `docs/reports/` |
 | measure:impaired | implemented | impairment profile | `docs/reports/` |
