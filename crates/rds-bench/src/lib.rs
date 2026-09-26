@@ -11,6 +11,7 @@
 
 pub mod capacity;
 pub mod impair;
+pub mod receipt;
 pub mod report;
 pub mod scenario;
 mod transfer;

@@ -33,6 +33,7 @@ Neither increment closes these product gaps or any wave.
 | W0.2 | Partial; receiver completion barrier | Versioned transfer goodput waits for exact received byte count, BLAKE3 digest and response EOF under one operation deadline. A missing-receipt regression failed before the fix; corrupt/truncated/reordered payloads, invalid receipts, delayed reception and real iroh/noq forwarded-TCP checks cover the boundary. Known-rate calibration, connect/auth/service phase timings and topology/load qualification remain open; see [contract](benchmark-transfer.md). |
 | W0.4 | Partial; comparator faults refused | Absent metrics, nonfinite values, failed scenarios, insufficient samples and backend/impairment profile mismatches now refuse comparison (seed excluded from profile). `checkpoint.sh` registers `r0-evidence` with a CLI negative-fixture battery; the c1 noq suite gains its missing `transport-noq` feature flag. Gate invocation and re-qualification of historical reports remain open; see section below. |
 | W0.5 | Partial; versioned matrix landed | `docs/capability-matrix.md` v1 records implemented/experimental/stub/unavailable per capability with runtime prerequisites separate from state. Tests enforce every `ServiceKind` variant and every `rds-bench` lane name has a matrix row, the state vocabulary is closed, placeholders name what is missing and README links the matrix. Live `rds info` advertisement ↔ matrix agreement beyond enum coverage, per-report capability tagging and release-gate enforcement remain open. |
+| W0.6 | Partial; hash-chained receipt schema landed | `docs/receipts/rds-receipts.jsonl` is append-only JSONL, one receipt per gate/report: full commit SHA, dirty flag, bench-binary and Cargo.lock digests, toolchain channel, features, OS/arch, topology class, repetitions/failures/skips, budgets and cited-report digests — no host identifiers. `prev_hash`/`hash` chaining rejects tampered, reordered or mid-deleted lines with the offending line number; `rds-bench receipt`/`validate-receipts` are the writer/reader and `write_checkpoint` now records every gate run. Historical receipt backfill, `--report` coverage of bench JSONs inside gates and release-gate consumption remain open. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
@@ -1576,3 +1577,32 @@ share one ordering source.
 Remaining W0.5 scope: live `rds info` advertisement ↔ matrix agreement
 beyond enum coverage, per-report capability tagging, release-gate
 enforcement, and qualification of the experimental rows themselves.
+
+## 2026-09-26 — append-only receipt log (W0.6 partial)
+
+`rds-bench` gains a receipt writer and validator. `rds-bench receipt`
+appends one JSON object per line to `docs/receipts/rds-receipts.jsonl`
+recording full commit SHA, dirty flag, digests of the bench binary and
+`Cargo.lock`, the pinned toolchain channel, enabled features, OS/arch,
+topology class, repetitions/failures/skips, explicit budgets, and the
+blake3 digest of every cited report. No hostnames, addresses or user
+paths are recorded — receipts are reproducible without private host
+identifiers.
+
+Every line carries `prev_hash` (the previous line's `hash`, `genesis`
+for the first) and `hash` over the canonical JSON. `rds-bench
+validate-receipts` replays the whole log: a tampered field, a swapped
+line order or a mid-log deletion fails with the offending line number.
+Unit tests cover the roundtrip, tamper, reorder, bad-status and
+bad-budgets refusals; the writer only ever appends, so history is
+linked rather than overwritten.
+
+`write_checkpoint` now appends a `kind:gate` receipt — citing the
+checkpoint markdown by digest — immediately after writing it, so every
+future gate run leaves machine-checkable evidence. Receipts only record
+executed gates; a failed gate appends nothing and validates nothing.
+
+Remaining W0.6 scope: citing each gate's bench JSONs individually,
+backfilling receipts for historical reports where their inputs are
+still known, per-report capability tagging (W0.5 link) and release-gate
+consumption of the log.

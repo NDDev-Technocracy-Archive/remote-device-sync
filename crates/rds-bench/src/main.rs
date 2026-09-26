@@ -1,7 +1,7 @@
 //! `rds-bench` — run transport scenarios, emit JSON + markdown reports,
 //! or compare two suite runs for the reproducibility gate.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -83,6 +83,47 @@ enum Cmd {
         /// Write a markdown report here.
         #[arg(long)]
         md: Option<PathBuf>,
+    },
+    /// Append a machine-readable receipt to the hash-chained log.
+    Receipt {
+        /// Receipt kind, e.g. "gate" or "bench-suite".
+        #[arg(long)]
+        kind: String,
+        /// What was exercised: gate id, lane set, artifact.
+        #[arg(long)]
+        subject: String,
+        /// pass | fail | partial.
+        #[arg(long)]
+        status: String,
+        /// Topology class: loopback | lan | wan | relay-only | ...
+        #[arg(long, default_value = "loopback")]
+        topology: String,
+        /// Cargo features enabled for the run (repeatable).
+        #[arg(long = "feature")]
+        features: Vec<String>,
+        #[arg(long)]
+        repetitions: Option<u32>,
+        #[arg(long)]
+        failures: Option<u32>,
+        #[arg(long)]
+        skips: Option<u32>,
+        /// Budgets as a JSON object, e.g. '{"timeout_s":15}'.
+        #[arg(long)]
+        budgets: Option<String>,
+        /// Report file to digest-cite (repeatable).
+        #[arg(long = "report")]
+        reports: Vec<PathBuf>,
+        /// Free-text note, e.g. the gate verdict.
+        #[arg(long)]
+        note: Option<String>,
+        /// Receipt log path.
+        #[arg(long, default_value = rds_bench::receipt::DEFAULT_LOG)]
+        log: PathBuf,
+    },
+    /// Validate a receipt log's schema and hash chain.
+    ValidateReceipts {
+        #[arg(long, default_value = rds_bench::receipt::DEFAULT_LOG)]
+        log: PathBuf,
     },
     /// Compare two suite JSONs; exit 1 on drift or a comparability fault.
     Compare {
@@ -188,6 +229,55 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             if failed > 0 {
                 anyhow::bail!("{failed} scenario(s) failed — see report");
             }
+            Ok(())
+        }
+        Cmd::Receipt {
+            kind,
+            subject,
+            status,
+            topology,
+            features,
+            repetitions,
+            failures,
+            skips,
+            budgets,
+            reports,
+            note,
+            log,
+        } => {
+            let budgets = budgets
+                .map(|s| {
+                    serde_json::from_str::<serde_json::Value>(&s)
+                        .context("--budgets must be a JSON object")
+                })
+                .transpose()?;
+            let refs = reports
+                .iter()
+                .map(|p| rds_bench::receipt::report_ref(p))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let env = rds_bench::receipt::capture_env(Path::new("."), features)?;
+            let hash = rds_bench::receipt::append(
+                &log,
+                &env,
+                rds_bench::receipt::Input {
+                    kind,
+                    subject,
+                    status,
+                    topology,
+                    repetitions,
+                    failures,
+                    skips,
+                    budgets,
+                    reports: refs,
+                    note,
+                },
+            )?;
+            println!("receipt appended to {log:?}: {hash}");
+            Ok(())
+        }
+        Cmd::ValidateReceipts { log } => {
+            let n = rds_bench::receipt::validate(&log)?;
+            println!("{log:?}: {n} receipt(s), hash chain intact");
             Ok(())
         }
         Cmd::Compare {
