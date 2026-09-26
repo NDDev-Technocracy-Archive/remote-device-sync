@@ -1667,3 +1667,26 @@ relay → direct upgrade) are not yet lanes; iroh cannot run
 relay-impaired at all (TCP relay leg); the iroh pin is selection-level —
 an opened-but-unused learned path still exists and is disclosed via
 `paths_seen`; real-network and macOS qualification remain open.
+
+Gate evidence 2026-09-26 (commit f6c780b): `scripts/checkpoint.sh c0`
+and `c1` both pass — c0's iroh suite is reproducible (p95 ±15%) with the
+direct-impaired lane offering 947 datagrams against 612 sent, and c1's
+noq suite carries relay-impaired at 293 ms p50 (offered 2347, sent 337)
+plus `resolve-connect` 100/100 through the owned relay. The c1 gate
+itself needed one fix: its bench line ran `rds-bench` without
+`--features rds-bench/transport-noq`, so noq scenarios could never pass —
+added (the clippy line already had it). Receipts: two hash-chained
+`gate` records appended to `docs/receipts/rds-receipts.jsonl` and
+verified intact.
+
+A latent feature-unification bug surfaced in the same sweep:
+`rds-desktop`/`rds-sync` dev-depend on `rds-bench` with `transport-noq`,
+which enables `rds-relay/owned-relay` workspace-wide under
+`cargo test --workspace`. The `rds-server` binary then *has* the owned
+backend while its own `owned-relay` flag is off — and a shared test that
+spawned `--relay-backend noq` expecting "backend unavailable" instead
+started a live relay and hit the child-exit timeout (deterministic, not
+a flake: it failed only in workspace runs). Tests now probe
+`rds_relay::OWNED_BACKEND_COMPILED`, which answers for the compiled
+library rather than the including package's flag; the rejection contract
+(explicit refusal, no state) is exercised either way.

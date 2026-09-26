@@ -107,7 +107,7 @@ c1)
         || fail "turmoil sim"
 
     note "noq bench suite"
-    cargo run -q -p rds-bench --features transport-noq -- run --scenario all --backend noq \
+    cargo run -q -p rds-bench --features rds-bench/transport-noq -- run --scenario all --backend noq \
         --json "$REPORTS/bench-${TS}-noq.json" --md "$REPORTS/bench-${TS}-noq.md" \
         || fail "noq bench suite"
 
