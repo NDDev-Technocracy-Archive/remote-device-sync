@@ -167,7 +167,11 @@ feature-gated X11 capture/H.264/headless-decode pipeline, discovery and grant
 primitives, and transport metrics. The desktop viewer and native macOS/Wayland
 backends remain incomplete. Known correctness and security blockers are
 tracked in the audit above; this is not a production-readiness claim.
-Public API and wire protocol are not stable.
+Public API and wire protocol are not stable. What each part actually
+claims — implemented, experimental, stub or unavailable, with runtime
+prerequisites — is versioned in
+[docs/capability-matrix.md](docs/capability-matrix.md); tests keep the
+matrix, `rds info` services and bench report names in agreement.
 
 ## License
 
