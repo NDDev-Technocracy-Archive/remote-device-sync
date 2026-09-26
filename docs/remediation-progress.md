@@ -29,6 +29,7 @@ Neither increment closes these product gaps or any wave.
 | Task | State | Evidence / remaining scope |
 |---|---|---|
 | W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08 has failing-before actual-client Drain/drop regressions and passing framing/grace checks. R09 has failing-before direct/relay candidate regressions and passing family/cancellation checks. Desktop body cancellation still needs its owning fixes/tests. |
+| W0.4 | Partial; comparator faults refused | Absent metrics, nonfinite values, failed scenarios, insufficient samples and backend/impairment profile mismatches now refuse comparison (seed excluded from profile). `checkpoint.sh` registers `r0-evidence` with a CLI negative-fixture battery; the c1 noq suite gains its missing `transport-noq` feature flag. Gate invocation and re-qualification of historical reports remain open; see section below. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
@@ -1485,3 +1486,33 @@ See [the scope and validation receipt](reports/rds-managed-sync-20260926.md).
 This is a reviewed increment, not closure of W2/W8 or product acceptance. Viewer
 manager APIs, directory synchronization, platform/installed migration, disk-job
 qualification and the remaining remediation gates stay open.
+
+## 2026-09-26 — comparator strictness and r0-evidence gate (W0.4 partial)
+
+`rds-bench compare` refused only missing scenarios and numeric drift before;
+a metric present on one side but absent on the other, a failed scenario,
+a backend or impairment-profile mismatch, a nonfinite value or a single-sample
+percentile all compared silently. Comparison now returns a `fault:*` refusal
+for each of those, matched before any number is weighed; the impairment seed
+is deliberately outside the profile so different drop schedules of the same
+conditions still compare. `--min-samples` bounds percentile claims (default 3;
+fewer cannot support one). Nonfinite values are additionally refused at JSON
+parse — serde_json rejects `NaN`, and the comparator check protects library
+callers. Unit tests cover every refusal plus the equal-profile clean pair;
+CLI negative fixtures exercise the same paths end to end.
+
+`scripts/checkpoint.sh` gains the registered `r0-evidence` gate (the first
+remediation gate): fmt/clippy/test, the rds-bench suite and a generated
+negative-fixture battery whose every entry must make `compare` exit 1. The
+c1 noq suite line also gained the `--features transport-noq` flag it always
+needed — `--backend noq` fails closed without the compiled backend, so the
+gate previously could not produce its noq suite at all. Other `r*` gates stay
+unregistered until their waves introduce their checks. W0.4 remains partial:
+the comparator now enforces its contract, but gate invocation and historical
+report re-qualification under the strict rules are open, and the remaining
+W0 tasks (relay bench world, capability matrix, receipt schema) are unstarted.
+
+Local validation: `cargo fmt --check`, `cargo clippy -p rds-bench
+--all-targets -- -D warnings`, `cargo test -p rds-bench` (10 tests), the
+fixture battery through the built CLI (7 refused, 1 accepted) and
+`bash -n scripts/checkpoint.sh`.

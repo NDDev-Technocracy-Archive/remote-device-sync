@@ -98,7 +98,7 @@ c1)
         || fail "turmoil sim"
 
     note "noq bench suite"
-    cargo run -q -p rds-bench -- run --scenario all --backend noq \
+    cargo run -q -p rds-bench --features transport-noq -- run --scenario all --backend noq \
         --json "$REPORTS/bench-${TS}-noq.json" --md "$REPORTS/bench-${TS}-noq.md" \
         || fail "noq bench suite"
 
@@ -334,10 +334,67 @@ c8)
   this gate covers the artifact layer; ssh-across-NAT, soak and
   desktop-smoke rows are attested there"
     ;;
+r0-evidence)
+    note "gate r0-evidence — remediation measurement truthfulness (W0)"
+    green_bars
+
+    note "bench self-tests (comparator, verified transfer, world)"
+    cargo test -p rds-bench || fail "rds-bench tests"
+
+    note "comparator negative fixtures — every refusal must exit 1"
+    FX="$(mktemp -d)"
+    python3 - "$FX" <<'PY' || fail "fixture generation"
+import json, sys, os
+d = sys.argv[1]
+def rep(scenario="ping", backend="iroh", path="direct", count=50,
+        p95=50_000_000, tp=None, attempts=None, notes=None, imp=None):
+    return {"meta": {"scenario": scenario, "backend": backend, "path": path,
+                     "impairment": imp, "unix_ts": 0, "git": "fixture"},
+            "rtt": {"count": count, "min_ns": 1, "p50_ns": p95 // 2,
+                    "p95_ns": p95, "p99_ns": p95, "max_ns": p95,
+                    "mean_ns": p95 / 2},
+            "throughput_mib_s": tp, "attempts": attempts,
+            "metrics": {}, "notes": notes or []}
+def suite(name, reports):
+    json.dump({"tool": "fixture", "unix_ts": 0, "git": "fixture",
+               "reports": reports}, open(os.path.join(d, name), "w"))
+suite("a.json", [rep()])
+suite("same.json", [rep(p95=52_000_000)])
+suite("missing.json", [rep(scenario="other")])
+suite("backend.json", [rep(backend="noq")])
+suite("impairment.json", [rep(imp={"loss": 0.05, "delay_ms": 50,
+                                   "jitter_ms": 30, "rate_mbps": None,
+                                   "seed": 2})])
+suite("failed.json", [rep(attempts=[9, 50])])
+suite("thin.json", [rep(count=1)])
+suite("nan.json", [rep(tp=float("nan"))])
+suite("absent.json", [{**rep(), "throughput_mib_s": None,
+                       "rtt": None}])
+PY
+    for bad in missing backend impairment failed thin nan absent; do
+        if cargo run -q -p rds-bench -- compare "$FX/a.json" "$FX/$bad.json" >/dev/null 2>&1; then
+            fail "comparator accepted $bad fixture"
+        fi
+    done
+    cargo run -q -p rds-bench -- compare "$FX/a.json" "$FX/same.json" >/dev/null \
+        || fail "comparator rejected a clean fixture pair"
+    rm -rf "$FX"
+
+    write_checkpoint "r0-evidence" "pending review" \
+        "- fmt/clippy/test: PASS
+- rds-bench unit tests (comparator faults, verified transfer, world): PASS
+- comparator CLI negative fixtures refuse: missing scenario, backend /
+  impairment mismatch, failed scenario, single-sample, NaN, absent
+  metric: PASS
+- comparator CLI accepts an equal-profile clean pair: PASS
+- W0.1 regression inventory: see remediation-progress.md table
+- W0.3 owned-relay bench world + W0.5 capability matrix + W0.6 receipt
+  schema: pending their own increments — this gate does not close W0"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0 c1 c2 c3 c4 c5 c6 c7 c8
+registered gates: c0 c1 c2 c3 c4 c5 c6 c7 c8 r0-evidence
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

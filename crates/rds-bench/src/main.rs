@@ -8,11 +8,17 @@ use clap::{Parser, Subcommand};
 use rds_bench::impair::Impairment;
 use rds_bench::report::{BenchSuite, CompareOpts, compare, unix_ts};
 
-fn compare_opts(tol: f64, latency_floor_ms: f64, throughput_floor: f64) -> CompareOpts {
+fn compare_opts(
+    tol: f64,
+    latency_floor_ms: f64,
+    throughput_floor: f64,
+    min_samples: usize,
+) -> CompareOpts {
     CompareOpts {
         tol,
         latency_floor_ms,
         throughput_floor,
+        min_samples,
         ..CompareOpts::default()
     }
 }
@@ -78,7 +84,7 @@ enum Cmd {
         #[arg(long)]
         md: Option<PathBuf>,
     },
-    /// Compare two suite JSONs; exit 1 if drift exceeds tolerance.
+    /// Compare two suite JSONs; exit 1 on drift or a comparability fault.
     Compare {
         a: PathBuf,
         b: PathBuf,
@@ -91,6 +97,9 @@ enum Cmd {
         /// Absolute throughput floor in MiB/s.
         #[arg(long, default_value_t = 3.0)]
         throughput_floor: f64,
+        /// Minimum samples per side before percentile claims count.
+        #[arg(long, default_value_t = 3)]
+        min_samples: usize,
     },
 }
 
@@ -187,6 +196,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             tol,
             latency_floor_ms,
             throughput_floor,
+            min_samples,
         } => {
             let load = |p: &PathBuf| -> anyhow::Result<BenchSuite> {
                 let text = std::fs::read_to_string(p).with_context(|| format!("read {p:?}"))?;
@@ -194,7 +204,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             let a = load(&a)?;
             let b = load(&b)?;
-            let opts = compare_opts(tol, latency_floor_ms, throughput_floor);
+            let opts = compare_opts(tol, latency_floor_ms, throughput_floor, min_samples);
             let drift = compare(&a, &b, &opts);
             if drift.is_empty() {
                 println!(
@@ -206,8 +216,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 return Ok(());
             }
             for d in &drift {
-                if d.ratio.is_nan() {
+                if d.metric == "scenario" {
                     println!("MISSING scenario in second suite: {}", d.scenario);
+                } else if d.ratio.is_nan() {
+                    println!("FAULT {}: {}", d.scenario, d.metric);
                 } else {
                     println!(
                         "DRIFT {} {}: {:.2} → {:.2} (×{:.2})",
@@ -215,7 +227,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     );
                 }
             }
-            anyhow::bail!("{} drift(s) beyond tolerance", drift.len())
+            anyhow::bail!("{} drift(s)/fault(s)", drift.len())
         }
     }
 }

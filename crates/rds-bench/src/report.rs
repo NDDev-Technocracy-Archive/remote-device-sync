@@ -146,14 +146,17 @@ impl BenchSuite {
     }
 }
 
-/// One metric that drifted beyond tolerance between two suite runs.
+/// One metric that drifted beyond tolerance between two suite runs,
+/// or a comparability violation that refuses the pairing.
 #[derive(Debug)]
 pub struct Drift {
     pub scenario: String,
+    /// `p50`, `p95`, `throughput`, or a `fault:*` comparability violation.
     pub metric: &'static str,
     pub a: f64,
     pub b: f64,
-    /// `b/a` for ratio metrics; NaN when the scenario is missing in `b`.
+    /// `b/a` for ratio metrics; NaN for comparability faults and a
+    /// scenario missing in `b`.
     pub ratio: f64,
 }
 
@@ -165,6 +168,13 @@ pub struct Drift {
 /// regression — wrong path, lost pacing — moves it by an order of
 /// magnitude. The absolute floor covers sub-10 ms timer noise.
 /// Latencies are compared in ms, throughput in MiB/s.
+///
+/// Comparison is refused rather than silent when a scenario is absent,
+/// failed, recorded under a different backend/impairment profile, has
+/// fewer than `min_samples` per side, or carries absent/nonfinite
+/// metrics. The impairment seed is not part of the profile: the same
+/// conditions under a different drop schedule are exactly what a
+/// reproducibility gate exists to exercise.
 pub struct CompareOpts {
     /// Relative tolerance for the median, e.g. 0.15 = ±15%.
     pub tol: f64,
@@ -175,6 +185,9 @@ pub struct CompareOpts {
     pub latency_floor_ms: f64,
     /// Absolute throughput floor in MiB/s.
     pub throughput_floor: f64,
+    /// Minimum samples per side before percentile claims count
+    /// (default 3: fewer cannot support a percentile statement).
+    pub min_samples: usize,
 }
 
 impl Default for CompareOpts {
@@ -184,6 +197,7 @@ impl Default for CompareOpts {
             tail_factor: 3.0,
             latency_floor_ms: 10.0,
             throughput_floor: 3.0,
+            min_samples: 3,
         }
     }
 }
@@ -194,9 +208,40 @@ impl CompareOpts {
     }
 }
 
+fn fault(scenario: &str, metric: &'static str) -> Drift {
+    Drift {
+        scenario: scenario.into(),
+        metric,
+        a: 0.0,
+        b: 0.0,
+        ratio: f64::NAN,
+    }
+}
+
+/// Same measurement conditions: impairment parameters must agree
+/// exactly, except `seed`, which legitimately varies between runs of
+/// the same profile.
+fn same_profile(a: &BenchReport, b: &BenchReport) -> bool {
+    match (&a.meta.impairment, &b.meta.impairment) {
+        (None, None) => true,
+        (Some(x), Some(y)) => {
+            x.loss == y.loss
+                && x.delay_ms == y.delay_ms
+                && x.jitter_ms == y.jitter_ms
+                && x.rate_mbps == y.rate_mbps
+        }
+        _ => false,
+    }
+}
+
+fn scenario_failed(r: &BenchReport) -> bool {
+    r.notes.iter().any(|n| n.starts_with("SCENARIO FAILED"))
+        || matches!(r.attempts, Some((ok, total)) if ok < total)
+}
+
 /// Compare p50, p95 and throughput per scenario across two suites.
-/// A scenario missing from `b` surfaces as a NaN drift — absence is a
-/// failure, not silence.
+/// Every refusal or drift is returned — absence, failure, profile
+/// mismatch, thin samples and nonfinite values are faults, not silence.
 pub fn compare(a: &BenchSuite, b: &BenchSuite, opts: &CompareOpts) -> Vec<Drift> {
     let mut out = Vec::new();
     for ra in &a.reports {
@@ -205,15 +250,27 @@ pub fn compare(a: &BenchSuite, b: &BenchSuite, opts: &CompareOpts) -> Vec<Drift>
             .iter()
             .find(|rb| rb.meta.scenario == ra.meta.scenario && rb.meta.path == ra.meta.path)
         else {
-            out.push(Drift {
-                scenario: ra.meta.scenario.clone(),
-                metric: "scenario",
-                a: 0.0,
-                b: 0.0,
-                ratio: f64::NAN,
-            });
+            out.push(fault(&ra.meta.scenario, "scenario"));
             continue;
         };
+        if ra.meta.backend != rb.meta.backend {
+            out.push(fault(&ra.meta.scenario, "fault:backend-mismatch"));
+            continue;
+        }
+        if !same_profile(ra, rb) {
+            out.push(fault(&ra.meta.scenario, "fault:impairment-mismatch"));
+            continue;
+        }
+        if scenario_failed(ra) || scenario_failed(rb) {
+            out.push(fault(&ra.meta.scenario, "fault:scenario-failed"));
+            continue;
+        }
+        if let (Some(pa), Some(pb)) = (&ra.rtt, &rb.rtt)
+            && pa.count.min(pb.count) < opts.min_samples
+        {
+            out.push(fault(&ra.meta.scenario, "fault:insufficient-samples"));
+            continue;
+        }
         for (metric, fa, fb, tol, floor) in [
             (
                 "p50",
@@ -237,16 +294,24 @@ pub fn compare(a: &BenchSuite, b: &BenchSuite, opts: &CompareOpts) -> Vec<Drift>
                 opts.throughput_floor,
             ),
         ] {
-            if let (Some(va), Some(vb)) = (fa, fb)
-                && opts.drifts(va, vb, tol, floor)
-            {
-                out.push(Drift {
-                    scenario: ra.meta.scenario.clone(),
-                    metric,
-                    a: va,
-                    b: vb,
-                    ratio: vb / va.max(f64::EPSILON),
-                });
+            match (fa, fb) {
+                (Some(_), None) | (None, Some(_)) => {
+                    out.push(fault(&ra.meta.scenario, "fault:metric-absent"));
+                }
+                (Some(va), Some(vb)) => {
+                    if !va.is_finite() || !vb.is_finite() {
+                        out.push(fault(&ra.meta.scenario, "fault:nonfinite"));
+                    } else if opts.drifts(va, vb, tol, floor) {
+                        out.push(Drift {
+                            scenario: ra.meta.scenario.clone(),
+                            metric,
+                            a: va,
+                            b: vb,
+                            ratio: vb / va.max(f64::EPSILON),
+                        });
+                    }
+                }
+                (None, None) => {}
             }
         }
     }
@@ -381,5 +446,148 @@ mod tests {
             reports: vec![report("ping", 12_000_000)],
         };
         assert!(compare(&a, &b, &CompareOpts::default()).is_empty());
+    }
+
+    fn suite_with(mut r: BenchReport) -> BenchSuite {
+        r.meta.scenario = "s".into();
+        BenchSuite {
+            tool: "t".into(),
+            unix_ts: 0,
+            git: None,
+            reports: vec![r],
+        }
+    }
+
+    fn rtt_report(count: usize, p95_ns: u64) -> BenchReport {
+        BenchReport {
+            meta: BenchMeta {
+                scenario: "s".into(),
+                backend: "iroh".into(),
+                path: "direct".into(),
+                impairment: None,
+                unix_ts: 0,
+                git: None,
+            },
+            rtt: Some(Percentiles {
+                count,
+                min_ns: 1,
+                p50_ns: p95_ns / 2,
+                p95_ns,
+                p99_ns: p95_ns,
+                max_ns: p95_ns,
+                mean_ns: p95_ns as f64 / 2.0,
+            }),
+            throughput_mib_s: None,
+            attempts: None,
+            metrics: Default::default(),
+            notes: vec![],
+        }
+    }
+
+    fn has_fault(drift: &[Drift], metric: &str) -> bool {
+        drift.iter().any(|d| d.metric == metric)
+    }
+
+    #[test]
+    fn compare_rejects_every_incomparable_profile() {
+        let a = suite_with(rtt_report(50, 50_000_000));
+        for mutate in [
+            (|r: &mut BenchReport| r.meta.backend = "noq".into()) as fn(&mut BenchReport),
+            |r| {
+                r.meta.impairment = Some(Impairment {
+                    loss: 0.05,
+                    ..Impairment::default()
+                })
+            },
+        ] {
+            let mut b = suite_with(rtt_report(50, 50_000_000));
+            mutate(&mut b.reports[0]);
+            let drift = compare(&a, &b, &CompareOpts::default());
+            assert!(
+                has_fault(&drift, "fault:backend-mismatch")
+                    || has_fault(&drift, "fault:impairment-mismatch"),
+                "profile change must refuse comparison: {drift:?}"
+            );
+        }
+        // Same impairment but a different seed is the same profile.
+        let mut seeded = rtt_report(50, 50_000_000);
+        seeded.meta.impairment = Some(Impairment {
+            loss: 0.05,
+            seed: 1,
+            ..Impairment::default()
+        });
+        let mut reseeded = rtt_report(50, 50_000_000);
+        reseeded.meta.impairment = Some(Impairment {
+            loss: 0.05,
+            seed: 2,
+            ..Impairment::default()
+        });
+        assert!(
+            compare(
+                &suite_with(seeded),
+                &suite_with(reseeded),
+                &CompareOpts::default()
+            )
+            .is_empty(),
+            "seed differs within one impairment profile: not a fault"
+        );
+    }
+
+    #[test]
+    fn compare_rejects_failed_thin_and_nonfinite_reports() {
+        let a = suite_with(rtt_report(50, 50_000_000));
+
+        let mut failed = suite_with(rtt_report(50, 50_000_000));
+        failed.reports[0].attempts = Some((9, 50));
+        assert!(has_fault(
+            &compare(&a, &failed, &CompareOpts::default()),
+            "fault:scenario-failed"
+        ));
+
+        let mut noted = suite_with(rtt_report(50, 50_000_000));
+        noted.reports[0].notes.push("SCENARIO FAILED: x".into());
+        assert!(has_fault(
+            &compare(&a, &noted, &CompareOpts::default()),
+            "fault:scenario-failed"
+        ));
+
+        let thin = suite_with(rtt_report(2, 50_000_000));
+        assert!(has_fault(
+            &compare(&a, &thin, &CompareOpts::default()),
+            "fault:insufficient-samples"
+        ));
+
+        let mut nan = suite_with(rtt_report(50, 50_000_000));
+        nan.reports[0].throughput_mib_s = Some(f64::NAN);
+        let mut a_tp = suite_with(rtt_report(50, 50_000_000));
+        a_tp.reports[0].throughput_mib_s = Some(40.0);
+        assert!(has_fault(
+            &compare(&a_tp, &nan, &CompareOpts::default()),
+            "fault:nonfinite"
+        ));
+    }
+
+    #[test]
+    fn compare_rejects_metrics_present_on_one_side_only() {
+        let mut ra = rtt_report(50, 50_000_000);
+        ra.throughput_mib_s = Some(40.0);
+        let rb = rtt_report(50, 50_000_000);
+        let drift = compare(
+            &suite_with(ra.clone()),
+            &suite_with(rb),
+            &CompareOpts::default(),
+        );
+        assert!(has_fault(&drift, "fault:metric-absent"));
+
+        // Symmetric absence on both sides is not a fault.
+        let clean = suite_with(rtt_report(50, 50_000_000));
+        assert!(
+            compare(
+                &clean,
+                &suite_with(rtt_report(50, 52_000_000)),
+                &CompareOpts::default()
+            )
+            .is_empty()
+        );
     }
 }
