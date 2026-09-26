@@ -14,6 +14,7 @@ transport-noq = ["rds-net/transport-noq", "dep:noq"]
 [dependencies]
 rds-observe.workspace = true
 anyhow.workspace = true
+blake3.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
 iroh-relay = { workspace = true, features = ["server"] }

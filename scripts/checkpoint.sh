@@ -51,6 +51,15 @@ ${extra}
 - [ ] security/unsafe review done for new code paths
 EOF
     note "wrote $REPORTS/checkpoint-${gate}.md"
+
+    note "append hash-chained machine receipt (docs/receipts/)"
+    cargo run -q -p rds-bench -- receipt \
+        --kind gate --subject "$gate" --status pass --topology loopback \
+        --report "$REPORTS/checkpoint-${gate}.md" \
+        --note "verdict: $verdict" \
+        || fail "receipt append"
+    cargo run -q -p rds-bench -- validate-receipts \
+        || fail "receipt log validation"
 }
 
 case "$GATE" in
