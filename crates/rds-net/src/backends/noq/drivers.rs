@@ -22,6 +22,7 @@ impl Drivers {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         &self,
         conn: &noq::Connection,
@@ -30,6 +31,7 @@ impl Drivers {
         candidates: Vec<std::net::SocketAddr>,
         peer_lease: Option<super::relay::PeerLease>,
         relay: Option<super::relay::RelayHandle>,
+        allow_direct: bool,
     ) -> anyhow::Result<Arc<super::telemetry::Telemetry>> {
         let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
         if self.tasks.is_closed() {
@@ -63,6 +65,7 @@ impl Drivers {
             local_addrs,
             candidates,
             relay,
+            allow_direct,
         );
         self.tasks.spawn(async move {
             // Streams may outlive the Connection facade. The weak policy

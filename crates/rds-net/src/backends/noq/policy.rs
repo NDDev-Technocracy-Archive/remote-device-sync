@@ -170,6 +170,7 @@ pub fn initiate_traversal_round(conn: &noq::Connection, metrics: &crate::metrics
 /// event streams ending. Only the completed handshake's PathId::ZERO is seeded;
 /// other paths become eligible on Established, never merely on path creation.
 /// The caller must subscribe before opening additional paths or starting QNT.
+#[allow(clippy::too_many_arguments)]
 pub async fn connection_driver(
     conn: noq::WeakConnectionHandle,
     qnt: noq::NatTraversalUpdates,
@@ -178,6 +179,7 @@ pub async fn connection_driver(
     local_addrs: Vec<SocketAddr>,
     initial_candidates: Vec<SocketAddr>,
     relay: Option<super::relay::RelayHandle>,
+    allow_direct: bool,
 ) {
     let Some(telemetry) = conn.upgrade().map(|c| super::telemetry::Telemetry::new(&c)) else {
         return;
@@ -195,6 +197,7 @@ pub async fn connection_driver(
         local_addrs,
         initial_candidates,
         relay,
+        allow_direct,
     )
     .await;
 }
@@ -205,6 +208,7 @@ pub(super) struct Observer {
     pub transport: Option<super::socket::Health>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn connection_driver_observed(
     conn: noq::WeakConnectionHandle,
     mut qnt: noq::NatTraversalUpdates,
@@ -213,6 +217,7 @@ pub(super) async fn connection_driver_observed(
     local_addrs: Vec<SocketAddr>,
     initial_candidates: Vec<SocketAddr>,
     relay: Option<super::relay::RelayHandle>,
+    allow_direct: bool,
 ) {
     use tokio_stream::StreamExt;
     let Observer {
@@ -246,14 +251,18 @@ pub(super) async fn connection_driver_observed(
     let mut selected: Option<noq::PathId> = None;
 
     let mut pending = Pending::default();
+    // `Transports::RelayOnly` endpoints admit only synthetic relay
+    // candidates — direct addrs the peer advertises in-band can never
+    // become paths, regardless of what the ticket or QNT carried.
+    let admit = |address: SocketAddr| allow_direct || super::relay::is_synthetic(address);
     for address in initial_candidates {
-        if supports_candidate(&local_addrs, address) {
+        if admit(address) && supports_candidate(&local_addrs, address) {
             pending.offer(address, Origin::Ticket, Instant::now());
         }
     }
     // Subscriptions were created by the caller before this snapshot. Reconcile
     // addresses learned during TLS as well as later broadcast updates.
-    reconcile_candidates(&conn, &local_addrs, &mut pending);
+    reconcile_candidates(&conn, &local_addrs, &mut pending, allow_direct);
 
     let mut qnt_open = true;
     let mut events_open = true;
@@ -272,7 +281,7 @@ pub(super) async fn connection_driver_observed(
             _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {},
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
-                    if supports_candidate(&local_addrs, addr) {
+                    if admit(addr) && supports_candidate(&local_addrs, addr) {
                         pending.offer(addr, Origin::Advertisement, Instant::now());
                     }
                 }
@@ -282,7 +291,7 @@ pub(super) async fn connection_driver_observed(
                 }
                 Some(Err(lagged)) => {
                     tracing::warn!("QNT update stream lagged by {}", lagged.0);
-                    reconcile_candidates(&conn, &local_addrs, &mut pending);
+                    reconcile_candidates(&conn, &local_addrs, &mut pending, allow_direct);
                 }
                 None => qnt_open = false,
             },
@@ -382,14 +391,16 @@ fn reconcile_candidates(
     conn: &noq::WeakConnectionHandle,
     local_addrs: &[SocketAddr],
     pending: &mut Pending,
+    allow_direct: bool,
 ) {
     if let Some(owner) = conn.upgrade()
         && let Ok(addresses) = owner.get_remote_nat_traversal_addresses()
     {
         pending.reconcile(
-            addresses
-                .into_iter()
-                .filter(|addr| supports_candidate(local_addrs, *addr)),
+            addresses.into_iter().filter(|addr| {
+                (allow_direct || super::relay::is_synthetic(*addr))
+                    && supports_candidate(local_addrs, *addr)
+            }),
             Instant::now(),
         );
     }

@@ -8,8 +8,8 @@ description = "Benchmark and checkpoint harness for rds: scenario runner, UDP im
 [features]
 default = []
 ## Owned transport backend for `--backend noq` runs (WS1) plus the
-## socket-level impairment socket used by tests.
-transport-noq = ["rds-net/transport-noq", "dep:noq"]
+## socket-level impairment socket and the owned relay used by tests.
+transport-noq = ["rds-net/transport-noq", "dep:noq", "dep:rds-relay"]
 
 [dependencies]
 rds-observe.workspace = true
@@ -20,6 +20,7 @@ ed25519-dalek.workspace = true
 iroh-relay = { workspace = true, features = ["server"] }
 noq = { workspace = true, optional = true }
 rds-agent.workspace = true
+rds-relay = { workspace = true, optional = true, features = ["owned-relay"] }
 rds-cli.workspace = true
 rds-discovery.workspace = true
 rds-net.workspace = true

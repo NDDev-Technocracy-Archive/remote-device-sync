@@ -241,7 +241,10 @@ impl RelaySocket {
 
         // Helper endpoint on a plain UDP socket — no mux, no relay
         // recursion. Same key → same EndpointId, so the relay maps this
-        // connection to our real identity.
+        // connection to our real identity. The attachment is pinned to
+        // the single dialed path: the configured bootstrap address is
+        // the contract, so no in-band candidate exchange may move the
+        // tunnel onto an unadvertised (unimpaired) address.
         let our_id = key.public();
         let runtime = Arc::new(noq::TokioRuntime);
         let udp = std::net::UdpSocket::bind(bind)?;
@@ -251,6 +254,7 @@ impl RelaySocket {
             crate::EndpointConfig {
                 secret_key: Some(key),
                 alpns: vec![relay::RELAY_ALPN.to_vec()],
+                max_multipath_paths: Some(1),
                 ..Default::default()
             },
             socket,

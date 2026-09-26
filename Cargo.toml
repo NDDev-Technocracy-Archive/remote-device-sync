@@ -47,7 +47,11 @@ clap = { version = "4", features = ["derive"] }
 data-encoding = "2"
 ed25519-dalek = "3"
 fastcdc = "5"
-iroh = "1"
+# unstable-custom-transports is visibility-only: it exposes the path
+# selector API so `max_multipath_paths = 1` can actually pin an iroh
+# connection to its handshake path (iroh floors the transport-config cap
+# at 14 and QNT cannot be disabled through it either).
+iroh = { version = "1", features = ["unstable-custom-transports"] }
 iroh-relay = "1"
 noq = "1"
 noq-proto = "1"

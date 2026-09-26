@@ -53,7 +53,10 @@ async fn invalid_host_inputs_are_rejected_before_identity_or_catalog_creation() 
         };
         // Valid owned-relay flags ensure a host input error is caught before
         // the persistent relay identity is initialized as well as the catalog.
-        if cfg!(feature = "owned-relay") {
+        // Probe the compiled relay library — feature unification can put the
+        // owned backend into the spawned binary while this package's flag is
+        // off.
+        if rds_relay::OWNED_BACKEND_COMPILED {
             values.extend(args(&[
                 "--relay-backend",
                 "noq",

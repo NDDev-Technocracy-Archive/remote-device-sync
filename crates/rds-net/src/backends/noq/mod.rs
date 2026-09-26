@@ -230,6 +230,8 @@ async fn bind_socket(
         metrics: crate::metrics::Registry::default(),
         drivers: Arc::new(drivers::Drivers::new(transport_health.clone())),
         transport_health,
+        transports: config.transports,
+        pinned: config.max_multipath_paths == Some(1),
     })
 }
 
@@ -289,6 +291,12 @@ pub struct Endpoint {
     metrics: crate::metrics::Registry,
     drivers: Arc<drivers::Drivers>,
     transport_health: Option<socket::Health>,
+    /// Peer-path kinds this endpoint may use (`EndpointConfig::transports`).
+    transports: crate::Transports,
+    /// Single-path pinning (`max_multipath_paths == Some(1)`): nothing
+    /// beyond the established path can open, so in-band candidate
+    /// exchange is suppressed rather than sprayed pointlessly.
+    pinned: bool,
 }
 
 impl fmt::Debug for Endpoint {
@@ -337,17 +345,20 @@ impl Endpoint {
     /// Advertised address: our identity plus the direct IP candidates we
     /// know about, plus the home relay when one is attached. Observed
     /// external addresses join this set once the candidate pipeline
-    /// tracks them.
+    /// tracks them. A relay-only endpoint advertises no direct addrs —
+    /// `addr()` is the advertised surface, not the bound-socket list.
     pub fn addr(&self) -> EndpointAddr {
         let mut addrs = std::collections::BTreeSet::new();
-        for local in &self.local_addrs {
-            if !relay::is_synthetic(*local)
-                && self
-                    .transport_health
-                    .as_ref()
-                    .is_none_or(|health| health.bound_available(*local))
-            {
-                addrs.extend(advertised_addrs(*local));
+        if self.transports != crate::Transports::RelayOnly {
+            for local in &self.local_addrs {
+                if !relay::is_synthetic(*local)
+                    && self
+                        .transport_health
+                        .as_ref()
+                        .is_none_or(|health| health.bound_available(*local))
+                {
+                    addrs.extend(advertised_addrs(*local));
+                }
             }
         }
         if let Some(handle) = &self.relay
@@ -384,7 +395,13 @@ impl Endpoint {
             .as_ref()
             .map(socket::Health::live_addrs)
             .unwrap_or_else(|| self.local_addrs.clone());
-        let candidates = policy::dial_candidates(&target, &local);
+        // A relay-only endpoint never dials direct candidates — even if a
+        // ticket lists them, the bound transports are the contract.
+        let candidates = if self.transports == crate::Transports::RelayOnly {
+            Vec::new()
+        } else {
+            policy::dial_candidates(&target, &local)
+        };
         // A relayed path is usable when the peer's advertised relay is
         // the one we are attached to; it becomes the synthetic remote.
         // Reserve before dialing; cancellation releases to bounded grace.
@@ -435,20 +452,25 @@ impl Endpoint {
     pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
         let accept = self.inner.accept();
         let mut our_addrs = self.advertised_socket_addrs();
-        if self
-            .relay
-            .as_ref()
-            .is_some_and(relay::RelayHandle::is_available)
+        // The synthetic relay address is worth advertising only when the
+        // peer could actually open a second path to it.
+        if !self.pinned
+            && self
+                .relay
+                .as_ref()
+                .is_some_and(relay::RelayHandle::is_available)
         {
             our_addrs.push(relay::synthetic_for(&self.id));
         }
         let relay = self.relay.clone();
         let metrics = self.metrics.clone();
         let drivers = self.drivers.clone();
+        let allow_direct = self.transports != crate::Transports::RelayOnly;
+        let pinned = self.pinned;
         async move {
-            accept
-                .await
-                .map(|i| Incoming::with_drivers(i, our_addrs, relay, metrics, drivers))
+            accept.await.map(|i| {
+                Incoming::with_drivers(i, our_addrs, relay, metrics, drivers, allow_direct, pinned)
+            })
         }
     }
 
@@ -472,8 +494,13 @@ impl Endpoint {
     }
 
     /// Direct addresses we can dial from, resolved per bound socket.
-    /// Synthetic relay-mapped locals are never real candidates.
+    /// Synthetic relay-mapped locals are never real candidates; a
+    /// relay-only endpoint advertises no direct addresses, and a
+    /// single-path endpoint has no use for in-band exchange at all.
     fn advertised_socket_addrs(&self) -> Vec<SocketAddr> {
+        if self.transports == crate::Transports::RelayOnly || self.pinned {
+            return Vec::new();
+        }
         self.local_addrs
             .iter()
             .filter(|l| {
@@ -505,7 +532,8 @@ impl Endpoint {
         peer_lease: Option<relay::PeerLease>,
     ) -> anyhow::Result<Arc<telemetry::Telemetry>> {
         let mut ours = self.advertised_socket_addrs();
-        if peer_lease.is_some()
+        if !self.pinned
+            && peer_lease.is_some()
             && self
                 .relay
                 .as_ref()
@@ -513,6 +541,7 @@ impl Endpoint {
         {
             ours.push(relay::synthetic_for(&self.id));
         }
+        let allow_direct = self.transports != crate::Transports::RelayOnly;
         let telemetry = self.drivers.spawn(
             conn,
             self.metrics.clone(),
@@ -520,9 +549,17 @@ impl Endpoint {
             candidates,
             peer_lease,
             self.relay.clone(),
+            allow_direct,
         )?;
-        policy::advertise_addrs(conn, &ours);
-        policy::initiate_traversal_round(conn, &self.metrics);
+        if !self.pinned {
+            policy::advertise_addrs(conn, &ours);
+        }
+        if allow_direct && !self.pinned {
+            // Relay-only and pinned endpoints keep the traversal channel
+            // closed: there is nothing extra to offer or to learn — the
+            // connection stays on its established path.
+            policy::initiate_traversal_round(conn, &self.metrics);
+        }
         Ok(telemetry)
     }
 
@@ -547,6 +584,11 @@ pub struct Incoming {
     /// Endpoint metrics — the driver records QNT progress here.
     metrics: crate::metrics::Registry,
     drivers: Arc<drivers::Drivers>,
+    /// `EndpointConfig::transports != RelayOnly` — whether the connection
+    /// policy may turn peer-advertised direct addrs into paths.
+    allow_direct: bool,
+    /// Single-path endpoint: no in-band advertisement, no traversal.
+    pinned: bool,
 }
 
 impl Incoming {
@@ -563,15 +605,20 @@ impl Incoming {
             relay,
             metrics,
             Arc::new(drivers::Drivers::default()),
+            true,
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_drivers(
         incoming: noq::Incoming,
         our_addrs: Vec<SocketAddr>,
         relay: Option<relay::RelayHandle>,
         metrics: crate::metrics::Registry,
         drivers: Arc<drivers::Drivers>,
+        allow_direct: bool,
+        pinned: bool,
     ) -> Self {
         Self {
             incoming: Some(incoming),
@@ -580,6 +627,8 @@ impl Incoming {
             relay,
             metrics,
             drivers,
+            allow_direct,
+            pinned,
         }
     }
 
@@ -641,10 +690,15 @@ impl Future for Incoming {
                                     Vec::new(),
                                     lease,
                                     self.relay.clone(),
+                                    self.allow_direct,
                                 )
                                 .map(|telemetry| {
-                                    policy::advertise_addrs(&inner, &ours);
-                                    policy::initiate_traversal_round(&inner, &self.metrics);
+                                    if !self.pinned {
+                                        policy::advertise_addrs(&inner, &ours);
+                                    }
+                                    if self.allow_direct && !self.pinned {
+                                        policy::initiate_traversal_round(&inner, &self.metrics);
+                                    }
                                     Connection {
                                         inner,
                                         remote_id,

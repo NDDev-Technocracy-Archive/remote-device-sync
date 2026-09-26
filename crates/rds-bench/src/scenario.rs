@@ -12,7 +12,7 @@ use anyhow::Context;
 
 use crate::impair::Impairment;
 use crate::report::{BenchMeta, BenchReport, Percentiles, git_sha, unix_ts};
-use crate::world::{Path, World};
+use crate::world::{Path, World, WorldRelay};
 
 /// Knobs every scenario reads; CLI fills it.
 #[derive(Debug, Clone)]
@@ -140,12 +140,46 @@ async fn run_one(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
             r.meta.scenario = "relay-fallback".into();
             vec![r]
         }),
-        Scenario::Impaired => ping(p, Path::DirectImpaired(p.impairment), Some(p.impairment))
-            .await
-            .map(|mut r| {
-                r.meta.scenario = "impaired".into();
-                vec![r]
-            }),
+        Scenario::Impaired => {
+            let mut reports = Vec::new();
+            let mut direct =
+                ping(p, Path::DirectImpaired(p.impairment), Some(p.impairment)).await?;
+            direct.meta.scenario = "impaired".into();
+            reports.push(direct);
+            // noq worlds also impair the endpoint↔relay attachment legs
+            // and measure the relay path under impairment; iroh's TCP
+            // relay leg cannot take a UDP impairment device — an explicit
+            // SCENARIO SKIPPED row, not silent absence.
+            #[cfg(feature = "transport-noq")]
+            if p.transport_backend()? == rds_net::Backend::Noq {
+                match ping(p, Path::RelayImpaired(p.impairment), Some(p.impairment)).await {
+                    Ok(mut r) => {
+                        r.meta.scenario = "impaired".into();
+                        reports.push(r);
+                    }
+                    Err(e) => {
+                        let mut r = failed("impaired", p, e);
+                        r.meta.path = "relay-impaired".into();
+                        reports.push(r);
+                    }
+                }
+            } else {
+                reports.push(skipped(
+                    "impaired",
+                    p,
+                    "relay-impaired",
+                    "iroh relay attachment is TCP; UDP impairment cannot sit below it",
+                ));
+            }
+            #[cfg(not(feature = "transport-noq"))]
+            reports.push(skipped(
+                "impaired",
+                p,
+                "relay-impaired",
+                "built without transport-noq; the owned relay backend is unavailable",
+            ));
+            Ok(reports)
+        }
         Scenario::ResolveConnect => resolve_connect(p).await.map(|r| vec![r]),
         Scenario::All => unreachable!("handled in run"),
     }
@@ -163,17 +197,14 @@ fn meta(scenario: &str, p: &Params, path: &str, impairment: Option<Impairment>) 
 }
 
 fn proxy_note(world: &World) -> Vec<String> {
-    world
-        .proxy_stats
-        .as_ref()
-        .map(|p| {
-            let s = p.stats();
-            vec![format!(
-                "proxy: forwarded={} dropped={} bytes={}",
-                s.forwarded, s.dropped, s.bytes
-            )]
-        })
-        .unwrap_or_default()
+    let t = world.impair_totals();
+    if t.probes == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "impairment probes={} forwarded={} dropped={} bytes={}",
+        t.probes, t.forwarded, t.dropped, t.bytes
+    )]
 }
 
 fn failed(scenario: &str, p: &Params, e: anyhow::Error) -> BenchReport {
@@ -184,6 +215,20 @@ fn failed(scenario: &str, p: &Params, e: anyhow::Error) -> BenchReport {
         attempts: None,
         metrics: Default::default(),
         notes: vec![format!("SCENARIO FAILED: {e:#}")],
+    }
+}
+
+/// A lane the selected backend/build cannot run — declared in the
+/// suite (path named, reason given), never silently absent and never
+/// counted as a failure.
+fn skipped(scenario: &str, p: &Params, path: &str, reason: &str) -> BenchReport {
+    BenchReport {
+        meta: meta(scenario, p, path, Some(p.impairment)),
+        rtt: None,
+        throughput_mib_s: None,
+        attempts: None,
+        metrics: Default::default(),
+        notes: vec![format!("SCENARIO SKIPPED: {reason}")],
     }
 }
 
@@ -218,9 +263,14 @@ async fn handshake(p: &Params, path: Path) -> anyhow::Result<BenchReport> {
         ));
     }
     let metrics = world.metrics_snapshot(None);
+    // Close before enforcing so a failed check cannot abort the world
+    // into ungraceful endpoint drops.
     world.close().await;
+    world
+        .enforce_path_integrity(&metrics, 1)
+        .context("path integrity")?;
     Ok(BenchReport {
-        meta: meta("handshake", p, world.path_label(), impairment_of(&path)),
+        meta: meta("handshake", p, world.path.label(), path.impairment()),
         rtt: Percentiles::of(&samples),
         throughput_mib_s: None,
         attempts: Some((ok, p.iterations as u64)),
@@ -257,8 +307,11 @@ async fn ping(
     }
     let metrics = world.metrics_snapshot(Some(&conn));
     world.close().await;
+    world
+        .enforce_path_integrity(&metrics, p.iterations as u64 * 8)
+        .context("path integrity")?;
     Ok(BenchReport {
-        meta: meta("ping", p, world.path_label(), impairment),
+        meta: meta("ping", p, world.path.label(), impairment),
         rtt: Percentiles::of(&samples),
         throughput_mib_s: None,
         attempts: None,
@@ -310,8 +363,13 @@ async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
     );
     let mut notes = proxy_note(&world);
     notes.push("receiver-ack-v1: byte count + BLAKE3 digest + EOF; payload generation/hash, upload and receipt are timed; connect/OpenTcp excluded; not comparable to historical sender-finish results".into());
+    // The world is already closed above: a failed integrity check cannot
+    // leak endpoints, and the snapshot was captured mid-connection.
+    world
+        .enforce_path_integrity(&metrics, total)
+        .context("path integrity")?;
     Ok(BenchReport {
-        meta: meta(Scenario::Transfer.name(), p, world.path_label(), None),
+        meta: meta(Scenario::Transfer.name(), p, world.path.label(), None),
         rtt: None,
         throughput_mib_s: Some(mib_s),
         attempts: None,
@@ -336,12 +394,58 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
 
     let backend = p.transport_backend()?;
 
-    let mut relay_config = iroh_relay::server::ServerConfig::default();
-    relay_config.relay = Some(iroh_relay::server::RelayConfig::new(
-        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let relay = iroh_relay::server::Server::spawn(relay_config).await?;
-    let relay_url = format!("http://{}", relay.http_addr().unwrap());
+    // Relay per backend: iroh runs its in-process relay, noq attaches
+    // endpoints to the owned `rds-relay` — same world shape either way.
+    let mut iroh_relay_url: Option<String> = None;
+    #[cfg(feature = "transport-noq")]
+    let mut owned_relay_addr: Option<rds_net::EndpointAddr> = None;
+    let _relay_keepalive: WorldRelay = match backend {
+        rds_net::Backend::Iroh => {
+            let mut relay_config = iroh_relay::server::ServerConfig::default();
+            relay_config.relay = Some(iroh_relay::server::RelayConfig::new(
+                "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let relay = iroh_relay::server::Server::spawn(relay_config).await?;
+            iroh_relay_url = Some(format!("http://{}", relay.http_addr().unwrap()));
+            WorldRelay::Iroh(relay)
+        }
+        #[cfg(feature = "transport-noq")]
+        rds_net::Backend::Noq => {
+            let server = rds_relay::server::serve(
+                EndpointConfig {
+                    backend,
+                    bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                    discovery: false,
+                    ..Default::default()
+                },
+                Vec::new(),
+            )
+            .await
+            .context("spawn owned relay")?;
+            owned_relay_addr = Some(server.endpoint_addr());
+            WorldRelay::Owned(server)
+        }
+        #[allow(unreachable_patterns)]
+        _ => WorldRelay::None,
+    };
+
+    // Per-backend endpoint config: iroh attaches by relay URL, noq by
+    // owned-relay endpoint address.
+    let endpoint_config = |key: rds_net::SecretKey| -> anyhow::Result<EndpointConfig> {
+        let mut config = EndpointConfig {
+            secret_key: Some(key),
+            backend,
+            ..Default::default()
+        };
+        if let Some(url) = &iroh_relay_url {
+            config = config.with_relay(url)?;
+        }
+        #[cfg(feature = "transport-noq")]
+        {
+            config.relay_endpoint = owned_relay_addr.clone();
+        }
+        Ok(config)
+    };
 
     let agent_key = rds_net::SecretKey::from_bytes(&[42u8; 32]);
     let client_key = rds_net::SecretKey::from_bytes(&[77u8; 32]);
@@ -371,15 +475,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     let directory = client::Client::new(dir.addr()).with_registry_key(reg_key.verifying_key());
 
     // Agent endpoint: announce into the directory, then serve.
-    let agent_ep = bind_endpoint(
-        EndpointConfig {
-            secret_key: Some(agent_key.clone()),
-            backend,
-            ..Default::default()
-        }
-        .with_relay(&relay_url)?,
-    )
-    .await?;
+    let agent_ep = bind_endpoint(endpoint_config(agent_key.clone())?).await?;
     agent_ep.online().await;
     let _announce = rds_net::announce(
         agent_ep.clone(),
@@ -422,15 +518,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     for _ in 0..p.iterations {
         // A fresh client endpoint keeps both resolve and handshake
         // cold, matching a new `rds ssh` invocation.
-        let client_ep = bind_endpoint(
-            EndpointConfig {
-                secret_key: Some(client_key.clone()),
-                backend,
-                ..Default::default()
-            }
-            .with_relay(&relay_url)?,
-        )
-        .await?;
+        let client_ep = bind_endpoint(endpoint_config(client_key.clone())?).await?;
         let timed = tokio::time::timeout(p.timeout, async {
             let t0 = Instant::now();
             let addr = rds_net::resolve_target(Some(directory.clone()), "bench-agent").await?;
@@ -450,6 +538,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         client_ep.close().await;
     }
     agent_task.abort();
+    agent.endpoint.close().await;
     let mut notes = Vec::new();
     if ok < p.iterations as u64 {
         notes.push(format!(
@@ -470,47 +559,6 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         notes,
     })
 }
-
-trait PathLabel {
-    fn path_label(&self) -> &'static str;
-}
-
-impl PathLabel for World {
-    fn path_label(&self) -> &'static str {
-        if self.proxy_stats.is_some() {
-            "direct-impaired"
-        } else if self
-            .target
-            .addrs
-            .iter()
-            .any(|a| matches!(a, rds_net::TransportAddr::Relay(_)))
-            && self
-                .target
-                .addrs
-                .iter()
-                .any(|a| matches!(a, rds_net::TransportAddr::Ip(_)))
-        {
-            "mixed"
-        } else if self
-            .target
-            .addrs
-            .iter()
-            .any(|a| matches!(a, rds_net::TransportAddr::Relay(_)))
-        {
-            "relay"
-        } else {
-            "direct"
-        }
-    }
-}
-
-fn impairment_of(path: &Path) -> Option<Impairment> {
-    match path {
-        Path::DirectImpaired(i) => Some(*i),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
