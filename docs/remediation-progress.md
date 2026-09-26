@@ -32,6 +32,7 @@ Neither increment closes these product gaps or any wave.
 | W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08 has failing-before actual-client Drain/drop regressions and passing framing/grace checks. R09 has failing-before direct/relay candidate regressions and passing family/cancellation checks. Desktop byte/cancellation and lifecycle regressions now cover the W6.1/W6.2 increments; broader native/network qualification remains open. |
 | W0.2 | Partial; receiver completion barrier | Versioned transfer goodput waits for exact received byte count, BLAKE3 digest and response EOF under one operation deadline. A missing-receipt regression failed before the fix; corrupt/truncated/reordered payloads, invalid receipts, delayed reception and real iroh/noq forwarded-TCP checks cover the boundary. Known-rate calibration, connect/auth/service phase timings and topology/load qualification remain open; see [contract](benchmark-transfer.md). |
 | W0.4 | Partial; comparator faults refused | Absent metrics, nonfinite values, failed scenarios, insufficient samples and backend/impairment profile mismatches now refuse comparison (seed excluded from profile). `checkpoint.sh` registers `r0-evidence` with a CLI negative-fixture battery; the c1 noq suite gains its missing `transport-noq` feature flag. Gate invocation and re-qualification of historical reports remain open; see section below. |
+| W0.5 | Partial; versioned matrix landed | `docs/capability-matrix.md` v1 records implemented/experimental/stub/unavailable per capability with runtime prerequisites separate from state. Tests enforce every `ServiceKind` variant and every `rds-bench` lane name has a matrix row, the state vocabulary is closed, placeholders name what is missing and README links the matrix. Live `rds info` advertisement ↔ matrix agreement beyond enum coverage, per-report capability tagging and release-gate enforcement remain open. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
@@ -1552,3 +1553,26 @@ Local validation: `cargo fmt --check`, `cargo clippy -p rds-bench
 --all-targets -- -D warnings`, `cargo test -p rds-bench` (10 tests), the
 fixture battery through the built CLI (7 refused, 1 accepted) and
 `bash -n scripts/checkpoint.sh`.
+
+## 2026-09-26 — versioned capability matrix (W0.5 partial)
+
+`docs/capability-matrix.md` v1 is now the single source of truth for what
+this build claims: every service kind, transport, desktop backend, codec,
+platform, policy/discovery surface and bench lane carries an explicit state
+(`implemented`/`experimental`/`stub`/`unavailable`) and a separate runtime-
+prerequisites column. The header states `matrix_version`, and the doc states
+that placeholder states must name what would make them real.
+
+Agreement is enforced rather than asserted: a shared checker under
+`tests/support/` parses the matrix and is included by `rds-cli` tests
+(every `ServiceKind` variant must have a `service:<kebab>` row; `audio`
+must stay `stub` until a codec exists) and `rds-bench` tests (every lane in
+`scenario::LANES` must have a `measure:<name>` row, so an emitted report
+name always resolves to a declared capability). README links the matrix and
+the checker fails if the link is removed. The lane list is now a single
+`LANES` constant in `rds-bench`, so `run --scenario all` and the matrix test
+share one ordering source.
+
+Remaining W0.5 scope: live `rds info` advertisement ↔ matrix agreement
+beyond enum coverage, per-report capability tagging, release-gate
+enforcement, and qualification of the experimental rows themselves.

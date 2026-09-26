@@ -78,8 +78,21 @@ pub enum Scenario {
     All,
 }
 
+/// Lanes `Scenario::All` expands to, in run order. `All` itself is a
+/// CLI convenience and is never a report name.
+pub const LANES: &[Scenario] = &[
+    Scenario::Handshake,
+    Scenario::Ping,
+    Scenario::Transfer,
+    Scenario::Multiconnect,
+    Scenario::RelayFallback,
+    Scenario::Impaired,
+    Scenario::ResolveConnect,
+];
+
 impl Scenario {
-    fn name(&self) -> &'static str {
+    /// Scenario name emitted into report metadata.
+    pub fn name(&self) -> &'static str {
         match self {
             Scenario::Handshake => "handshake",
             Scenario::Ping => "ping",
@@ -97,15 +110,7 @@ impl Scenario {
 pub async fn run(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
     if s == Scenario::All {
         let mut out = Vec::new();
-        for s in [
-            Scenario::Handshake,
-            Scenario::Ping,
-            Scenario::Transfer,
-            Scenario::Multiconnect,
-            Scenario::RelayFallback,
-            Scenario::Impaired,
-            Scenario::ResolveConnect,
-        ] {
+        for &s in LANES {
             match run_one(s, p).await {
                 Ok(reports) => out.extend(reports),
                 Err(e) => out.push(failed(s.name(), p, e)),
