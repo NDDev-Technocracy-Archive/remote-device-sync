@@ -5,7 +5,11 @@ API remain unimplemented; this contract describes the existing Rust viewing
 session, including its headless header tap.
 
 `DesktopSession` claims its uni-stream inbox before opening a control stream.
-A duplicate live claim fails locally without starting another remote session.
+The default `connect` mints a random session ID, claims
+`UniHello::DesktopFrames { id }` and greets with `StreamHello::DesktopV2`;
+`connect_opts` with `session: None` keeps the legacy shared `Desktop` route for
+older peers. A claim on an already-live route fails locally without starting
+another remote session, while sessions with distinct IDs share the connection.
 One 30-second deadline covers stream credit, hello write and ACK. Cancellation
 resets the send half and stops the receive half, releasing the inbox.
 
@@ -50,9 +54,12 @@ recreated on that blocking path. All automatic IDR requests share a 500 ms
 limit, including the first request at session time zero. The header tap still
 reports complete, valid, non-stale frames independently of decoder success.
 
-The legacy `UniHello::Desktop` route has no per-session wire ID. Cleanup of
-already admitted streams is covered here; a delayed tag from an old session
-can still collide with a later claim on the same connection. Do not treat
-legacy reuse as isolated viewer switching. Per-session routing, sender-chain
+On the v2 route a delayed tag from an ended session binds the ended session's
+ID — the router drops it instead of delivering it to a replacement session's
+inbox; foreign-route streams arrive tagged `Desktop` or a different
+`DesktopFrames { id }` and never reach the session's readers. The legacy
+shared `UniHello::Desktop` route still has no per-session wire ID: a delayed
+tag from an old session can collide with a later claim on the same
+connection, so legacy reuse is not isolated viewer switching. Sender-chain
 correctness, rendering/focus/input release, managed viewer integration and
 native platform/network qualification retain their remediation gates.

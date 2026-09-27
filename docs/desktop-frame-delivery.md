@@ -55,8 +55,18 @@ Native H.264 coverage checks decode and a pixel across a dropped reference and
 IDR recovery. This is separate from the synthetic QUIC impairment measurements;
 it does not establish real-codec continuity under network loss/reordering.
 
+Each frame stream leads with a route tag so the viewer's router lands it in
+the right inbox. `DesktopV2` sessions carry the negotiated
+`UniHello::DesktopFrames { id }` — the session ID minted by the viewer and
+echoed in `StreamHello::DesktopV2` — while legacy `Desktop` sessions keep the
+shared route. A delayed stream left over from an ended session is tagged with
+that session's route and can never reach a replacement session's inbox; it is
+dropped unrouted. Distinct session IDs also mean concurrent desktop sessions
+can share one connection, each claiming its own route and re-checked against
+the grant's display scope.
+
 Remaining work includes real-codec network continuity and overload/IDR-rate
-qualification, per-session wire IDs, global encoded/decoded/native allocation accounting, managed viewers,
+qualification, global encoded/decoded/native allocation accounting, managed viewers,
 rendering/input release and platform/network acceptance. See the
-[client receive contract](desktop-client-lifecycle.md). No wire format, frame
+[client receive contract](desktop-client-lifecycle.md). No frame
 priority, dependency, installed binary or published release changes here.

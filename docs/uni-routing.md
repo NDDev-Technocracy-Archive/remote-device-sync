@@ -5,10 +5,15 @@ The current v3 protocol routes inbound uni streams by `UniHello`. The additive
 `SyncTransferV2 { id }` routes chunk streams for the negotiated v2 session —
 the same ID is then repeated inside every `Session` frame, so a stale stream
 can reach an inbox but never satisfy a different transfer's frames.
-`Connection::uni_streams` permits one live inbox per kind. Services order their
-own payloads by frame sequence or chunk identity: parallel tag reads need not
-complete in the order streams were accepted. Desktop session IDs remain W2.2 work. Legacy `Sync`
-service-kind routing remains available only for explicit direct compatibility.
+`UniHello::DesktopFrames { id }` does the same for desktop: the viewer mints a
+random session ID, echoes it in `StreamHello::DesktopV2`, and claims the
+matching route, so a delayed frame stream from an ended session can never
+satisfy a replacement session's inbox. `Connection::uni_streams` permits one
+live inbox per kind, which also lets concurrent desktop sessions share one
+connection without colliding. Services order their own payloads by frame
+sequence or chunk identity: parallel tag reads need not complete in the order
+streams were accepted. Legacy `Sync` and shared `Desktop`
+service-kind routing remain available only for explicit direct compatibility.
 
 ## Ownership and termination
 

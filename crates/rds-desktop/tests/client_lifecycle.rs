@@ -185,12 +185,21 @@ async fn readers_are_bounded_and_session_owns_all_streams() {
             assert_eq!(client.receive_stats().in_flight, stalled.len());
 
             // Video saturation cannot block the independent control leg.
+            // Decoded probes above legitimately queue resync requests on
+            // the same leg (a real decoder rejects the synthetic payload);
+            // they share the leg, they must not starve the heartbeat.
             let seq = client.heartbeat().await.unwrap();
-            let DesktopControl::Heartbeat { seq: got, ts_ms } =
-                read_frame(&mut control_recv).await.unwrap()
-            else {
-                panic!("heartbeat lost under video pressure")
-            };
+            let (got, ts_ms) = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let DesktopControl::Heartbeat { seq, ts_ms } =
+                        read_frame(&mut control_recv).await.unwrap()
+                    {
+                        break (seq, ts_ms);
+                    }
+                }
+            })
+            .await
+            .expect("heartbeat lost under video pressure");
             assert_eq!(seq, got);
             write_frame(&mut control_send, &DesktopEvent::Heartbeat { seq, ts_ms })
                 .await
