@@ -611,7 +611,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
             let conn = rds_cli::connect(&client_ep, addr).await?;
             let d_connect = t_connect.elapsed();
             let t_first = Instant::now();
-            rds_cli::ping(&conn, 1).await?;
+            rds_cli::ping(&conn, rand::random::<u64>()).await?;
             let d_first = t_first.elapsed();
             client_ep.metrics().sampler(conn.clone()).sample();
             Ok::<_, anyhow::Error>((d_resolve, d_connect, d_first, t_resolve.elapsed()))
