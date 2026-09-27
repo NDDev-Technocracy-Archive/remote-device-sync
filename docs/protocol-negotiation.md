@@ -35,5 +35,9 @@ Existing owned/iroh interoperability checks retain the default `rds/0` behavior.
 This is the ALPN boundary of W2.2. Managed sync transfers now negotiate version
 and limits inside the `SyncTransferV2` session envelope
 ([sync-protocol.md](sync-protocol.md)) — the tag is the version, never a silent
-fallback. Broader service capability negotiation, desktop session routing IDs
-and mixed service admission remain separate work.
+fallback. Desktop sessions follow the same pattern: `StreamHello::DesktopV2`
+binds a random per-session ID that agents reject before session work when they
+cannot decode it, and frame streams carry the matching
+`UniHello::DesktopFrames { id }` route
+([desktop-frame-delivery.md](desktop-frame-delivery.md)). Broader service
+capability negotiation and mixed service admission remain separate work.

@@ -46,7 +46,7 @@ Neither increment closes these product gaps or any wave.
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Managed transfers now run the negotiated v2 session: per-transfer route IDs bound into every frame, Hello/HelloAck limit negotiation, typed Cancel both directions. Stronger physical cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
-| W2.2 | Partial; exact ALPN selection + sync session negotiation | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Service-wide capability negotiation and desktop session routing IDs remain open. |
+| W2.2 | Partial; exact ALPN selection + sync/desktop session routing | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Desktop sessions mint random per-session IDs in `StreamHello::DesktopV2` and route frames through `UniHello::DesktopFrames { id }`, isolating stale streams and allowing concurrent sessions; the same display grant scope check covers both greetings. Service-wide capability negotiation remains open. |
 | W2.3 | Partial; destination-bound renewable grants and directional scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Tenant/policy binding, per-path/account scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
@@ -1896,3 +1896,39 @@ v1 compatibility. The pre-existing v1 suite (`send`/`recv` e2e, impaired,
 resume) is untouched and passing. Open: physical cancellation barriers beyond
 typed abort (W2.5/W8), desktop session routing IDs (W2.2), native macOS
 qualification.
+
+## 2026-09-27 — per-session desktop routing, W2.2 executable scope
+
+Desktop sessions now bind a random 16-byte session ID end to end.
+`StreamHello::DesktopV2 { session, hello }` is additive like
+`SyncTransferV2`: a peer that cannot decode it refuses at greeting before
+any session work — no silent fallback, matching ALPN posture. The viewer
+claims `UniHello::DesktopFrames { id }` before opening its control stream;
+the agent derives the same route from the greeting, so every frame uni
+stream leads with the session's own route. A frame stream left over from a
+torn or ended session is tagged with that session's route and can never be
+delivered into a replacement session's inbox — the old shared `Desktop`
+route's stale-stream hole is closed on v2. `DesktopSession::connect`
+mints v2 by default; `connect_opts` with `session: None` keeps the legacy
+shared route for peers that predate `DesktopV2`.
+
+Per-session routes also make concurrent desktop sessions on one connection
+routable: distinct IDs hold distinct claims, and each greeting re-runs the
+grant's display-scope check — route isolation is not an authorization
+bypass. Session tasks own the claim; dropping a session releases its route
+with the rest of the task group.
+
+Coverage: rds-core wire roundtrip/legacy-refusal for both new tags;
+`session_v2` exercises the v2 greeting + routed frame streams end to end,
+forged/stale-route streams (`DesktopFrames { foreign }` and legacy
+`Desktop`) never reaching a live inbox, desktop + legacy sync sharing one
+connection, and the legacy `Desktop` path still serving `session: None`
+clients; `client_lifecycle` verifies same-ID claim refusal without a wire
+greeting, concurrent distinct-ID sessions each receiving only their own
+routes, and full route release on drop; `server_lifecycle` covers
+cancellation with the derived frame route; `grant_scopes` proves
+`DesktopV2` hits the identical "service Desktop not granted" denial.
+Default-feature builds stay clean (`#[cfg(feature = "desktop")]` on the
+agent-side route derivation). Open: service-wide capability negotiation
+(W2.2 remainder), global media budgets (W2.5/W8), native macOS and
+real-network qualification.
