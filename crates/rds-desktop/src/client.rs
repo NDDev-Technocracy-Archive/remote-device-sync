@@ -228,10 +228,20 @@ pub struct SessionOpts {
     /// local receive times; production leaves each side on its own
     /// clock (cross-machine latency then needs an RTT estimate).
     pub clock: Option<SessionClock>,
+    /// Per-session frame-route ID. `Some(id)` opens a `DesktopV2`
+    /// session: the greeting echoes `id` and the viewer claims
+    /// `UniHello::DesktopFrames { id }`, so a delayed frame stream from
+    /// an ended session can never reach this session's inbox. `None`
+    /// keeps the legacy shared `Desktop` route for old peers.
+    pub session: Option<[u8; 16]>,
 }
 
 impl DesktopSession {
-    /// Open a session on an established connection.
+    /// Open a session on an established connection. Mints a random
+    /// session ID and opens the `DesktopV2` per-session frame route; an
+    /// agent that cannot decode the greeting refuses before any session
+    /// work. `connect_opts` with `session: None` keeps the legacy shared
+    /// route for peers that predate `DesktopV2`.
     pub async fn connect(
         conn: &Connection,
         display: u32,
@@ -246,7 +256,10 @@ impl DesktopSession {
                 codec,
                 input_acks: false,
             },
-            SessionOpts::default(),
+            SessionOpts {
+                session: Some(rand::random()),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -259,15 +272,23 @@ impl DesktopSession {
     ) -> Result<Self, DesktopError> {
         let display = hello.display;
         let clock = opts.clock.unwrap_or_default();
+        let route = opts
+            .session
+            .map(|session| rds_core::UniHello::DesktopFrames { id: session })
+            .unwrap_or(rds_core::UniHello::Desktop);
         // Claim before any wire I/O or spawned work. A duplicate claim must
         // not start another remote session and then leak local tasks on error.
         let uni = conn
-            .uni_streams(rds_core::UniHello::Desktop)
+            .uni_streams(route)
             .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())))?;
+        let greeting = match opts.session {
+            Some(session) => StreamHello::DesktopV2 { session, hello },
+            None => StreamHello::Desktop(hello),
+        };
         let (mut send, mut recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
             let (send, mut recv) = conn.open_bi().await?;
             let mut send = ControlSend(send);
-            write_frame(&mut send.0, &StreamHello::Desktop(hello)).await?;
+            write_frame(&mut send.0, &greeting).await?;
             let caps = match read_frame::<_, HelloAck>(&mut recv).await? {
                 HelloAck::Desktop(caps) => caps,
                 HelloAck::Ok => DesktopCaps {

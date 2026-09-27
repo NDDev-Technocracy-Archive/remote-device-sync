@@ -22,6 +22,20 @@ use rds_desktop::{SessionClock, SessionConfig, SyntheticProducer, serve_desktop_
 use rds_net::read_frame;
 use rds_net::{Endpoint, EndpointAddr, EndpointConfig, bind_noq_with_socket};
 
+/// Deterministic unique session IDs for the tests — uniqueness within a
+/// connection is what the route isolates, not entropy.
+fn next_session_id() -> [u8; 16] {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(
+        &NEXT
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_be_bytes(),
+    );
+    id[8] = 0xD5;
+    id
+}
+
 #[derive(Clone, Default)]
 struct TestInput {
     view_only: bool,
@@ -118,8 +132,15 @@ async fn spawn_serving(
     tokio::spawn(async move {
         let conn = server_ep.accept().await.unwrap().await.unwrap();
         let (mut send, mut recv) = conn.accept_bi().await.unwrap();
-        match read_frame::<_, StreamHello>(&mut recv).await.unwrap() {
-            StreamHello::Desktop(hello) => {
+        let greeting = read_frame::<_, StreamHello>(&mut recv).await.unwrap();
+        let frame_route = match &greeting {
+            StreamHello::DesktopV2 { session, .. } => {
+                Some(rds_core::UniHello::DesktopFrames { id: *session })
+            }
+            _ => None,
+        };
+        match greeting {
+            StreamHello::Desktop(hello) | StreamHello::DesktopV2 { hello, .. } => {
                 rds_net::write_frame(
                     &mut send,
                     &HelloAck::Desktop(rds_core::DesktopCaps {
@@ -142,6 +163,7 @@ async fn spawn_serving(
                                 .keyframe_every(keyframe_every),
                         )),
                         clock: Some(clock.clone()),
+                        frame_route,
                         ..Default::default()
                     },
                 )
@@ -201,6 +223,7 @@ async fn harness_with_input(
         },
         SessionOpts {
             clock: Some(clock.clone()),
+            session: Some(next_session_id()),
         },
     )
     .await
@@ -573,8 +596,16 @@ async fn desktop_and_sync_share_one_connection() {
                 let dir = sync_root.clone();
                 let clock = clock.clone();
                 tokio::spawn(async move {
-                    match read_frame::<_, StreamHello>(&mut recv).await {
-                        Ok(StreamHello::Desktop(hello)) => {
+                    let greeting = read_frame::<_, StreamHello>(&mut recv).await;
+                    let frame_route = match &greeting {
+                        Ok(StreamHello::DesktopV2 { session, .. }) => {
+                            Some(rds_core::UniHello::DesktopFrames { id: *session })
+                        }
+                        _ => None,
+                    };
+                    match greeting {
+                        Ok(StreamHello::Desktop(hello))
+                        | Ok(StreamHello::DesktopV2 { hello, .. }) => {
                             rds_net::write_frame(
                                 &mut send,
                                 &HelloAck::Desktop(rds_core::DesktopCaps {
@@ -595,6 +626,7 @@ async fn desktop_and_sync_share_one_connection() {
                                             .keyframe_every(30),
                                     )),
                                     clock: Some(clock),
+                                    frame_route,
                                     ..Default::default()
                                 },
                             )
@@ -621,6 +653,7 @@ async fn desktop_and_sync_share_one_connection() {
         },
         SessionOpts {
             clock: Some(clock.clone()),
+            session: Some(next_session_id()),
         },
     )
     .await
@@ -659,6 +692,172 @@ async fn desktop_and_sync_share_one_connection() {
         frames >= 30,
         "desktop starved by concurrent sync: {frames} frames"
     );
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_and_foreign_frame_routes_never_reach_the_session_inbox() {
+    let clock = SessionClock::default();
+    let (server_ep, client_ep, _imp, target) = endpoints(None).await;
+    let session_id = next_session_id();
+    let server_task = tokio::spawn({
+        let clock = clock.clone();
+        async move {
+            let conn = server_ep.accept().await.unwrap().await.unwrap();
+            let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+            let greeting = read_frame::<_, StreamHello>(&mut recv).await.unwrap();
+            let (hello, frame_route) = match greeting {
+                StreamHello::DesktopV2 { session, hello } => {
+                    assert_eq!(session, session_id);
+                    (hello, rds_core::UniHello::DesktopFrames { id: session })
+                }
+                other => panic!("expected DesktopV2 hello, got {other:?}"),
+            };
+            rds_net::write_frame(
+                &mut send,
+                &HelloAck::Desktop(rds_core::DesktopCaps {
+                    displays: vec![],
+                    codecs: vec![Codec::H264],
+                }),
+            )
+            .await
+            .unwrap();
+            // Forge two stale streams the way a torn previous session
+            // could leave them: one tagged with a session ID this
+            // connection never served, one on the legacy shared route.
+            // Neither can reach the live session's claimed inbox.
+            for tag in [
+                rds_core::UniHello::DesktopFrames { id: [0xEE; 16] },
+                rds_core::UniHello::Desktop,
+            ] {
+                let mut forged = conn.open_uni().await.unwrap();
+                rds_net::write_frame(&mut forged, &tag).await.unwrap();
+                rds_net::write_frame(
+                    &mut forged,
+                    &rds_core::FrameHeader {
+                        seq: u64::MAX,
+                        capture_ts_ms: 0,
+                        encode_done_ts_ms: 0,
+                        send_ts_ms: 0,
+                        keyframe: true,
+                        codec: Codec::H264,
+                        width: 1,
+                        height: 1,
+                    },
+                )
+                .await
+                .unwrap();
+                forged.finish().unwrap();
+            }
+            serve_desktop_with(
+                conn,
+                send,
+                recv,
+                hello,
+                SessionConfig {
+                    producer: Some(Box::new(
+                        SyntheticProducer::new(60, 640, 480, 1500).keyframe_every(10),
+                    )),
+                    clock: Some(clock),
+                    frame_route: Some(frame_route),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let conn = client_ep.connect(target, rds_core::ALPN).await.unwrap();
+    let mut session = DesktopSession::connect_opts(
+        &conn,
+        DesktopHello {
+            display: 0,
+            max_fps: 60,
+            codec: Codec::H264,
+            input_acks: false,
+        },
+        SessionOpts {
+            clock: Some(clock.clone()),
+            session: Some(session_id),
+        },
+    )
+    .await
+    .unwrap();
+    // Every header reaching the inbox must be this session's own frame
+    // shape; a forged stream would surface a bogus header or break the
+    // decoder chain.
+    for _ in 0..20 {
+        let header = tokio::time::timeout(Duration::from_secs(10), session.frame_headers.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((header.width, header.height), (640, 480));
+    }
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_shared_route_still_serves_v1_clients() {
+    let clock = SessionClock::default();
+    let (server_ep, client_ep, _imp, target) = endpoints(None).await;
+    let server_task = tokio::spawn({
+        let clock = clock.clone();
+        async move {
+            let conn = server_ep.accept().await.unwrap().await.unwrap();
+            let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+            let StreamHello::Desktop(hello) =
+                read_frame::<_, StreamHello>(&mut recv).await.unwrap()
+            else {
+                panic!("expected legacy Desktop hello");
+            };
+            rds_net::write_frame(
+                &mut send,
+                &HelloAck::Desktop(rds_core::DesktopCaps {
+                    displays: vec![],
+                    codecs: vec![Codec::H264],
+                }),
+            )
+            .await
+            .unwrap();
+            serve_desktop_with(
+                conn,
+                send,
+                recv,
+                hello,
+                SessionConfig {
+                    producer: Some(Box::new(
+                        SyntheticProducer::new(60, 640, 480, 1500).keyframe_every(10),
+                    )),
+                    clock: Some(clock),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let conn = client_ep.connect(target, rds_core::ALPN).await.unwrap();
+    let mut session = DesktopSession::connect_opts(
+        &conn,
+        DesktopHello {
+            display: 0,
+            max_fps: 60,
+            codec: Codec::H264,
+            input_acks: false,
+        },
+        SessionOpts {
+            clock: Some(clock.clone()),
+            session: None,
+        },
+    )
+    .await
+    .unwrap();
+    for _ in 0..10 {
+        tokio::time::timeout(Duration::from_secs(10), session.frame_headers.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
     server_task.abort();
 }
 

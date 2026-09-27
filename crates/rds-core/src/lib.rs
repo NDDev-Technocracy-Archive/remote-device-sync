@@ -59,6 +59,12 @@ pub enum UniHello {
     /// frames both carry the transfer ID; older peers reject this tag
     /// at greeting decode, before any filesystem operation.
     SyncTransferV2 { id: [u8; 16] },
+    /// Frame streams for one desktop session. The route ID is minted
+    /// per session by the viewer and echoed in `StreamHello::DesktopV2`,
+    /// so a delayed frame stream from an ended session can reach only
+    /// the routing table — never a replacement session's inbox. Never
+    /// reuse an ID on a connection.
+    DesktopFrames { id: [u8; 16] },
 }
 
 /// First frame on every bi-directional stream.
@@ -93,6 +99,14 @@ pub enum StreamHello {
     /// typed Cancel). Older agents reject the greeting before any
     /// filesystem operation; there is no silent version fallback.
     SyncTransferV2 { id: [u8; 16] },
+    /// Desktop session with a per-session frame route: the server sends
+    /// `UniHello::DesktopFrames { session }` frame streams. Older agents
+    /// reject this greeting before any session work; there is no silent
+    /// fallback to the shared `Desktop` route.
+    DesktopV2 {
+        session: [u8; 16],
+        hello: DesktopHello,
+    },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -344,5 +358,21 @@ mod tests {
         assert_eq!(uni2, [vec![4], vec![43; 16]].concat());
         assert!(postcard::from_bytes::<LegacyHello>(&hello2).is_err());
         assert!(postcard::from_bytes::<LegacyUni>(&uni2).is_err());
+        let dv2 = postcard::to_stdvec(&StreamHello::DesktopV2 {
+            session: [44; 16],
+            hello: DesktopHello {
+                display: 0,
+                max_fps: 30,
+                codec: Codec::H264,
+                input_acks: false,
+            },
+        })
+        .unwrap();
+        let uf2 = postcard::to_stdvec(&UniHello::DesktopFrames { id: [44; 16] }).unwrap();
+        let dv2_prefix = [&[10], [44; 16].as_slice()].concat();
+        assert_eq!(&dv2[..17], dv2_prefix.as_slice());
+        assert_eq!(uf2, [vec![5], vec![44; 16]].concat());
+        assert!(postcard::from_bytes::<LegacyHello>(&dv2).is_err());
+        assert!(postcard::from_bytes::<LegacyUni>(&uf2).is_err());
     }
 }

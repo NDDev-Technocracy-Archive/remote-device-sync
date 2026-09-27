@@ -3485,6 +3485,7 @@ dependencies = [
  "memmap2",
  "noq",
  "openh264",
+ "rand 0.10.3",
  "rds-bench",
  "rds-core",
  "rds-net",

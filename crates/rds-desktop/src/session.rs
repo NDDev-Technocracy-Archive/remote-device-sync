@@ -116,6 +116,11 @@ pub struct SessionConfig {
     /// Session clock override. Tests share one clock with the client so
     /// header timestamps compare directly to client receive times.
     pub clock: Option<SessionClock>,
+    /// Uni-stream route tag frame streams lead with. `DesktopV2`
+    /// sessions carry the negotiated `DesktopFrames { id }` route so a
+    /// delayed stream from an ended session cannot reach a replacement;
+    /// the default `Desktop` tag serves the legacy shared route.
+    pub frame_route: Option<rds_core::UniHello>,
 }
 
 /// Adaptive bitrate for one session (Sunshine lesson: pace the encoder
@@ -308,6 +313,7 @@ pub async fn serve_desktop_with(
     let writer_clock = clock.clone();
     let writer_bitrate = Arc::clone(&controls.bitrate);
     let writer_idr = Arc::clone(&controls.idr);
+    let frame_route = config.frame_route.unwrap_or(rds_core::UniHello::Desktop);
     workers.spawn(async move {
         // Token bucket on the paced bitrate: offering faster than the
         // path sustains only backlogs QUIC's send buffer with frames
@@ -351,7 +357,7 @@ pub async fn serve_desktop_with(
                 continue;
             }
             produced.header.send_ts_ms = writer_clock.now_ms();
-            match send_frame(&writer_conn, &produced, &mut rx).await {
+            match send_frame(&writer_conn, frame_route, &produced, &mut rx).await {
                 SendOutcome::Sent => {}
                 SendOutcome::Superseded(newer) => pending = Some(newer),
                 SendOutcome::Done | SendOutcome::Failed => break 'writer,
@@ -769,10 +775,16 @@ enum SendOutcome {
 /// the next delta may depend, retaining partial-write progress.
 async fn send_frame(
     conn: &Connection,
+    route: rds_core::UniHello,
     produced: &Produced,
     rx: &mut mpsc::Receiver<Produced>,
 ) -> SendOutcome {
-    match tokio::time::timeout(FRAME_SEND_TIMEOUT, send_frame_inner(conn, produced, rx)).await {
+    match tokio::time::timeout(
+        FRAME_SEND_TIMEOUT,
+        send_frame_inner(conn, route, produced, rx),
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(_) => {
             tracing::debug!("frame send deadline exceeded");
@@ -783,6 +795,7 @@ async fn send_frame(
 
 async fn send_frame_inner(
     conn: &Connection,
+    route: rds_core::UniHello,
     produced: &Produced,
     rx: &mut mpsc::Receiver<Produced>,
 ) -> SendOutcome {
@@ -803,8 +816,9 @@ async fn send_frame_inner(
         tracing::debug!("frame stream priority failed: {e}");
     }
     // Every uni stream leads with its UniHello tag — the receiver's
-    // per-connection demux routes on it.
-    if let Err(e) = write_frame(&mut *stream, &rds_core::UniHello::Desktop).await {
+    // per-connection demux routes on it. Per-session routes keep a stale
+    // stream out of any replacement session's inbox.
+    if let Err(e) = write_frame(&mut *stream, &route).await {
         tracing::debug!("frame tag write failed: {e}");
         return SendOutcome::Failed;
     }

@@ -68,7 +68,15 @@ async fn cancelled_serving_session_releases_capture_without_closing_connection()
         let serving_conn = b.clone();
         let serving = tokio::spawn(async move {
             let (mut send, mut recv) = serving_conn.accept_bi().await.unwrap();
-            let StreamHello::Desktop(hello) = read_frame(&mut recv).await.unwrap() else {
+            let greeting = read_frame(&mut recv).await.unwrap();
+            let frame_route = match &greeting {
+                StreamHello::DesktopV2 { session, .. } => {
+                    Some(rds_core::UniHello::DesktopFrames { id: *session })
+                }
+                _ => None,
+            };
+            let (StreamHello::Desktop(hello) | StreamHello::DesktopV2 { hello, .. }) = greeting
+            else {
                 panic!("expected desktop hello");
             };
             write_frame(
@@ -88,6 +96,7 @@ async fn cancelled_serving_session_releases_capture_without_closing_connection()
                 SessionConfig {
                     view_only: true,
                     producer: Some(Box::new(source)),
+                    frame_route,
                     ..Default::default()
                 },
             )

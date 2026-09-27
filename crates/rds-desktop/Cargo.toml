@@ -12,6 +12,7 @@ x11 = ["dep:x11rb", "dep:openh264", "dep:memmap2"]
 
 [dependencies]
 bytes.workspace = true
+rand.workspace = true
 memmap2 = { version = "0.9", optional = true }
 openh264 = { version = "0.9", optional = true }
 rds-core.workspace = true

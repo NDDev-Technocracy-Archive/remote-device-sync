@@ -523,6 +523,16 @@ async fn serve_stream(
         anyhow::bail!("service capacity reached");
     };
     let span = info_span!("rds.stream", service = ?service_kind(&hello));
+    // Per-session frame route for `DesktopV2`; the shared `Desktop`
+    // route serves the legacy greeting. Only the desktop service arm
+    // consumes it, and that arm is feature-gated.
+    #[cfg(feature = "desktop")]
+    let desktop_frame_route = match &hello {
+        StreamHello::DesktopV2 { session, .. } => {
+            rds_core::UniHello::DesktopFrames { id: *session }
+        }
+        _ => rds_core::UniHello::Desktop,
+    };
     async move {
         match hello {
             StreamHello::Ping { nonce } => {
@@ -592,7 +602,7 @@ async fn serve_stream(
                     }
                 }
             }
-            StreamHello::Desktop(hello) => {
+            StreamHello::Desktop(hello) | StreamHello::DesktopV2 { hello, .. } => {
                 if desktop {
                     #[cfg(feature = "desktop")]
                     match rds_desktop::capabilities() {
@@ -609,6 +619,7 @@ async fn serve_stream(
                                     view_only: grant
                                         .as_ref()
                                         .is_some_and(|g| !g.permits_desktop_control()),
+                                    frame_route: Some(desktop_frame_route),
                                     ..Default::default()
                                 },
                             )
@@ -749,7 +760,7 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Ping { .. } => ServiceKind::Ping,
         StreamHello::Info => ServiceKind::Info,
         StreamHello::TcpConnect { .. } => ServiceKind::Tcp,
-        StreamHello::Desktop(_) => ServiceKind::Desktop,
+        StreamHello::Desktop(_) | StreamHello::DesktopV2 { .. } => ServiceKind::Desktop,
         StreamHello::Sync
         | StreamHello::SyncTransfer { .. }
         | StreamHello::SyncTransferV2 { .. } => ServiceKind::Sync,
@@ -765,7 +776,9 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
         StreamHello::TcpConnect { port, .. } if !grant.permits_port(*port) => {
             return Err(format!("port {port} outside grant constraints"));
         }
-        StreamHello::Desktop(h) if !grant.permits_display(h.display) => {
+        StreamHello::Desktop(h) | StreamHello::DesktopV2 { hello: h, .. }
+            if !grant.permits_display(h.display) =>
+        {
             return Err(format!("display {} outside grant constraints", h.display));
         }
         _ => {}

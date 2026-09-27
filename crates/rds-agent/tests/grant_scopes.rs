@@ -230,6 +230,28 @@ async fn directional_sync(backend: Backend) {
     assert!(
         matches!(ack, rds_core::HelloAck::Error { message } if message == "service Desktop not granted")
     );
+    // The per-session greeting must not bypass the same scope check.
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(
+        &mut send,
+        &rds_core::StreamHello::DesktopV2 {
+            session: [7; 16],
+            hello: rds_core::DesktopHello {
+                display: 0,
+                max_fps: 30,
+                codec: rds_core::Codec::H264,
+                input_acks: true,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let ack = read_frame::<_, rds_core::HelloAck>(&mut recv)
+        .await
+        .unwrap();
+    assert!(
+        matches!(ack, rds_core::HelloAck::Error { message } if message == "service Desktop not granted")
+    );
     assert!(
         rds_client::open_sync(&conn)
             .await
