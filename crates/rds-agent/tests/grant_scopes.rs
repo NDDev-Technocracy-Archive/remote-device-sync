@@ -227,9 +227,15 @@ async fn directional_sync(backend: Backend) {
     let ack = read_frame::<_, rds_core::HelloAck>(&mut recv)
         .await
         .unwrap();
-    assert!(
-        matches!(ack, rds_core::HelloAck::Error { message } if message == "service Desktop not granted")
-    );
+    // The deployment gate answers first on builds where desktop is not
+    // compiled; on desktop builds the grant scope check produces the
+    // refusal. Either way the stream is refused by name.
+    let desktop_refusal = if cfg!(feature = "desktop") {
+        "service Desktop not granted"
+    } else {
+        "service Desktop not enabled on this agent"
+    };
+    assert!(matches!(ack, rds_core::HelloAck::Error { message } if message == desktop_refusal));
     // The per-session greeting must not bypass the same scope check.
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
     write_frame(
@@ -249,9 +255,7 @@ async fn directional_sync(backend: Backend) {
     let ack = read_frame::<_, rds_core::HelloAck>(&mut recv)
         .await
         .unwrap();
-    assert!(
-        matches!(ack, rds_core::HelloAck::Error { message } if message == "service Desktop not granted")
-    );
+    assert!(matches!(ack, rds_core::HelloAck::Error { message } if message == desktop_refusal));
     assert!(
         rds_client::open_sync(&conn)
             .await

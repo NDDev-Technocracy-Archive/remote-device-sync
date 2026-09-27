@@ -132,7 +132,7 @@ pub struct AgentInfo {
     pub desktop: Option<DesktopCaps>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ServiceKind {
     Ping,
     Info,

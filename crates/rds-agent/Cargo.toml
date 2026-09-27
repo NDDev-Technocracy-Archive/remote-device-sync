@@ -25,6 +25,10 @@ rds-desktop = { workspace = true, optional = true }
 rds-net.workspace = true
 rds-discovery.workspace = true
 rds-sync.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
