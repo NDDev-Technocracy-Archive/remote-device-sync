@@ -35,18 +35,23 @@ pub(crate) fn rss_bytes() -> Option<u64> {
 
 /// Resident set size in bytes via `proc_pidinfo` (`PROC_PIDTASKINFO`).
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 pub(crate) fn rss_bytes() -> Option<u64> {
-    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+    use std::mem::{MaybeUninit, size_of};
+    let mut info = MaybeUninit::<libc::proc_taskinfo>::uninit();
+    // SAFETY: `info` is live, correctly aligned taskinfo storage for the
+    // PROC_PIDTASKINFO request; the call fills it on a full-size return.
     let size = unsafe {
         libc::proc_pidinfo(
             libc::getpid(),
             libc::PROC_PIDTASKINFO,
             0,
             info.as_mut_ptr().cast(),
-            std::mem::size_of::<libc::proc_taskinfo>() as i32,
+            size_of::<libc::proc_taskinfo>() as i32,
         )
     };
-    if size == std::mem::size_of::<libc::proc_taskinfo>() as i32 {
+    if size == size_of::<libc::proc_taskinfo>() as i32 {
+        // SAFETY: proc_pidinfo wrote exactly one complete taskinfo record.
         Some(unsafe { info.assume_init() }.pti_resident_size)
     } else {
         None

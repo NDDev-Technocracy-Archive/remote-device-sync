@@ -49,7 +49,7 @@ Neither increment closes these product gaps or any wave.
 | W2.2 | Partial; exact ALPN selection + sync/desktop session routing | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Desktop sessions mint random per-session IDs in `StreamHello::DesktopV2` and route frames through `UniHello::DesktopFrames { id }`, isolating stale streams and allowing concurrent sessions; the same display grant scope check covers both greetings. Service-wide capability negotiation remains open. |
 | W2.3 | Partial; destination-bound renewable grants, directional scopes, tenant/policy binding and per-path sync scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Grant v3 adds the `tenant`/`policy_revision` claims and the `constraints.sync_paths` subtree scope, checked after `rel_path` normalization before any filesystem work; v2 payloads still verify with all claims absent, and agents pin the binding via `authority.tenant`/`policy_min_revision` (`--tenant`/`--policy-min-revision`), refusing unscoped or stale grants. Account-level scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager + managed desktop channel | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv/desktop commands and keyless `rds session` reuse its endpoint (local wire v5; `desktop --direct` bypasses). Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
-| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
+| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Process-wide fd/RSS ceilings now gate connection admission (`limits.max_fds`/`max_rss_mb`, `--max-fds`/`--max-rss-mb`) with kernel-reported observability on Linux/macOS and honest ungated behavior elsewhere; per-service fairness, broader disk/media cancellation and storm-grade RSS/FD proof remain open. |
 | W2.6 | Partial; agent timeout classes complete, publish retry bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent policy now owns all four server-side classes — handshake, hello, authz reply and shutdown join — as `TimeoutPolicy` tunables (`timeouts.*_secs`, `--*-timeout`, 1..=3600). Directory publish retries use bounded exponential backoff with equal jitter (`RetryPolicy`, 1s→30s default) instead of the fixed ~1s poll cadence; fatal 4xx still fails closed. Agent and owned relay handshake/shutdown budgets exist; agent local startup no longer waits indefinitely for an iroh relay. Client dial/idle classes, transport-level retry policy reuse, desktop/media deadlines and broader startup recovery remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
@@ -2078,3 +2078,32 @@ alive — the fixed-cadence storm the criterion rules out.
 
 Remaining W2.6: client dial/idle classes, transport-level retry reuse
 beyond announce, desktop/media deadlines, broader startup recovery.
+
+## 2026-09-27 — process resource ceilings gate admission (W2.5 partial)
+
+`AgentLimits` gains an optional process budget
+(`with_process_budget(max_fds, max_rss_mb)`) surfaced through
+`limits.max_fds`/`limits.max_rss_mb` and `--max-fds`/`--max-rss-mb`. When
+either ceiling is configured the agent samples the kernel's view —
+`/proc/self/fd` + `VmRSS` on Linux, `/dev/fd` + `proc_pidinfo` on macOS,
+re-statting at most every 200ms so procfs scans stay off the accept hot
+path — and refuses new connections while usage sits at or above the
+ceiling: the pending `Incoming` is dropped (runner path) or the
+established connection is closed with a distinct error (`serve` path),
+in both cases before a connection slot or stream task is consumed.
+Refusals reuse `ConnectionBudgetExhausted`; unobservable platforms keep
+serving rather than gate on a guess, and the metrics snapshot exposes
+`rds_agent_process_fds`/`rds_agent_process_rss_bytes` wherever the
+kernel reports them.
+
+Tests: kernel sanity (`open_fds`, `rss_bytes` report a live process),
+gate construction (`None` budgets install no gate, an impossible
+ceiling refuses, a generous one admits), settings merge/resolve/zero
+rejection, and e2e coverage of both refusal paths — a runner under a
+one-descriptor ceiling refuses the handshake and `serve` refuses an
+established conn with `resource budget` in the error, while a ceiling
+above real usage admits and pings normally.
+
+Remaining W2.5: per-service fairness inside the stream budget, sync
+disk-job and desktop/media cancellation breadth, and storm-grade
+RSS/FD proof under adversarial slow peers.
