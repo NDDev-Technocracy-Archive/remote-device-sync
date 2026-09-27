@@ -45,7 +45,7 @@ Neither increment closes these product gaps or any wave.
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Managed transfers now run the negotiated v2 session: per-transfer route IDs bound into every frame, Hello/HelloAck limit negotiation, typed Cancel both directions. Stronger physical cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
-| W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
+| W2.1 | Implemented; endpoint + agent settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation and preflight before identity creation are implemented. The version-1 agent JSON now carries role/service/peers/authority/limits/timeouts with the same precedence and preflight; `--role`/`--service`/`--no-service` select the gateable service set, disabled services are refused by name ahead of grant machinery, `Info` and directory announcements advertise exactly the served set, and handshake/hello deadlines come from `TimeoutPolicy`. See [agent configuration](agent-configuration.md). |
 | W2.2 | Partial; exact ALPN selection + sync/desktop session routing | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Desktop sessions mint random per-session IDs in `StreamHello::DesktopV2` and route frames through `UniHello::DesktopFrames { id }`, isolating stale streams and allowing concurrent sessions; the same display grant scope check covers both greetings. Service-wide capability negotiation remains open. |
 | W2.3 | Partial; destination-bound renewable grants and directional scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Tenant/policy binding, per-path/account scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
@@ -1932,3 +1932,36 @@ Default-feature builds stay clean (`#[cfg(feature = "desktop")]` on the
 agent-side route derivation). Open: service-wide capability negotiation
 (W2.2 remainder), global media budgets (W2.5/W8), native macOS and
 real-network qualification.
+
+## Unified agent role/service/authority configuration (2026-09-27)
+
+W2.1 closes its remaining scope — role-level service/authority settings and
+timeout policy — as a version-1 `AgentSettings` JSON loaded with
+`--agent-config`, mirroring the endpoint configuration contract: bounded
+regular file, `schema_version` gated, unknown fields rejected, explicit
+flags overriding file values (repeated flags replacing whole lists), and
+structural validation inside the same preflight window before identity or
+sockets exist.
+
+`AgentPolicy::services` makes the served set explicit: `Ping`/`Info` remain
+the always-on control plane; `tcp`, `desktop` and `sync` are gateable;
+`audio` stays wire-reserved and is refused at configuration time rather
+than advertised. With no selection, the implicit set matches prior
+behavior (tcp + desktop-if-compiled + sync-if-configured). A stream for a
+disabled service is refused by name before grant or per-service work runs;
+`Info` and the directory announcement advertise exactly the effective set.
+Role presets (`access`/`sync`/`desktop`/`full`), per-service sections,
+authority posture (issuers, grant TTL, directory/registry/revocations) and
+a bounded `TimeoutPolicy` (handshake and greeting deadlines, 1–3600 s)
+round out the document; global timeout classes remain W2.6 scope.
+
+Coverage: `settings` unit tests pin the schema contract (version, unknown
+fields, mutual exclusion, bounds, cross-field authority requirements) and
+the merge semantics (flag-over-file scalars, list replacement, nested
+authority field merge, implicit/explicit/disabled service resolution,
+desktop build gating). Binary-level tests assert every failure mode exits
+before identity or bind, including flag-file precedence. `service_policy`
+e2e proves the gate on a real agent: an explicit `{tcp}` set refuses
+sync/audio by name despite a configured sync root, `Info` lists exactly
+the enabled set, disabled-service refusal precedes grant requirements,
+and the greeting deadline follows the configured timeout.

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "role": "access",
+  "service": { "ssh_target": "127.0.0.1:22" },
+  "peers": { "allow": ["<endpoint-id>"] },
+  "timeouts": { "handshake_secs": 15, "hello_secs": 15 }
+}
