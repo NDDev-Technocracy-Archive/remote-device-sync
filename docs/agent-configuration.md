@@ -34,7 +34,7 @@ identity creation or socket binding, alongside the endpoint preflight.
 | `service` | `ssh_target`, `tcp_targets`, `allow_any_tcp`, `sync_dir` |
 | `peers` | `allow`: endpoint-id strings, at most 256 |
 | `authority` | `issuers`, `grant_ttl_secs` (1–86400), `tenant`, `policy_min_revision`, `directory`, `directory_ca`, `record_ttl_secs`, `record_state`, `registry`, `revocations` |
-| `limits` | `max_connections`, `max_streams`; positive 16-bit |
+| `limits` | `max_connections`, `max_streams` (positive 16-bit); `max_fds`, `max_rss_mb` (positive, optional process ceilings) |
 | `timeouts` | `handshake_secs`, `hello_secs`, `authz_secs`, `shutdown_secs`; each 1–3600 |
 
 `registry` holds `key` (required when present), `epoch`, `state` and
@@ -92,6 +92,22 @@ for established connection tasks when the agent stops. Defaults: 15s,
 values. Per-service budgets (frame streams, transfer deadlines, renewal
 windows) remain service-internal and are not set from this file; client
 dial, idle and media/progress classes are still W2.6 open items.
+
+## Process resource ceilings
+
+`limits.max_fds` and `limits.max_rss_mb` bound the whole process, not a
+single connection: while the kernel reports the agent holding that many
+open descriptors (Linux `/proc/self/fd`, macOS `/dev/fd`) or that much
+resident memory (Linux `VmRSS`, macOS `proc_pidinfo`), new connections are
+refused at admission — the pending handshake is dropped before a slot or
+task is consumed — until usage falls below the ceiling again. Refusals
+emit `ConnectionBudgetExhausted` like the connection semaphore; the
+observed `rds_agent_process_fds` and `rds_agent_process_rss_bytes` keys
+appear in the metrics snapshot wherever the kernel reports them.
+Platforms without an observable quantity keep serving rather than
+gating on a guess. Flags `--max-fds` and `--max-rss-mb` override file
+values. Per-service fairness and disk/media job budgets are still open
+under W2.5.
 
 ## Example
 
