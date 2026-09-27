@@ -78,6 +78,14 @@ struct Cli {
     /// one slot is reserved from service bodies for authorization/renewal.
     #[arg(long)]
     max_streams: Option<std::num::NonZeroU16>,
+    /// Process-wide open-descriptor ceiling; new connections are refused
+    /// while the process holds this many or more (Linux/macOS).
+    #[arg(long)]
+    max_fds: Option<std::num::NonZeroU64>,
+    /// Process-wide resident-set ceiling in MiB; new connections are
+    /// refused while resident memory meets or exceeds it.
+    #[arg(long)]
+    max_rss_mb: Option<std::num::NonZeroU64>,
     /// Inbound connection handshake deadline in seconds (1..=3600).
     #[arg(long)]
     handshake_timeout: Option<u64>,
@@ -212,6 +220,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             revocations_interval: cli.revocations_interval,
             max_connections: cli.max_connections,
             max_streams: cli.max_streams,
+            max_fds: cli.max_fds,
+            max_rss_mb: cli.max_rss_mb,
             handshake_timeout: cli.handshake_timeout,
             hello_timeout: cli.hello_timeout,
             authz_timeout: cli.authz_timeout,
@@ -399,12 +409,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
 
     let agent = std::sync::Arc::new(
-        Agent::new(endpoint, policy).with_limits(AgentLimits::new(
-            resolved
-                .max_connections
-                .unwrap_or(std::num::NonZeroU16::new(32).expect("positive limit")),
-            max_streams,
-        )),
+        Agent::new(endpoint, policy).with_limits(
+            AgentLimits::new(
+                resolved
+                    .max_connections
+                    .unwrap_or(std::num::NonZeroU16::new(32).expect("positive limit")),
+                max_streams,
+            )
+            .with_process_budget(
+                resolved.max_fds.map(std::num::NonZeroU64::get),
+                resolved.max_rss_mb.map(std::num::NonZeroU64::get),
+            ),
+        ),
     );
     let metrics = agent.metrics();
     let mut control =

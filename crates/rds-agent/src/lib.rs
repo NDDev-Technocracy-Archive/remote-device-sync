@@ -39,6 +39,7 @@ mod authz;
 mod limits;
 mod revocations;
 pub mod settings;
+mod sys;
 use authz::{ConnAuthz, ConnectionLifetime, authorize};
 pub use limits::AgentLimits;
 pub use revocations::{RevocationFeed, RevocationPolicy, watch_revocations};
@@ -317,6 +318,7 @@ pub struct Agent {
     limits: AgentLimits,
     admission: Arc<Semaphore>,
     stream_counter: limits::StreamCounter,
+    gate: Option<limits::ResourceGate>,
 }
 
 /// Weak, in-memory observation: keeping an exporter alive never owns agent I/O.
@@ -349,6 +351,14 @@ impl AgentMetrics {
                 u64::from(agent.policy.grants_required()),
             ),
         ]);
+        // Process footprint where the kernel reports it; an unobservable
+        // platform simply omits the key rather than inventing a number.
+        if let Some(fds) = sys::open_fds() {
+            values.insert("rds_agent_process_fds", fds as u64);
+        }
+        if let Some(rss) = sys::rss_bytes() {
+            values.insert("rds_agent_process_rss_bytes", rss);
+        }
         let grants = agent.policy.active_grants.try_lock().ok();
         values.insert("rds_agent_active_grants_known", u64::from(grants.is_some()));
         if let Some(grants) = grants {
@@ -379,6 +389,7 @@ impl Agent {
             limits,
             admission: Arc::new(Semaphore::new(limits.connections())),
             stream_counter: Default::default(),
+            gate: limits::ResourceGate::new(limits),
         }
     }
 
@@ -387,6 +398,7 @@ impl Agent {
     pub fn with_limits(mut self, limits: AgentLimits) -> Self {
         self.limits = limits;
         self.admission = Arc::new(Semaphore::new(limits.connections()));
+        self.gate = limits::ResourceGate::new(limits);
         self
     }
 
@@ -428,6 +440,14 @@ impl Agent {
                 }
                 incoming = self.endpoint.accept() => {
                     let Some(incoming) = incoming else { break; };
+                    if self.gate.as_ref().is_some_and(|gate| !gate.allows()) {
+                        rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
+                        // Dropping Incoming refuses the handshake without a
+                        // parked application task or a new connection slot.
+                        drop(incoming);
+                        debug!("connection refused: process resource budget exceeded");
+                        continue;
+                    }
                     let Ok(permit) = self.admission.clone().try_acquire_owned() else {
                         rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
                         // Dropping Incoming refuses the handshake without a
@@ -489,6 +509,11 @@ impl Agent {
         if self.policy.grants_required() && self.limits.streams() < 2 {
             conn.close(5u32.into(), b"invalid grant stream budget");
             anyhow::bail!("grant mode requires at least two stream slots");
+        }
+        if self.gate.as_ref().is_some_and(|gate| !gate.allows()) {
+            rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
+            conn.close(5u32.into(), b"agent process resource budget exceeded");
+            anyhow::bail!("agent process resource budget exceeded");
         }
         let Ok(_permit) = self.admission.clone().try_acquire_owned() else {
             rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);

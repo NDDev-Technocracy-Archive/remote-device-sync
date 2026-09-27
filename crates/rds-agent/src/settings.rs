@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::io::Read;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -190,6 +190,13 @@ pub struct AuthoritySettings {
 pub struct LimitSettings {
     pub max_connections: Option<NonZeroU16>,
     pub max_streams: Option<NonZeroU16>,
+    /// Process-wide open-descriptor ceiling; once the kernel reports the
+    /// process at or above it, new connections are refused until usage
+    /// falls. Absent = ungated.
+    pub max_fds: Option<NonZeroU64>,
+    /// Process-wide resident-set ceiling in MiB, same admission rule as
+    /// `max_fds`. Absent = ungated.
+    pub max_rss_mb: Option<NonZeroU64>,
 }
 
 /// Connection-admission and stream-greeting deadlines in seconds, each
@@ -263,6 +270,8 @@ pub struct AgentOverrides {
     pub revocations_interval: Option<u64>,
     pub max_connections: Option<NonZeroU16>,
     pub max_streams: Option<NonZeroU16>,
+    pub max_fds: Option<NonZeroU64>,
+    pub max_rss_mb: Option<NonZeroU64>,
     pub handshake_timeout: Option<u64>,
     pub hello_timeout: Option<u64>,
     pub authz_timeout: Option<u64>,
@@ -299,6 +308,10 @@ pub struct ResolvedAgent {
     pub revocations_interval: Option<u64>,
     pub max_connections: Option<NonZeroU16>,
     pub max_streams: Option<NonZeroU16>,
+    /// Process fd ceiling (see `LimitSettings::max_fds`).
+    pub max_fds: Option<NonZeroU64>,
+    /// Process resident-set ceiling in MiB.
+    pub max_rss_mb: Option<NonZeroU64>,
     pub timeouts: Option<TimeoutPolicy>,
 }
 
@@ -466,6 +479,12 @@ impl AgentSettings {
         }
         if flags.max_streams.is_some() {
             self.limits.max_streams = flags.max_streams;
+        }
+        if flags.max_fds.is_some() {
+            self.limits.max_fds = flags.max_fds;
+        }
+        if flags.max_rss_mb.is_some() {
+            self.limits.max_rss_mb = flags.max_rss_mb;
         }
         if flags.handshake_timeout.is_some() {
             self.timeouts.handshake_secs = flags.handshake_timeout;
@@ -712,6 +731,8 @@ impl AgentSettings {
             revocations_interval: revocations.and_then(|r| r.interval_secs),
             max_connections: self.limits.max_connections,
             max_streams: self.limits.max_streams,
+            max_fds: self.limits.max_fds,
+            max_rss_mb: self.limits.max_rss_mb,
             timeouts,
         })
     }
@@ -870,6 +891,36 @@ mod tests {
             AgentSettings::from_json(br#"{"schema_version":1,"limits":{"max_streams":0}}"#)
                 .is_err()
         );
+        assert!(
+            AgentSettings::from_json(br#"{"schema_version":1,"limits":{"max_fds":0}}"#).is_err()
+        );
+        assert!(
+            AgentSettings::from_json(br#"{"schema_version":1,"limits":{"max_rss_mb":0}}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn resource_budgets_merge_and_resolve() {
+        let resolved =
+            resolve_ok(r#"{"schema_version":1,"limits":{"max_fds":512,"max_rss_mb":256}}"#);
+        assert_eq!(resolved.max_fds.unwrap().get(), 512);
+        assert_eq!(resolved.max_rss_mb.unwrap().get(), 256);
+
+        // Flag values replace file values per-field.
+        let settings =
+            parse(r#"{"schema_version":1,"limits":{"max_fds":128}}"#).apply(AgentOverrides {
+                max_fds: NonZeroU64::new(256),
+                max_rss_mb: NonZeroU64::new(64),
+                ..Default::default()
+            });
+        let resolved = settings.resolve().unwrap();
+        assert_eq!(resolved.max_fds.unwrap().get(), 256);
+        assert_eq!(resolved.max_rss_mb.unwrap().get(), 64);
+
+        // Absent everywhere resolves to no process gate.
+        let resolved = resolve_ok(r#"{"schema_version":1}"#);
+        assert!(resolved.max_fds.is_none());
+        assert!(resolved.max_rss_mb.is_none());
     }
 
     #[test]

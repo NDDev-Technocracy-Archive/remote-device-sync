@@ -3375,6 +3375,7 @@ dependencies = [
  "data-encoding",
  "ed25519-dalek",
  "iroh-relay",
+ "libc",
  "rand 0.10.3",
  "rds-cli",
  "rds-client",

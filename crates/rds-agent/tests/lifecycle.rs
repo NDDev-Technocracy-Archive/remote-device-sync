@@ -296,6 +296,90 @@ async fn direct_serve_enforces_budget_and_cancellation_releases_it() {
     }
 }
 
+/// Fixture variant carrying a process fd ceiling (MiB ceiling unused here).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn fixture_with_fd_budget(
+    backend: Backend,
+    connections: u16,
+    streams: u16,
+    max_fds: u64,
+) -> (Arc<Agent>, Vec<Endpoint>) {
+    let config = || EndpointConfig {
+        backend,
+        discovery: false,
+        bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+        ..Default::default()
+    };
+    let clients = vec![
+        bind_endpoint(config()).await.unwrap(),
+        bind_endpoint(config()).await.unwrap(),
+    ];
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.allow.extend(clients.iter().map(Endpoint::id));
+    let agent = Agent::new(bind_endpoint(config()).await.unwrap(), policy).with_limits(
+        AgentLimits::new(
+            std::num::NonZeroU16::new(connections).unwrap(),
+            std::num::NonZeroU16::new(streams).unwrap(),
+        )
+        .with_process_budget(Some(max_fds), None),
+    );
+    (Arc::new(agent), clients)
+}
+
+/// A ceiling of one descriptor is already exceeded, so the runner refuses
+/// the handshake and `serve` refuses an established conn — neither consumes
+/// a connection slot.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_fd_budget_refuses_runner_and_serve() {
+    for backend in backends() {
+        let (agent, clients) = fixture_with_fd_budget(backend, 4, 2, 1).await;
+        let runner = start(&agent);
+        let refused = tokio::time::timeout(Duration::from_secs(2), async {
+            rds_cli::connect(&clients[0], agent.endpoint.addr())
+                .await
+                .is_err()
+        })
+        .await
+        .expect("over-budget agent left a connection attempt parked");
+        assert!(
+            refused,
+            "{backend:?} over-budget agent admitted a connection"
+        );
+        state(&agent, 0, 0).await;
+        runner.abort();
+        assert!(runner.await.unwrap_err().is_cancelled());
+        // serve() applies the same gate to an already-established conn.
+        let (conn, server) = manual_pair(&agent, &clients[1]).await;
+        let error = agent.serve(server).await.unwrap_err();
+        assert!(error.to_string().contains("resource budget"));
+        tokio::time::timeout(Duration::from_secs(2), conn.wait_closed())
+            .await
+            .unwrap();
+        assert_eq!(agent.active_connections(), 0);
+        agent.endpoint.close().await;
+        for client in clients {
+            client.close().await;
+        }
+    }
+}
+
+/// A ceiling above real usage admits normally — the gate must not disturb
+/// the configured-but-untriggered path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_fd_budget_above_usage_still_serves() {
+    for backend in backends() {
+        let (agent, clients) = fixture_with_fd_budget(backend, 1, 2, u64::MAX).await;
+        let runner = start(&agent);
+        let conn = rds_cli::connect(&clients[0], agent.endpoint.addr())
+            .await
+            .unwrap();
+        rds_cli::ping(&conn, 1).await.unwrap();
+        stop(&agent, &clients, runner).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_track_real_admission_streams_and_do_not_own_agent_io() {
     for backend in backends() {
