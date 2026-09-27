@@ -123,6 +123,12 @@ bind access to the controlled endpoint. `rds session renew --session <id>
 --grant-file <path>` extends a live same-scope connection; automatic GDS issuance
 is still pending. Old grants must be reissued, and CLI/agent IPC v4 upgraded together.
 
+The agent's role, data-plane services, authority posture and deadlines can
+also live in one versioned JSON document (`--agent-config`), with
+`--role`/`--service`/`--no-service` as the flag surface; disabled services
+are refused before grant machinery runs and `Info` advertises exactly what
+is served. See [agent configuration](docs/agent-configuration.md).
+
 Endpoint publication also persists its revision counter and exact retry bytes
 (`rds-agent --record-state`, default beside the identity key). Records and
 deletes use a versioned signature contract; old directories require the explicit

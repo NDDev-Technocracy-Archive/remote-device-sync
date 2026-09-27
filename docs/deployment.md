@@ -45,6 +45,10 @@ local binaries together; old binaries and copied/manual-replaced keys are outsid
 this cooperative guarantee. See [migration and ownership](local-sessions.md).
 The relay's `--allow` covers every endpoint that may use the relay.
 
+Agent role, service, peer, authority, limit and timeout policy can live in a
+versioned JSON file instead of flags — `--agent-config /etc/rds/agent.json`;
+see [agent configuration](agent-configuration.md).
+
 ## Ports and firewall
 
 | Port | Proto | Service | Exposure |

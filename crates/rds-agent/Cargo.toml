@@ -35,6 +35,7 @@ tracing.workspace = true
 [dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
 iroh-relay = { workspace = true, features = ["server"] }
+rand = { workspace = true }
 rds-cli = { path = "../rds-cli" }
 
 [lints]

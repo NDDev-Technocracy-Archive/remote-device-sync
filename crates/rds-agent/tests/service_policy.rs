@@ -109,7 +109,7 @@ async fn explicit_service_set(backend: Backend) {
         vec![ServiceKind::Ping, ServiceKind::Info, ServiceKind::Tcp]
     );
 
-    rds_client::ping(&conn, 7).await.unwrap();
+    rds_client::ping(&conn, rand::random()).await.unwrap();
     let (send, _recv) = rds_client::open_tcp(&conn, "127.0.0.1", tcp_port)
         .await
         .expect("enabled tcp service is served");
@@ -120,7 +120,7 @@ async fn explicit_service_set(backend: Backend) {
     // configured on disk but not enabled, and audio, which is reserved.
     for hello in [
         StreamHello::Sync,
-        StreamHello::SyncTransferV2 { id: [9; 16] },
+        StreamHello::SyncTransferV2 { id: rand::random() },
         StreamHello::Audio(rds_core::AudioHello {
             codec: rds_core::AudioCodec::Opus,
             sample_rate: 48_000,

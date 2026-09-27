@@ -1,10 +1,10 @@
 # Endpoint configuration
 
 Both `rds` and `rds-agent` accept `--endpoint-config FILE`. This versioned JSON
-file controls the endpoint transport. It does not contain the endpoint secret,
-grant issuer, registry/revocation authority, directory credentials or service
-policy; their existing provisioning options remain separate. Unified role-level
-policy and negotiated session-budget configuration is still W2.1 work.
+file controls the endpoint transport. It does not contain the endpoint secret
+or service policy; role, service, peer, authority, limit and timeout policy
+live in the versioned agent configuration — see
+[agent configuration](agent-configuration.md).
 
 Connectivity commands now use the local agent by default. Put transport/directory
 configuration on that agent; managed CLI commands reject those flags. Explicit
@@ -27,8 +27,8 @@ variants, trailing JSON and unsupported schema versions are rejected. The
 selected backend must be compiled into the binary; `noq` requires the
 `transport-noq` feature. Syntax is parsed before overrides, and the resulting
 combination is validated before creating a key file, opening policy state or
-binding the endpoint. This preflight applies to endpoint settings, not yet every
-role-specific service option.
+binding the endpoint. The same preflight window applies to the merged agent
+configuration (role/service/authority/timeout sections).
 
 | Field | Meaning / bound |
 |---|---|

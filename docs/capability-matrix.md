@@ -20,13 +20,19 @@ below; `README.md` must link this file.
 
 ## Services (agent `Info` advertisement and grant scopes)
 
+The data-plane services are gated by deployment policy — `role`, `services`
+and `disabled_services` in [agent configuration](agent-configuration.md), or
+`--role`/`--service`/`--no-service` flags. A disabled service is refused by
+name before grant machinery runs, and `Info`/directory announcements list
+only what is actually served. `ping`/`info` are the always-on control plane.
+
 | Capability | State | Runtime prerequisites | Evidence |
 |---|---|---|---|
 | service:ping | implemented | peer on `--allow` list | `rds-net` tests, CI |
 | service:info | implemented | peer on `--allow` list | `rds-cli` tests, CI |
-| service:tcp | implemented | `--allow` + grant scope for tcp | `rds-ssh` e2e, CI |
-| service:desktop | experimental | `desktop` build flag; usable capture backend; grant scope | capture→encode→decode→stats contract tests; no viewer |
-| service:sync | implemented | `--sync-dir` configured | `rds-sync` tests, resumable transfer tests |
+| service:tcp | implemented | enabled + `--allow` + grant scope for tcp | `rds-ssh` e2e, CI |
+| service:desktop | experimental | enabled + `desktop` build flag; usable capture backend; grant scope | capture→encode→decode→stats contract tests; no viewer |
+| service:sync | implemented | enabled + `--sync-dir` configured | `rds-sync` tests, resumable transfer tests |
 | service:audio | stub | no codec; wire shape reserved in v2 | `ServiceKind::Audio` variant only |
 | service:sync-read | implemented | grant scope on sync root | grant/scope tests |
 | service:sync-write | implemented | grant scope on sync root | grant/scope tests |
