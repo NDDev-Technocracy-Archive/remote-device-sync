@@ -1,10 +1,9 @@
 //! `rds-agent`: daemon on a controlled device.
 
-use std::str::FromStr;
-
 use clap::Parser;
-use rds_agent::{Agent, AgentLimits, AgentPolicy};
-use rds_net::EndpointId;
+use rds_agent::{
+    Agent, AgentLimits, AgentOverrides, AgentPolicy, AgentSettings, Role, ServiceName,
+};
 use rds_net::{
     EndpointOverrides, EndpointSettings, Ticket, acquire_key, bind_endpoint, default_key_path,
 };
@@ -47,72 +46,94 @@ struct Cli {
     /// Local UDP bind address; repeatable on the owned backend.
     #[arg(long)]
     bind_address: Vec<std::net::SocketAddr>,
+    /// Versioned agent JSON configuration: role, services, peers,
+    /// authority, limits and timeouts. Explicit flags override it.
+    #[arg(long)]
+    agent_config: Option<std::path::PathBuf>,
+    /// Deployment role preset: access | sync | desktop | full.
+    /// Mutually exclusive with --service.
+    #[arg(long, conflicts_with = "service")]
+    role: Option<Role>,
+    /// Data-plane service to serve: tcp | desktop | sync. Repeatable;
+    /// replaces the implicit set and any configured role.
+    #[arg(long = "service", conflicts_with = "role")]
+    service: Vec<ServiceName>,
+    /// Remove a service from the role/implicit set. Repeatable.
+    #[arg(long = "no-service")]
+    no_service: Vec<ServiceName>,
     /// Allowed peer EndpointId. Repeatable.
     #[arg(long = "allow")]
     allow: Vec<String>,
-    /// SSH socket the TcpConnect service may reach.
-    #[arg(long, default_value = "127.0.0.1:22")]
-    ssh: rds_core::TcpTarget,
+    /// SSH socket the TcpConnect service may reach (default 127.0.0.1:22).
+    #[arg(long)]
+    ssh: Option<rds_core::TcpTarget>,
     /// Permit TcpConnect to any host:port (development only).
     #[arg(long)]
     allow_any_tcp: bool,
     /// Pending handshakes and admitted connections; positive 16-bit limit.
-    #[arg(long, default_value = "32")]
-    max_connections: std::num::NonZeroU16,
-    /// Concurrent tasks per connection. Grant mode needs >=2; one slot is
-    /// reserved from service bodies for authorization/renewal.
-    #[arg(long, default_value = "64")]
-    max_streams: std::num::NonZeroU16,
+    #[arg(long)]
+    max_connections: Option<std::num::NonZeroU16>,
+    /// Concurrent tasks per connection (default 64). Grant mode needs >=2;
+    /// one slot is reserved from service bodies for authorization/renewal.
+    #[arg(long)]
+    max_streams: Option<std::num::NonZeroU16>,
+    /// Inbound connection handshake deadline in seconds (1..=3600).
+    #[arg(long)]
+    handshake_timeout: Option<u64>,
+    /// Per-stream greeting read deadline in seconds (1..=3600).
+    #[arg(long)]
+    hello_timeout: Option<u64>,
     /// Directory HTTP(S) origin or legacy IP:port; the agent publishes its
     /// signed record and keeps it fresh.
     #[arg(long)]
     directory: Option<String>,
     /// PEM CA bundle for directory HTTPS; replaces the public root store.
-    #[arg(long, requires = "directory")]
+    #[arg(long)]
     directory_ca: Option<std::path::PathBuf>,
     /// Trusted registry authority for local-manager device-name resolution.
-    #[arg(long, requires = "directory")]
+    #[arg(long)]
     registry_key: Option<String>,
-    /// Bootstrap registry authority epoch.
-    #[arg(long, default_value = "1")]
-    registry_epoch: u64,
+    /// Bootstrap registry authority epoch (default 1).
+    #[arg(long)]
+    registry_epoch: Option<u64>,
     /// Durable name-trust state; default is beside --key-file.
-    #[arg(long, requires = "registry_key")]
+    #[arg(long)]
     registry_state: Option<std::path::PathBuf>,
     /// Registry authority rotation receipt; repeat in epoch order.
-    #[arg(long, requires = "registry_key")]
+    #[arg(long)]
     registry_rotation: Vec<std::path::PathBuf>,
-    /// Record TTL when `--directory` is set.
-    #[arg(long, default_value = "300")]
-    record_ttl: u64,
+    /// Record TTL when `--directory` is set (default 300).
+    #[arg(long)]
+    record_ttl: Option<u64>,
     /// Private durable publisher state; default is beside --key-file.
-    #[arg(long, requires = "directory")]
+    #[arg(long)]
     record_state: Option<std::path::PathBuf>,
     /// Trusted grant issuer (base32 verifying key). Repeatable. When
     /// set, every connection must present a valid estate-signed grant
     /// before any service stream opens.
     #[arg(long = "issuer")]
     issuers: Vec<String>,
-    /// Maximum grant lifetime accepted, in seconds.
-    #[arg(long, default_value = "300")]
-    grant_ttl: u64,
+    /// Maximum grant lifetime accepted, in seconds (default 300).
+    #[arg(long)]
+    grant_ttl: Option<u64>,
     /// Verifying key that signs the estate revocation snapshot
     /// (`GET /v1/revocations`). Required for denylist polling when
     /// `--directory` is set.
-    #[arg(long, requires_all = ["directory", "issuers"])]
+    #[arg(long)]
     revocations_key: Option<String>,
-    /// Epoch of the independently provisioned bootstrap revocation authority.
-    #[arg(long, default_value = "1")]
-    revocations_epoch: u64,
+    /// Epoch of the independently provisioned bootstrap revocation
+    /// authority (default 1).
+    #[arg(long)]
+    revocations_epoch: Option<u64>,
     /// Private durable policy directory; default is beside --key-file.
-    #[arg(long, requires = "revocations_key")]
+    #[arg(long)]
     revocations_state: Option<std::path::PathBuf>,
     /// Dual-signed authority rotation receipt. Repeat in epoch order.
-    #[arg(long, requires = "revocations_key")]
+    #[arg(long)]
     authority_rotation: Vec<std::path::PathBuf>,
-    /// Revocation poll interval in seconds.
-    #[arg(long, default_value = "30")]
-    revocations_interval: u64,
+    /// Revocation poll interval in seconds (default 30).
+    #[arg(long)]
+    revocations_interval: Option<u64>,
     /// Directory the Sync service may read/write under.
     #[arg(long)]
     sync_dir: Option<std::path::PathBuf>,
@@ -125,10 +146,6 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        cli.issuers.is_empty() || cli.max_streams.get() >= 2,
-        "grant mode requires --max-streams at least 2"
-    );
     let prepared_admin = cli.admin.bind().await?;
     let mut config = cli
         .endpoint_config
@@ -144,6 +161,83 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             no_relay: cli.no_relay,
         })?
         .into_endpoint()?;
+
+    // Role/service/authority policy resolves in the same preflight window:
+    // before an identity is created or a socket bound.
+    let merged = cli
+        .agent_config
+        .as_deref()
+        .map(AgentSettings::load)
+        .transpose()?
+        .unwrap_or_default()
+        .apply(AgentOverrides {
+            role: cli.role,
+            services: cli.service,
+            no_services: cli.no_service,
+            ssh: cli.ssh,
+            allow_any_tcp: cli.allow_any_tcp,
+            sync_dir: cli.sync_dir,
+            allow: cli.allow,
+            issuers: cli.issuers,
+            grant_ttl: cli.grant_ttl,
+            directory: cli.directory,
+            directory_ca: cli.directory_ca,
+            record_ttl: cli.record_ttl,
+            record_state: cli.record_state,
+            registry_key: cli.registry_key,
+            registry_epoch: cli.registry_epoch,
+            registry_state: cli.registry_state,
+            registry_rotations: cli.registry_rotation,
+            revocations_key: cli.revocations_key,
+            revocations_epoch: cli.revocations_epoch,
+            revocations_state: cli.revocations_state,
+            revocations_rotations: cli.authority_rotation,
+            revocations_interval: cli.revocations_interval,
+            max_connections: cli.max_connections,
+            max_streams: cli.max_streams,
+            handshake_timeout: cli.handshake_timeout,
+            hello_timeout: cli.hello_timeout,
+        });
+    merged.validate()?;
+    // Budget and authority cross-checks run on the merged document before
+    // any string is decoded, matching the previous flag-only order.
+    let max_streams = merged
+        .limits
+        .max_streams
+        .unwrap_or(std::num::NonZeroU16::new(64).expect("positive limit"));
+    anyhow::ensure!(
+        merged.authority.issuers.is_empty() || max_streams.get() >= 2,
+        "grant mode requires --max-streams at least 2"
+    );
+    if !merged.authority.issuers.is_empty() && merged.authority.revocations.is_none() {
+        anyhow::bail!("managed grants require --directory and --revocations-key");
+    }
+    let resolved = merged.resolve()?;
+
+    let ssh_target = resolved
+        .ssh_target
+        .unwrap_or_else(|| "127.0.0.1:22".parse().expect("static target parses"));
+    let (ssh_host, ssh_port) = ssh_target.into_parts();
+
+    let mut policy = AgentPolicy::ssh_only((ssh_host, ssh_port));
+    for target in &resolved.tcp_targets {
+        let (host, port) = target.clone().into_parts();
+        policy.tcp_targets.insert((host, port));
+    }
+    for id in &resolved.allow {
+        policy.allow.insert(*id);
+    }
+    policy.allow_any_tcp = resolved.allow_any_tcp;
+    policy.grant_max_ttl = std::time::Duration::from_secs(resolved.grant_ttl.unwrap_or(300));
+    policy.sync_dir = resolved.sync_dir;
+    policy.services = resolved.services;
+    if let Some(timeouts) = resolved.timeouts {
+        policy.timeouts = timeouts;
+    }
+    policy.issuers.extend(resolved.issuers.iter().copied());
+    policy
+        .validate()
+        .map_err(|why| anyhow::anyhow!("invalid agent policy: {why}"))?;
 
     let key_path = cli
         .key_file
@@ -163,47 +257,28 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let identity = tokio::task::spawn_blocking(move || acquire_key(&key_load_path)).await??;
     let secret_key = identity.secret_key().clone();
 
-    let (ssh_host, ssh_port) = cli.ssh.into_parts();
-
-    let mut policy = AgentPolicy::ssh_only((ssh_host, ssh_port));
-    for id in &cli.allow {
-        policy.allow.insert(EndpointId::from_str(id)?);
-    }
-    policy.allow_any_tcp = cli.allow_any_tcp;
-    policy.grant_max_ttl = std::time::Duration::from_secs(cli.grant_ttl);
-    policy.sync_dir = cli.sync_dir;
-    for s in &cli.issuers {
-        let bytes = data_encoding::BASE32_NOPAD
-            .decode(s.to_uppercase().as_bytes())
-            .map_err(|e| anyhow::anyhow!("--issuer not base32: {e}"))?;
-        let raw: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("--issuer is not 32 bytes"))?;
-        policy.issuers.insert(raw);
-    }
-
     config.secret_key = Some(secret_key.clone());
 
-    let mut directory = cli
+    let mut directory = resolved
         .directory
         .as_deref()
         .map(|origin| -> anyhow::Result<_> {
             let mut client = rds_discovery::client::Client::from_endpoint(origin)?;
-            if let Some(path) = &cli.directory_ca {
+            if let Some(path) = &resolved.directory_ca {
                 client = client.with_ca_pem(&std::fs::read(path)?)?;
             }
             Ok(client)
         })
         .transpose()?;
-    if let Some(key) = cli.registry_key {
+    if let Some(key) = resolved.registry_key {
         let client = directory
             .take()
             .ok_or_else(|| anyhow::anyhow!("registry trust requires --directory"))?;
-        let path = cli
+        let path = resolved
             .registry_state
             .unwrap_or_else(|| key_path.with_extension("registry-state"));
-        let epoch = cli.registry_epoch;
-        let rotations = cli.registry_rotation;
+        let epoch = resolved.registry_epoch.unwrap_or(1);
+        let rotations = resolved.registry_rotations;
         directory = Some(
             tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
                 let authority = rds_discovery::authority::Authority::from_base32(&key, epoch)?;
@@ -213,19 +288,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             .await??,
         );
     }
-    if !policy.issuers.is_empty() && cli.revocations_key.is_none() {
-        anyhow::bail!("managed grants require --directory and --revocations-key");
-    }
     let policy_handle = std::sync::Arc::new(policy.clone());
     let _revocations = if let (Some(client), Some(key)) =
-        (directory.clone(), cli.revocations_key.as_deref())
+        (directory.clone(), resolved.revocations_key.as_deref())
     {
-        let authority =
-            rds_discovery::authority::Authority::from_base32(key, cli.revocations_epoch)?;
-        let path = cli
+        let authority = rds_discovery::authority::Authority::from_base32(
+            key,
+            resolved.revocations_epoch.unwrap_or(1),
+        )?;
+        let path = resolved
             .revocations_state
             .unwrap_or_else(|| key_path.with_extension("revocations-state"));
-        let rotations = cli.authority_rotation;
+        let rotations = resolved.revocations_rotations;
         let store =
             tokio::task::spawn_blocking(move || -> Result<_, rds_discovery::DiscoveryError> {
                 let now = rds_discovery::clock::Reading::now()?;
@@ -240,14 +314,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             client,
             store,
             policy_handle,
-            std::time::Duration::from_secs(cli.revocations_interval),
+            std::time::Duration::from_secs(resolved.revocations_interval.unwrap_or(30)),
         )?)
     } else {
         None
     };
 
     let record_issuer = if directory.is_some() {
-        let path = cli
+        let path = resolved
             .record_state
             .unwrap_or_else(|| key_path.with_extension("publisher-state"));
         let key = ed25519_dalek::SigningKey::from_bytes(&secret_key.to_bytes());
@@ -266,16 +340,29 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // develops independently; the announcer publishes address changes.
 
     let mut announce = if let (Some(client), Some(issuer)) = (directory.clone(), record_issuer) {
+        // The directory record advertises what the policy actually serves:
+        // Ping is the always-on liveness beacon; data-plane services map
+        // from the effective set and only when usable in this binary.
+        let services = policy
+            .effective_services()
+            .iter()
+            .filter_map(|kind| match kind {
+                rds_core::ServiceKind::Ping => Some(rds_discovery::Service::Ping),
+                rds_core::ServiceKind::Tcp => Some(rds_discovery::Service::TcpForward),
+                rds_core::ServiceKind::Desktop if cfg!(feature = "desktop") => {
+                    Some(rds_discovery::Service::Desktop)
+                }
+                rds_core::ServiceKind::Sync => Some(rds_discovery::Service::Sync),
+                _ => None,
+            })
+            .collect();
         let announced = rds_net::announce(
             endpoint.clone(),
             rds_net::AnnounceConfig {
                 issuer,
                 directory: client,
-                services: vec![
-                    rds_discovery::Service::Ping,
-                    rds_discovery::Service::TcpForward,
-                ],
-                ttl: std::time::Duration::from_secs(cli.record_ttl),
+                services,
+                ttl: std::time::Duration::from_secs(resolved.record_ttl.unwrap_or(300)),
             },
         );
         match announced {
@@ -290,8 +377,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
 
     let agent = std::sync::Arc::new(
-        Agent::new(endpoint, policy)
-            .with_limits(AgentLimits::new(cli.max_connections, cli.max_streams)),
+        Agent::new(endpoint, policy).with_limits(AgentLimits::new(
+            resolved
+                .max_connections
+                .unwrap_or(std::num::NonZeroU16::new(32).expect("positive limit")),
+            max_streams,
+        )),
     );
     let metrics = agent.metrics();
     let mut control =
