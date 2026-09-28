@@ -287,3 +287,56 @@ async fn disk_jobs_share_one_bounded_pool() {
     assert!(peak.load(Ordering::SeqCst) <= MAX_DISK_JOBS);
     assert!(peak.load(Ordering::SeqCst) > 1, "jobs never overlapped");
 }
+
+/// W1.9: the token→flag projection must flip promptly and stay scoped to
+/// the one transfer that created it.
+#[tokio::test]
+async fn cancel_flag_watcher_projects_token_state() {
+    let (flag, watcher) = cancel_flag_watcher(&None);
+    assert!(flag.is_none() && watcher.is_none());
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let (flag, watcher) = cancel_flag_watcher(&Some(token.clone()));
+    let flag = flag.unwrap();
+    assert!(!flag.load(Ordering::Acquire));
+    token.cancel();
+    flag_watcher_wait(&flag).await;
+    watcher.unwrap().abort();
+}
+
+async fn flag_watcher_wait(flag: &Arc<AtomicBool>) {
+    for _ in 0..200 {
+        if flag.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("cancel flag was never projected");
+}
+
+/// W1.9: a flag raised before the scan starts aborts the manifest build;
+/// an unset flag leaves the manifest identical to the plain scan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manifest_scan_honors_cancel_flag() {
+    let dir = Scratch::new();
+    std::fs::create_dir(&dir.0).unwrap();
+    let path = dir.0.join("scan.bin");
+    std::fs::write(&path, vec![0x5Au8; 1_000_000]).unwrap();
+
+    let raised = Arc::new(AtomicBool::new(true));
+    let file = Arc::new(File::open(&path).unwrap());
+    let err = manifest_from_file(file, Some(raised)).await.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("operation interrupted"),
+        "expected interrupted scan, got {err:#}"
+    );
+
+    // A canceled scan leaves the shared file position mid-stream — a
+    // fresh handle is the honest rescan, matching engine behavior.
+    let file = Arc::new(File::open(&path).unwrap());
+    let scanned = manifest_from_file(file, None).await.unwrap();
+    assert_eq!(
+        scanned.root,
+        crate::manifest_of(&std::fs::read(&path).unwrap()).root
+    );
+}

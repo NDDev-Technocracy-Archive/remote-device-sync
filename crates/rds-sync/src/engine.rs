@@ -27,7 +27,7 @@ use crate::proto::{
     CHUNKSET_BATCH, FETCH_STREAMS, MANIFEST_BATCH, MAX_CHUNKS, SESSION_VERSION, SessionLimits,
     SessionMsg, SyncMsg, bits_to_indices, check_manifest, check_rel_path, need_bits,
 };
-use crate::{MAX_CHUNK, Manifest, manifest_of_reader};
+use crate::{MAX_CHUNK, Manifest, manifest_of_reader_cancellable};
 use crate::{confined::Directory, journal::Journal};
 
 /// No protocol read may stall longer than this — a peer that is alive
@@ -481,7 +481,8 @@ impl Transfer {
     ) -> anyhow::Result<Stats> {
         let mut control = Control::new(streams);
         let stopped = control.send.stopped();
-        session(timeout, async {
+        let (cancel_flag, flag_watcher) = cancel_flag_watcher(&cancel);
+        let result = session(timeout, async {
             let wire = match self.session_id() {
                 Some(id) => Wire::v2(
                     id,
@@ -502,11 +503,15 @@ impl Transfer {
                     cancel_transfer(wire, &mut control.send, "caller canceled").await;
                     bail!("sync transfer canceled by caller")
                 }
-                result = send_file_inner(conn, path, &mut control.send, &mut control.recv, self.0, wire) => result?,
+                result = send_file_inner(conn, path, &mut control.send, &mut control.recv, self.0, wire, cancel_flag) => result?,
             };
             control.finish(self.0 != rds_core::UniHello::Sync).await?;
             Ok(stats)
-        }).await
+        }).await;
+        if let Some(watcher) = flag_watcher {
+            watcher.abort();
+        }
+        result
     }
 
     pub async fn recv_file(
@@ -533,7 +538,8 @@ impl Transfer {
     ) -> anyhow::Result<(PathBuf, Stats)> {
         let mut control = Control::new(streams);
         let stopped = control.send.stopped();
-        session(timeout, async {
+        let (cancel_flag, flag_watcher) = cancel_flag_watcher(&cancel);
+        let result = session(timeout, async {
             let wire = match self.session_id() {
                 Some(id) => Wire::v2(
                     id,
@@ -554,11 +560,38 @@ impl Transfer {
                     cancel_transfer(wire, &mut control.send, "caller canceled").await;
                     bail!("sync transfer canceled by caller")
                 }
-                result = recv_file_inner(conn, rel_path, dest_dir, &mut control.send, &mut control.recv, self.0, wire) => result?,
+                result = recv_file_inner(conn, rel_path, dest_dir, &mut control.send, &mut control.recv, self.0, wire, cancel_flag) => result?,
             };
             control.finish(self.0 != rds_core::UniHello::Sync).await?;
             Ok(result)
-        }).await
+        }).await;
+        if let Some(watcher) = flag_watcher {
+            watcher.abort();
+        }
+        result
+    }
+}
+
+/// Project a caller cancellation token into the blocking-work barriers
+/// (W1.9): a running syscall cannot be aborted, so manifest scans and
+/// journal assembly consult this flag once per chunk and stop at the next
+/// chunk boundary instead of finishing the whole file first. The spawned
+/// watcher is aborted by the caller once the transfer future resolves.
+fn cancel_flag_watcher(
+    cancel: &Option<tokio_util::sync::CancellationToken>,
+) -> (Option<Arc<AtomicBool>>, Option<tokio::task::JoinHandle<()>>) {
+    match cancel {
+        Some(token) => {
+            let flag = Arc::new(AtomicBool::new(false));
+            let f = flag.clone();
+            let t = token.clone();
+            let watcher = tokio::spawn(async move {
+                t.cancelled().await;
+                f.store(true, Ordering::Release);
+            });
+            (Some(flag), Some(watcher))
+        }
+        None => (None, None),
     }
 }
 
@@ -718,6 +751,7 @@ async fn serve_inner(
                 &manifest,
                 route,
                 wire,
+                None,
             )
             .await?;
             tracing::info!(?stats, "push receive complete");
@@ -754,7 +788,7 @@ async fn serve_inner(
                     bail!("requested file absent or outside root: {}", rel.display());
                 }
             };
-            let manifest = manifest_from_file(source.clone()).await?;
+            let manifest = manifest_from_file(source.clone(), None).await?;
             tracing::info!(
                 peer = %conn.remote_id(),
                 rel = %rel.display(),
@@ -810,6 +844,7 @@ async fn send_file_inner(
     recv: &mut RecvStream,
     route: rds_core::UniHello,
     wire: Wire,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<Stats> {
     let rel = path
         .file_name()
@@ -834,7 +869,18 @@ async fn send_file_inner(
         .await
         .context("open source task")??,
     );
-    let manifest = manifest_from_file(source.clone()).await?;
+    let manifest = match manifest_from_file(source.clone(), cancel_flag.clone()).await {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            if cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Acquire))
+            {
+                bail!("sync transfer canceled by caller");
+            }
+            return Err(error);
+        }
+    };
     // A negotiated chunk bound below the local cut makes this transfer
     // impossible; refuse before any chunk leaves the source.
     if wire.is_v2()
@@ -902,6 +948,7 @@ pub async fn recv_file_with_timeout(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn recv_file_inner(
     conn: &Connection,
     rel_path: &str,
@@ -910,6 +957,7 @@ async fn recv_file_inner(
     recv: &mut RecvStream,
     route: rds_core::UniHello,
     wire: Wire,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let requested = check_rel_path(rel_path)?;
     wire.send(
@@ -949,6 +997,7 @@ async fn recv_file_inner(
         &manifest,
         route,
         wire,
+        cancel_flag,
     )
     .await?;
     tracing::info!(rel = %rel.display(), ?stats, "sync pull complete");
@@ -1003,12 +1052,24 @@ where
 }
 
 /// Manifest of a pinned file on the blocking pool — chunking + hashing a
-/// large file must not park an async worker.
-async fn manifest_from_file(file: Arc<File>) -> anyhow::Result<Manifest> {
-    disk_job(move || manifest_of_reader(&*file))
-        .await
-        .context("manifest task")?
-        .context("build manifest")
+/// large file must not park an async worker. `cancel_flag` is the W1.9
+/// caller-token projection into the blocking scan: it is consulted once
+/// per produced chunk, so a cancel can no longer wait for an entire
+/// manifest scan of a large source before the transfer aborts.
+async fn manifest_from_file(
+    file: Arc<File>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> anyhow::Result<Manifest> {
+    disk_job(move || {
+        manifest_of_reader_cancellable(&*file, &move || {
+            cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Acquire))
+        })
+    })
+    .await
+    .context("manifest task")?
+    .context("build manifest")
 }
 
 /// Filesystem-bound chunk store: writes run on a dedicated blocking
@@ -1143,6 +1204,7 @@ async fn receive(
     manifest: &Manifest,
     route: rds_core::UniHello,
     wire: Wire,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     // Journal open walks and re-verifies every stored part — disk-bound
     // work belongs on the blocking pool, not an async worker.
@@ -1166,6 +1228,11 @@ async fn receive(
     let bits = need_bits(journal.total(), journal.have_set());
     wire.send(send, &SyncMsg::Need { bits }).await?;
 
+    // Shared stop for the blocking assembly inside `receive_chunks`: set by
+    // the peer's typed Cancel or a dead control stream here, and by the
+    // caller's cancellation token through `cancel_flag`. A canceled receive
+    // must never publish the destination after reporting the abort.
+    let assemble_stop = Arc::new(AtomicBool::new(false));
     // v2 control read: only Cancel is valid mid-receive; any other frame
     // is a protocol violation.
     let cancelled = async {
@@ -1176,10 +1243,16 @@ async fn receive(
         }
     };
     let result = tokio::select! {
-        result = receive_chunks(uni, journal, manifest, wire) => result?,
-        _ = send.stopped() => bail!("sync control stream closed during receive"),
+        result = receive_chunks(uni, journal, manifest, wire, cancel_flag, assemble_stop.clone()) => result?,
+        _ = send.stopped() => {
+            assemble_stop.store(true, Ordering::Release);
+            bail!("sync control stream closed during receive")
+        }
         msg = cancelled => match msg {
-            Ok(SyncMsg::Cancel { reason }) => bail!("peer canceled transfer: {reason}"),
+            Ok(SyncMsg::Cancel { reason }) => {
+                assemble_stop.store(true, Ordering::Release);
+                bail!("peer canceled transfer: {reason}")
+            }
             Ok(other) => bail!("unexpected control frame during receive: {other:?}"),
             Err(e) => return Err(e).context("sync control read during receive"),
         },
@@ -1199,6 +1272,8 @@ async fn receive_chunks(
     journal: Journal,
     manifest: &Manifest,
     wire: Wire,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    assemble_stop: Arc<AtomicBool>,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let total = journal.total() as u64;
 
@@ -1298,12 +1373,21 @@ async fn receive_chunks(
         bail!("chunk writer did not verify every requested index");
     }
     let fetched = journal.fetched();
-    // Assembly concatenates and rehashes every part — blocking pool.
+    // Assembly concatenates and rehashes every part — blocking pool. Either
+    // cancel source stops it at the next chunk boundary instead of letting
+    // a canceled transfer publish the destination in the background.
     let dest = {
-        disk_job(move || journal.assemble())
-            .await
-            .context("assemble task")?
-            .map_err(|e| anyhow::anyhow!("{e}"))?
+        disk_job(move || {
+            journal.assemble_cancellable(&move || {
+                assemble_stop.load(Ordering::Acquire)
+                    || cancel_flag
+                        .as_ref()
+                        .is_some_and(|f| f.load(Ordering::Acquire))
+            })
+        })
+        .await
+        .context("assemble task")?
+        .map_err(|e| anyhow::anyhow!("{e}"))?
     };
     tracing::debug!(?dest, "sync file assembled");
     Ok((

@@ -90,6 +90,17 @@ pub fn manifest_of_reader(r: impl std::io::Read) -> std::io::Result<Manifest> {
     manifest_reader_with(r, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK)
 }
 
+/// Streaming manifest with a cancellation check between yielded chunks.
+/// A running read or hash cannot be aborted; `stop` is consulted once per
+/// produced chunk, so the barrier granularity is one max-size chunk.
+/// Returns `ErrorKind::Interrupted` when `stop` reports cancellation.
+pub fn manifest_of_reader_cancellable(
+    r: impl std::io::Read,
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<Manifest> {
+    manifest_reader_cancellable_with(r, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK, stop)
+}
+
 /// Streaming manifest with explicit FastCDC size bounds.
 pub fn manifest_reader_with(
     r: impl std::io::Read,
@@ -97,11 +108,25 @@ pub fn manifest_reader_with(
     avg: u32,
     max: u32,
 ) -> std::io::Result<Manifest> {
+    manifest_reader_cancellable_with(r, min, avg, max, &|| false)
+}
+
+/// Streaming manifest with explicit bounds and a per-chunk stop check.
+pub fn manifest_reader_cancellable_with(
+    r: impl std::io::Read,
+    min: u32,
+    avg: u32,
+    max: u32,
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<Manifest> {
     let chunker = fastcdc::v2020::StreamCDC::new(r, min as usize, avg as usize, max as usize);
     let mut root = blake3::Hasher::new();
     let mut size = 0u64;
     let mut chunks = Vec::new();
     for c in chunker {
+        if stop() {
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
         let c = c.map_err(std::io::Error::from)?;
         root.update(&c.data);
         size += c.data.len() as u64;
@@ -182,6 +207,34 @@ mod tests {
         let m = manifest_of(data);
         assert_eq!(m.size as usize, data.len());
         assert_eq!(m.chunks.iter().map(|c| c.len as u64).sum::<u64>(), m.size);
+    }
+
+    #[test]
+    fn cancellable_manifest_stops_at_chunk_boundary() {
+        // W1.9: a canceled scan surfaces as Interrupted rather than
+        // hashing the whole source first.
+        let data = vec![0xABu8; 1_000_000];
+        let err = manifest_reader_cancellable_with(
+            std::io::Cursor::new(&data),
+            MIN_CHUNK,
+            AVG_CHUNK,
+            MAX_CHUNK,
+            &|| true,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        // An un-set stop flag must not change the produced manifest.
+        let ok = manifest_reader_cancellable_with(
+            std::io::Cursor::new(&data),
+            MIN_CHUNK,
+            AVG_CHUNK,
+            MAX_CHUNK,
+            &|| false,
+        )
+        .unwrap();
+        let expected = manifest_of(&data);
+        assert_eq!(ok.root, expected.root);
+        assert_eq!(ok.chunks.len(), expected.chunks.len());
     }
 
     #[test]

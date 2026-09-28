@@ -222,12 +222,22 @@ impl Journal {
     /// old destination. A directory-sync error after rename is an uncertain
     /// commit and is returned, never acknowledged as complete.
     pub fn assemble(self) -> Result<PathBuf, SyncError> {
+        self.assemble_cancellable(&|| false)
+    }
+
+    /// [`assemble`](Self::assemble) with a cancellation check between chunks.
+    /// A running part read/write completes; `stop` is consulted once per
+    /// manifest chunk, so the barrier granularity is one chunk.
+    pub fn assemble_cancellable(self, stop: &dyn Fn() -> bool) -> Result<PathBuf, SyncError> {
         if !self.complete() {
             return Err(SyncError::Manifest("assemble before complete".into()));
         }
         let mut stage = self.dest_state.stage_named(ASSEMBLY.into())?;
         let mut root = blake3::Hasher::new();
         for c in &self.manifest.chunks {
+            if stop() {
+                return Err(SyncError::Manifest("assembly canceled".into()));
+            }
             let data = self
                 .parts
                 .read_state(hex(&c.hash).as_ref(), c.len as usize)?;

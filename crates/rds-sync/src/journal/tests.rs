@@ -223,3 +223,21 @@ fn recovery_removes_only_reserved_regular_single_link_temporary_files() {
         }
     }
 }
+
+#[test]
+fn canceled_assembly_never_installs_destination() {
+    // W1.9: a stop raised between chunk writes abandons staging without
+    // replacing the live destination; stored parts still complete the
+    // journal, so a later un-canceled assembly installs the same content.
+    let dir = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    let mut journal = Journal::open(&dir.0, "data.bin", &manifest).unwrap();
+    journal.store(0, NEW).unwrap();
+    let err = journal.assemble_cancellable(&|| true).unwrap_err();
+    assert!(err.to_string().contains("canceled"), "{err}");
+    assert_eq!(std::fs::read(dir.0.join("data.bin")).unwrap(), OLD);
+    let journal = Journal::open(&dir.0, "data.bin", &manifest).unwrap();
+    assert!(journal.complete());
+    journal.assemble().unwrap();
+    assert_eq!(std::fs::read(dir.0.join("data.bin")).unwrap(), NEW);
+}
