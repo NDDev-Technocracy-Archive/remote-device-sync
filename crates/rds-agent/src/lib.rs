@@ -874,6 +874,13 @@ async fn serve_stream(
                         Ok(caps) => {
                             write_frame(&mut send, &HelloAck::Desktop(caps)).await?;
                             let max_bps = grant.as_ref().and_then(|g| g.max_bps());
+                            // Optional output downscale (e.g. 720p for
+                            // latency/bandwidth) — a deployment knob, not
+                            // a per-session negotiation.
+                            let output_height = std::env::var("RDS_DESKTOP_OUTPUT_HEIGHT")
+                                .ok()
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .filter(|&h| (240..=4320).contains(&h));
                             rds_desktop::serve_desktop_with(
                                 conn,
                                 send,
@@ -885,6 +892,7 @@ async fn serve_stream(
                                         .as_ref()
                                         .is_some_and(|g| !g.permits_desktop_control()),
                                     frame_route: Some(desktop_frame_route),
+                                    output_height,
                                     ..Default::default()
                                 },
                             )

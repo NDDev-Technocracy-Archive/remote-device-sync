@@ -124,6 +124,10 @@ pub struct SessionConfig {
     /// delayed stream from an ended session cannot reach a replacement;
     /// the default `Desktop` tag serves the legacy shared route.
     pub frame_route: Option<rds_core::UniHello>,
+    /// Downscale frames taller than this before encoding (aspect kept).
+    /// Smaller frames encode faster and travel cheaper — lower latency.
+    /// `None` keeps the native capture resolution.
+    pub output_height: Option<u32>,
 }
 
 /// Adaptive bitrate for one session (Sunshine lesson: pace the encoder
@@ -272,7 +276,7 @@ pub async fn serve_desktop_with(
             };
             let mut source = match producer.take() {
                 Some(p) => p,
-                None => platform_producer(hello.display, frame_interval),
+                None => platform_producer(hello.display, frame_interval, config.output_height),
             };
             let mut seq = 0u64;
             loop {
@@ -381,7 +385,16 @@ pub async fn serve_desktop_with(
             match send_frame(&writer_conn, frame_route, &produced, &mut rx).await {
                 SendOutcome::Sent => {}
                 SendOutcome::Superseded(newer) => pending = Some(newer),
-                SendOutcome::Done | SendOutcome::Failed => break 'writer,
+                SendOutcome::Done => break 'writer,
+                // A transient stream-open/write failure (path hiccup,
+                // credit stall) must not end the session: drop the stale
+                // frame, demand a fresh reference and keep serving. A
+                // truly dead connection ends via the control loop or the
+                // uni inbox instead.
+                SendOutcome::Failed => {
+                    tracing::warn!("frame send failed; dropping frame and requesting idr");
+                    writer_idr.store(true, Ordering::Relaxed);
+                }
             }
         }
     });
@@ -391,9 +404,14 @@ pub async fn serve_desktop_with(
     let send_clock = clock.clone();
     let session_display = hello.display;
     let control = async {
+        let mut input_seen = 0u64;
         loop {
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
+                    input_seen += 1;
+                    if input_seen <= 3 || input_seen.is_multiple_of(100) {
+                        tracing::info!(count = input_seen, "dbg: input events received");
+                    }
                     if config.view_only {
                         tracing::debug!("view-only input dropped");
                         continue;
@@ -474,11 +492,17 @@ pub async fn serve_desktop_with(
     };
 
     let result = tokio::select! {
-        _ = control => Ok(()),
-        res = workers.join_next() => match res {
-            Some(Ok(())) | None => Ok(()),
-            Some(Err(e)) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
-        },
+        _ = control => {
+            tracing::info!("dbg: session end: control stream closed");
+            Ok(())
+        }
+        res = workers.join_next() => {
+            tracing::info!("dbg: session end: worker exited");
+            match res {
+                Some(Ok(())) | None => Ok(()),
+                Some(Err(e)) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
+            }
+        }
     };
     // Normal exit joins the asynchronous siblings. Cancellation during this
     // shutdown still drops the JoinSet and aborts its remaining children.
@@ -498,9 +522,13 @@ impl Drop for SessionSend {
 
 /// Platform capture producer, or a `NullProducer` when the build has no
 /// capture backend (session still serves control input + heartbeats).
-fn platform_producer(_display: u32, _interval: Duration) -> Box<dyn FrameProducer> {
+fn platform_producer(
+    _display: u32,
+    _interval: Duration,
+    _output_height: Option<u32>,
+) -> Box<dyn FrameProducer> {
     #[cfg(all(target_os = "linux", feature = "x11"))]
-    match x11::X11Producer::new(_display, _interval) {
+    match x11::X11Producer::new(_display, _interval, _output_height) {
         Ok(p) => return Box::new(p),
         Err(e) => tracing::warn!("capture init failed: {e}"),
     }
@@ -607,10 +635,15 @@ mod x11 {
         encoder: H264Encoder,
         interval: Duration,
         next_due: Instant,
+        output_height: Option<u32>,
     }
 
     impl X11Producer {
-        pub fn new(display: u32, interval: Duration) -> Result<Self, DesktopError> {
+        pub fn new(
+            display: u32,
+            interval: Duration,
+            output_height: Option<u32>,
+        ) -> Result<Self, DesktopError> {
             let capturer = X11Capturer::new(display)?;
             let fps = 1.0 / interval.as_secs_f32();
             let encoder = H264Encoder::new(4_000_000, fps)?;
@@ -619,7 +652,54 @@ mod x11 {
                 encoder,
                 interval,
                 next_due: Instant::now(),
+                output_height,
             })
+        }
+    }
+
+    /// Box-average downscale of a BGRA frame to `dst_h` height keeping
+    /// the source aspect. Each destination pixel averages the source
+    /// block it covers — text stays readable at 2/3 scale.
+    fn scale_bgra(src: &crate::RawFrame, dst_h: u32) -> crate::RawFrame {
+        let (sw, sh) = (src.width as usize, src.height as usize);
+        let dh = dst_h.max(1) as usize;
+        let dw = ((sw * dh + sh / 2) / sh).max(1);
+        let stride = dw * 4;
+        let mut out = vec![0u8; dh * stride];
+        let sstride = src.stride as usize;
+        let data = &src.data[..];
+        for dy in 0..dh {
+            let y0 = dy * sh / dh;
+            let y1 = (((dy + 1) * sh) / dh).max(y0 + 1).min(sh);
+            for dx in 0..dw {
+                let x0 = dx * sw / dw;
+                let x1 = (((dx + 1) * sw) / dw).max(x0 + 1).min(sw);
+                let (mut b, mut g, mut r, mut n) = (0u64, 0u64, 0u64, 0u64);
+                for sy in y0..y1 {
+                    let row = sy * sstride;
+                    for sx in x0..x1 {
+                        let i = row + sx * 4;
+                        if i + 2 < data.len() {
+                            b += u64::from(data[i]);
+                            g += u64::from(data[i + 1]);
+                            r += u64::from(data[i + 2]);
+                            n += 1;
+                        }
+                    }
+                }
+                let n = n.max(1);
+                let o = dy * stride + dx * 4;
+                out[o] = (b / n) as u8;
+                out[o + 1] = (g / n) as u8;
+                out[o + 2] = (r / n) as u8;
+                out[o + 3] = 255;
+            }
+        }
+        crate::RawFrame {
+            width: dw as u32,
+            height: dh as u32,
+            stride: stride as u32,
+            data: out.into(),
         }
     }
 
@@ -668,12 +748,26 @@ mod x11 {
                 controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
                 self.next_due = Instant::now();
             }
-            let raw = match self.capturer.capture() {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("capture failed: {e}");
-                    return None;
+            // One bad capture must not end the session: transient X11
+            // errors (damage re-setup, screen re-probe) recover within a
+            // few polls; only a persistent failure is fatal.
+            let mut raw = None;
+            for attempt in 0..5 {
+                match self.capturer.capture() {
+                    Ok(f) => {
+                        raw = Some(f);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("capture failed (attempt {}): {e}", attempt + 1);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 }
+            }
+            let Some(raw) = raw else { return None };
+            let raw = match self.output_height {
+                Some(h) if raw.height > h => scale_bgra(&raw, h),
+                _ => raw,
             };
             let capture_ts_ms = clock.now_ms();
             if controls.idr.swap(false, Ordering::Relaxed) {

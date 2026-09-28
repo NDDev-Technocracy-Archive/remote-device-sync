@@ -471,7 +471,10 @@ async fn execute(
                 },
             )
             .await
-            .map_err(|_| ErrorCode::Remote)?;
+            .map_err(|e| {
+                tracing::warn!("managed desktop session open failed: {e:?}");
+                ErrorCode::Remote
+            })?;
             Ok(Output {
                 reply: Reply::DesktopOpened {
                     session,

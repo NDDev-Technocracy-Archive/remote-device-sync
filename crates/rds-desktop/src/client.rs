@@ -594,7 +594,14 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
         tokio::select! {
             biased;
             frame = readers.join_next(), if !readers.is_empty() => {
-                let Some(Ok(Some((header, body, budget)))) = frame else { continue; };
+                let Some(Ok(read)) = frame else { continue; };
+                let Some((header, body, budget)) = read else {
+                    tracing::warn!("dbg: frame read dropped");
+                    continue;
+                };
+                if header.seq < 3 {
+                    tracing::warn!(seq = header.seq, w = header.width, h = header.height, "dbg: wire frame");
+                }
                 let expected = ctx.next_seq.load(Ordering::Relaxed);
                 if header.seq < expected { continue; }
                 if header.seq > expected {
@@ -652,7 +659,11 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 }
             }
             stream = uni.recv() => {
-                let Some(stream) = stream else { break; };
+                let Some(stream) = stream else {
+                    tracing::warn!("dbg: uni inbox closed");
+                    break;
+                };
+                tracing::warn!("dbg: desktop uni stream accepted");
                 // Refuse excess work immediately; don't create parked tasks
                 // or read a large body before obtaining its memory budget.
                 if readers.len() >= MAX_FRAME_READERS { continue; }
@@ -695,6 +706,35 @@ pub async fn run_desktop_client(
 ) -> Result<(), DesktopError> {
     let mut session = DesktopSession::connect(&conn, display, max_fps, Codec::H264).await?;
     println!("desktop caps: {:?}", session.caps());
+    #[cfg(feature = "viewer")]
+    if crate::render::available() {
+        // Blocking winit loop must own the main thread on macOS; the decoded
+        // frame stream is pumped into a std channel on a worker task.
+        let ctrl = session.control_sender();
+        let input_size = session
+            .caps()
+            .displays
+            .iter()
+            .find(|d| d.index == display)
+            .or_else(|| session.caps().displays.first())
+            .map(|d| (d.width, d.height))
+            .unwrap_or((0, 0));
+        let (tx, rx) = std::sync::mpsc::channel::<RawFrame>();
+        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<DesktopControl>();
+        tokio::spawn(async move {
+            while let Some(f) = session.frames.recv().await {
+                let _ = tx.send(f);
+            }
+            let _ = tx.send(RawFrame::eof());
+        });
+        std::thread::spawn(move || {
+            while let Ok(c) = ctrl_rx.recv() {
+                let _ = ctrl.blocking_send(c);
+            }
+        });
+        return crate::render::run(rx, ctrl_tx, display, input_size)
+            .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())));
+    }
     #[cfg(not(feature = "x11"))]
     println!(
         "note: headless build has no decoder — frames stay encoded (use the encoded relay tap)"

@@ -393,6 +393,67 @@ async fn desktop(
         )
         .await?;
     println!("desktop caps: {:?}", channel.caps);
+    // Sharper 1080p: default producer bitrate is 4 Mbps.
+    let _ = channel.set_bitrate(8_000_000).await;
+    if rds_desktop::render::available() {
+        // GUI mode: present decoded frames in a native window and forward
+        // input as DesktopControl. The winit loop must own the main thread,
+        // so recv/decode and control-send move onto worker tasks.
+        let input_size = channel
+            .caps
+            .displays
+            .iter()
+            .find(|d| d.index == display)
+            .or_else(|| channel.caps.displays.first())
+            .map(|d| (d.width, d.height))
+            .unwrap_or((0, 0));
+        let (frame_tx, frame_rx) = std::sync::mpsc::channel::<rds_desktop::RawFrame>();
+        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<rds_core::DesktopControl>();
+        let mc = channel.control_handle();
+        let rt = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            while let Ok(control) = ctrl_rx.recv() {
+                let _ = rt.block_on(mc.control(control));
+            }
+        });
+        let pump = tokio::spawn(async move {
+            let mut decoder = RelayDecoder::new();
+            let mut n = 0u64;
+            loop {
+                match channel.recv().await {
+                    Ok(Some(ManagedMessage::Frame(f))) => {
+                        n += 1;
+                        match decoder.push(&f.header, f.payload) {
+                            RelayOutcome::Frame(raw) => {
+                                let _ = frame_tx.send(raw);
+                            }
+                            RelayOutcome::NeedIdr => {
+                                let _ = channel.request_idr().await;
+                            }
+                            RelayOutcome::Pending => {}
+                        }
+                    }
+                    Ok(Some(ManagedMessage::Event(e))) => {
+                        eprintln!("dbg: pump: event {e:?} frames={n}");
+                    }
+                    Ok(None) => {
+                        eprintln!("dbg: pump: channel Finished frames={n}");
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("dbg: pump: recv error frames={n}: {e}");
+                        break;
+                    }
+                }
+            }
+            let _ = frame_tx.send(rds_desktop::RawFrame::eof());
+            anyhow::Ok(())
+        });
+        let result = rds_desktop::render::run(frame_rx, ctrl_tx, display, input_size)
+            .map_err(|e| anyhow::anyhow!("viewer: {e}"));
+        pump.abort();
+        return result;
+    }
     let mut decoder = RelayDecoder::new();
     let mut count = 0u64;
     let start = std::time::Instant::now();

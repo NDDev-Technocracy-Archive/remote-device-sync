@@ -48,6 +48,20 @@ pub struct RawFrame {
     pub data: Bytes,
 }
 
+impl RawFrame {
+    /// Zero-size sentinel: pumps push it after the last real frame to tell
+    /// the viewer the stream ended, so the window closes instead of
+    /// holding a frozen last picture.
+    pub fn eof() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            stride: 0,
+            data: Bytes::new(),
+        }
+    }
+}
+
 /// Local software receive limit: up to 8K pixels, no side above 8192.
 /// Check before allocating BGRA output; native codec internal memory is separate.
 pub(crate) fn frame_bytes(width: usize, height: usize) -> Option<usize> {

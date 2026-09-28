@@ -66,13 +66,24 @@ pub(super) async fn serve(
     let up = async {
         loop {
             match read_frame::<_, DesktopUp>(&mut reader).await {
-                Ok(DesktopUp::Control(control)) => ctrl
-                    .send(control)
-                    .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "control closed"))?,
-                Ok(DesktopUp::Finished) => return Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-                Err(e) => return Err(e),
+                Ok(DesktopUp::Control(control)) => {
+                    if let Err(e) = ctrl.send(control).await {
+                        eprintln!("dbg: up: session control closed: {e}");
+                        return Err(io::Error::new(io::ErrorKind::BrokenPipe, "control closed"));
+                    }
+                }
+                Ok(DesktopUp::Finished) => {
+                    eprintln!("dbg: up: viewer Finished");
+                    return Ok(());
+                }
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    eprintln!("dbg: up: viewer EOF");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("dbg: up: read error: {e}");
+                    return Err(e);
+                }
             }
         }
     };
@@ -90,12 +101,19 @@ pub(super) async fn serve(
                 frame = encoded.recv(), if enc_open => match frame {
                     Some(f) => {
                         if f.payload.len() > MAX_DESKTOP_PAYLOAD {
+                            eprintln!("dbg: down: frame over payload cap");
                             return Err(invalid());
+                        }
+                        if f.header.seq == 0 {
+                            eprintln!("dbg: down: first frame seq=0");
                         }
                         write_frame(&mut writer, &DesktopDown::Frame { header: f.header }).await?;
                         write_payload(&mut writer, &f.payload).await?;
                     }
-                    None => enc_open = false,
+                    None => {
+                        eprintln!("dbg: down: encoded tap ended");
+                        enc_open = false;
+                    }
                 },
                 event = events.recv(), if ev_open => match event {
                     Some(e) => write_frame(&mut writer, &DesktopDown::Event(e)).await?,
@@ -103,6 +121,7 @@ pub(super) async fn serve(
                 },
             }
         }
+        eprintln!("dbg: down: finished, sending Finished");
         write_frame(&mut writer, &DesktopDown::Finished).await
     };
     tokio::select! {
