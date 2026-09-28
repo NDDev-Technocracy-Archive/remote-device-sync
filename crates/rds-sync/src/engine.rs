@@ -198,6 +198,14 @@ impl Wire {
         R: tokio::io::AsyncRead + Unpin,
     {
         let msg: SyncMsg = read_timed_within(stream, stall).await?;
+        self.decode(msg)
+    }
+
+    /// Envelope translation for an already-decoded frame. The shared
+    /// control reader uses this directly: its read cannot carry a stall
+    /// bound because legitimate phase gaps outlive `READ_STALL`, and
+    /// consumers bound their own wait in [`ControlFrames::next`].
+    fn decode(&self, msg: SyncMsg) -> anyhow::Result<SyncMsg> {
         let Some(transfer_id) = self.transfer_id else {
             return Ok(msg);
         };
@@ -421,40 +429,45 @@ impl Transfer {
         access: Access,
         timeout: Duration,
     ) -> anyhow::Result<()> {
-        let mut control = Control::new(streams);
-        let stopped = control.send.stopped();
-        session(timeout, async {
+        let (mut send, mut recv) = streams;
+        let stopped = send.stopped();
+        let result = session(timeout, async {
             // v2 negotiates before the filesystem is touched; a version or
             // transfer-ID mismatch refuses at the greeting.
             let wire = match self.session_id() {
-                Some(id) => Wire::v2(
-                    id,
-                    session_accept(id, &mut control.send, &mut control.recv).await?,
-                ),
+                Some(id) => Wire::v2(id, session_accept(id, &mut send, &mut recv).await?),
                 None => Wire::V1,
             };
+            let mut frames = ControlFrames::open(wire, recv);
             let result = tokio::select! {
                 biased;
                 _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync caller stopped receiving"),
-                result = serve_inner(conn, &mut control.send, &mut control.recv, dir, access, self.0, wire) => result,
+                result = serve_inner(conn, &mut send, &mut frames, dir, access, self.0, wire) => result,
             };
             if let Err(error) = result {
                 // Preserve an explicitly written Refuse frame. A finish
                 // failure here must not mask the transfer error that
                 // brought us here — report it and keep the real cause.
-                if let Err(finish) = control.finish(false).await {
+                if let Err(finish) = send.finish() {
                     tracing::warn!("sync control finish after error failed: {finish:#}");
                 }
+                frames.close().await;
                 return Err(error);
             }
             if self.0 != rds_core::UniHello::Sync {
                 // Client finishes after Done; server FIN is the barrier that
                 // all client control bytes were consumed before slot release.
-                tokio::time::timeout(READ_STALL, control.recv.read_to_end(0))
-                    .await.context("sync caller completion stalled")??;
+                tokio::time::timeout(READ_STALL, frames.drained())
+                    .await
+                    .context("sync caller completion stalled")??;
             }
-            control.finish(false).await
-        }).await
+            send.finish()?;
+            Ok(())
+        }).await;
+        if result.is_err() {
+            let _ = send.reset(0u32.into());
+        }
+        result
     }
 
     pub async fn send_file(
@@ -479,17 +492,15 @@ impl Transfer {
         timeout: Duration,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> anyhow::Result<Stats> {
-        let mut control = Control::new(streams);
-        let stopped = control.send.stopped();
+        let (mut send, mut recv) = streams;
+        let stopped = send.stopped();
         let (cancel_flag, flag_watcher) = cancel_flag_watcher(&cancel);
         let result = session(timeout, async {
             let wire = match self.session_id() {
-                Some(id) => Wire::v2(
-                    id,
-                    session_open(id, &mut control.send, &mut control.recv).await?,
-                ),
+                Some(id) => Wire::v2(id, session_open(id, &mut send, &mut recv).await?),
                 None => Wire::V1,
             };
+            let mut frames = ControlFrames::open(wire, recv);
             let mut cancelled = std::pin::pin!(async {
                 match &cancel {
                     Some(token) => token.cancelled().await,
@@ -500,16 +511,24 @@ impl Transfer {
                 biased;
                 _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync receiver stopped reading"),
                 _ = &mut cancelled => {
-                    cancel_transfer(wire, &mut control.send, "caller canceled").await;
+                    cancel_transfer(wire, &mut send, "caller canceled").await;
                     bail!("sync transfer canceled by caller")
                 }
-                result = send_file_inner(conn, path, &mut control.send, &mut control.recv, self.0, wire, cancel_flag) => result?,
+                result = send_file_inner(conn, path, &mut send, &mut frames, self.0, wire, cancel_flag) => result?,
             };
-            control.finish(self.0 != rds_core::UniHello::Sync).await?;
+            send.finish()?;
+            if self.0 != rds_core::UniHello::Sync {
+                tokio::time::timeout(READ_STALL, frames.drained())
+                    .await
+                    .context("sync completion stalled")??;
+            }
             Ok(stats)
         }).await;
         if let Some(watcher) = flag_watcher {
             watcher.abort();
+        }
+        if result.is_err() {
+            let _ = send.reset(0u32.into());
         }
         result
     }
@@ -536,17 +555,15 @@ impl Transfer {
         timeout: Duration,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> anyhow::Result<(PathBuf, Stats)> {
-        let mut control = Control::new(streams);
-        let stopped = control.send.stopped();
+        let (mut send, mut recv) = streams;
+        let stopped = send.stopped();
         let (cancel_flag, flag_watcher) = cancel_flag_watcher(&cancel);
         let result = session(timeout, async {
             let wire = match self.session_id() {
-                Some(id) => Wire::v2(
-                    id,
-                    session_open(id, &mut control.send, &mut control.recv).await?,
-                ),
+                Some(id) => Wire::v2(id, session_open(id, &mut send, &mut recv).await?),
                 None => Wire::V1,
             };
+            let mut frames = ControlFrames::open(wire, recv);
             let mut cancelled = std::pin::pin!(async {
                 match &cancel {
                     Some(token) => token.cancelled().await,
@@ -557,16 +574,24 @@ impl Transfer {
                 biased;
                 _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync sender stopped reading"),
                 _ = &mut cancelled => {
-                    cancel_transfer(wire, &mut control.send, "caller canceled").await;
+                    cancel_transfer(wire, &mut send, "caller canceled").await;
                     bail!("sync transfer canceled by caller")
                 }
-                result = recv_file_inner(conn, rel_path, dest_dir, &mut control.send, &mut control.recv, self.0, wire, cancel_flag) => result?,
+                result = recv_file_inner(conn, rel_path, dest_dir, &mut send, &mut frames, self.0, wire, cancel_flag) => result?,
             };
-            control.finish(self.0 != rds_core::UniHello::Sync).await?;
+            send.finish()?;
+            if self.0 != rds_core::UniHello::Sync {
+                tokio::time::timeout(READ_STALL, frames.drained())
+                    .await
+                    .context("sync completion stalled")??;
+            }
             Ok(result)
         }).await;
         if let Some(watcher) = flag_watcher {
             watcher.abort();
+        }
+        if result.is_err() {
+            let _ = send.reset(0u32.into());
         }
         result
     }
@@ -597,39 +622,117 @@ fn cancel_flag_watcher(
 
 /// Reset abandoned bodies instead of implicitly finishing buffered writes.
 /// Cancellation is scoped to this transfer; other services keep their streams.
-struct Control {
-    send: SendStream,
-    recv: RecvStream,
-    complete: bool,
+/// One owned reader on the control receive half, shared by every phase
+/// of a transfer. Frames reach consumers through `next` in arrival
+/// order, while a `Cancel` frame, a decode violation, or a dead stream
+/// flips `stop` immediately — including while a
+/// blocking filesystem phase is running and nothing is polling the
+/// queue. A peer abort therefore reaches `manifest_from_file`,
+/// `Journal::open` and assembly at their next chunk boundary on both
+/// roles instead of waiting for whichever phase next reads the stream,
+/// and teardown never depends on the peer cooperating with our own
+/// typed `Cancel`.
+///
+/// The reader's frame read carries no stall bound: legitimate phase
+/// gaps (manifest builds, journal walks) outlive `READ_STALL`, so every
+/// wait lives in `next` where the caller chooses the bound.
+struct ControlFrames {
+    rx: mpsc::Receiver<SyncMsg>,
+    stop: Arc<AtomicBool>,
+    quit: tokio_util::sync::CancellationToken,
+    reader: tokio::task::JoinHandle<()>,
 }
 
-impl Control {
-    fn new((send, recv): (SendStream, RecvStream)) -> Self {
+impl ControlFrames {
+    /// Spawn the owned reader for an established wire profile. `recv`
+    /// moves into the reader task; its exit path always runs
+    /// `recv.stop(0)` — the previous `Control::drop` stop contract.
+    fn open(wire: Wire, mut recv: RecvStream) -> Self {
+        let (tx, rx) = mpsc::channel(8);
+        let stop = Arc::new(AtomicBool::new(false));
+        let quit = tokio_util::sync::CancellationToken::new();
+        let reader = {
+            let (stop, quit) = (stop.clone(), quit.clone());
+            tokio::spawn(async move {
+                loop {
+                    let frame = tokio::select! {
+                        biased;
+                        _ = quit.cancelled() => break,
+                        frame = read_frame::<_, SyncMsg>(&mut recv) => frame,
+                    };
+                    match frame {
+                        Ok(raw) => match wire.decode(raw) {
+                            Ok(msg) => {
+                                // `Cancel` is terminal for the transfer
+                                // but still lands in the queue so the
+                                // waiting phase sees its reason in
+                                // order. A full queue means the peer
+                                // flooded us with frames no phase
+                                // accepts — stop rather than wait
+                                // behind them.
+                                let terminal = matches!(msg, SyncMsg::Cancel { .. });
+                                let full = tx.try_send(msg).is_err();
+                                if terminal || full {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        },
+                        Err(_) => break,
+                    }
+                }
+                stop.store(true, Ordering::Release);
+                let _ = recv.stop(0u32.into());
+            })
+        };
         Self {
-            send,
-            recv,
-            complete: false,
+            rx,
+            stop,
+            quit,
+            reader,
         }
     }
 
-    async fn finish(&mut self, wait_peer: bool) -> anyhow::Result<()> {
-        self.send.finish()?;
-        if wait_peer {
-            tokio::time::timeout(READ_STALL, self.recv.read_to_end(0))
-                .await
-                .context("sync completion stalled")??;
+    /// The shared stop flag — set on a peer `Cancel`, a decode
+    /// violation, stream death, or our own `close`. Blocking work
+    /// checks it between chunks.
+    fn stop_flag(&self) -> Arc<AtomicBool> {
+        self.stop.clone()
+    }
+
+    /// Next control frame in arrival order, bounded by `stall`. A dead
+    /// stream fails instead of parking the caller; the peer's `Cancel`
+    /// still surfaces in order for the reason string.
+    async fn next(&mut self, stall: Duration) -> anyhow::Result<SyncMsg> {
+        match tokio::time::timeout(stall, self.rx.recv()).await {
+            Ok(Some(msg)) => Ok(msg),
+            Ok(None) => bail!("sync control stream closed"),
+            Err(_) => bail!("sync control frame stalled"),
         }
-        self.complete = true;
+    }
+
+    /// Wait until the reader exits — the `read_to_end` equivalent for
+    /// the peer-FIN completion barrier.
+    async fn drained(&mut self) -> anyhow::Result<()> {
+        (&mut self.reader).await?;
         Ok(())
     }
+
+    /// Graceful owned close: ask the reader to exit and wait for its
+    /// `recv.stop(0)` epilogue.
+    async fn close(&mut self) {
+        self.quit.cancel();
+        let _ = (&mut self.reader).await;
+    }
 }
 
-impl Drop for Control {
+impl Drop for ControlFrames {
+    /// `quit` wakes the reader's biased select arm immediately, so the
+    /// task always exits on our signal — never on peer cooperation —
+    /// and its `recv.stop(0)` epilogue always runs. Callers that need
+    /// the stop joined deterministically use [`close`](Self::close).
     fn drop(&mut self) {
-        if !self.complete {
-            let _ = self.send.reset(0u32.into());
-            let _ = self.recv.stop(0u32.into());
-        }
+        self.quit.cancel();
     }
 }
 
@@ -676,7 +779,7 @@ pub async fn serve_with_access(
 async fn serve_inner(
     conn: Connection,
     send: &mut SendStream,
-    recv: &mut RecvStream,
+    frames: &mut ControlFrames,
     dir: PathBuf,
     access: Access,
     route: rds_core::UniHello,
@@ -684,7 +787,7 @@ async fn serve_inner(
 ) -> anyhow::Result<()> {
     // An `Offer` first frame gates on the caller's manifest build —
     // hashing a large source legitimately outlives the per-frame stall.
-    let first = wire.recv_within(recv, PHASE_STALL).await?;
+    let first = frames.next(PHASE_STALL).await?;
     match first {
         SyncMsg::Offer {
             rel_path,
@@ -728,7 +831,7 @@ async fn serve_inner(
                 refuse(wire, send, "sync destination not writable").await?;
                 bail!("offer refused: {e}");
             }
-            let manifest = match read_manifest(recv, size, root, chunk_count, wire).await {
+            let manifest = match read_manifest(frames, size, root, chunk_count, wire).await {
                 Ok(m) => m,
                 Err(e) => {
                     refuse(wire, send, "invalid sync manifest").await?;
@@ -745,7 +848,7 @@ async fn serve_inner(
             let (_dest, stats) = receive(
                 &conn,
                 send,
-                recv,
+                frames,
                 &dir,
                 &rel.to_string_lossy(),
                 &manifest,
@@ -788,7 +891,24 @@ async fn serve_inner(
                     bail!("requested file absent or outside root: {}", rel.display());
                 }
             };
-            let manifest = manifest_from_file(source.clone(), None).await?;
+            // The peer's `Cancel` or death reaches the scan through the
+            // shared stop flag — the same chunk-boundary barrier the
+            // managed paths get from their caller token.
+            let peer_stop = frames.stop_flag();
+            let manifest = match manifest_from_file(source.clone(), {
+                let peer_stop = peer_stop.clone();
+                move || peer_stop.load(Ordering::Acquire)
+            })
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    if peer_stop.load(Ordering::Acquire) {
+                        bail!("sync serve canceled by peer");
+                    }
+                    return Err(error);
+                }
+            };
             tracing::info!(
                 peer = %conn.remote_id(),
                 rel = %rel.display(),
@@ -799,12 +919,16 @@ async fn serve_inner(
             send_manifest(wire, send, &rel.to_string_lossy(), &manifest).await?;
             // `Need` gates on the receiver's journal open — a walk over
             // every stored part — not on wire speed.
-            let SyncMsg::Need { bits } = wire.recv_within(recv, PHASE_STALL).await? else {
-                bail!("expected Need");
+            let bits = match frames.next(PHASE_STALL).await? {
+                SyncMsg::Need { bits } => bits,
+                SyncMsg::Refuse { reason } => bail!("pull refused: {reason}"),
+                SyncMsg::Cancel { reason } => bail!("receiver canceled before chunks: {reason}"),
+                other => bail!("expected Need, got {other:?}"),
             };
             let indices = bits_to_indices(&bits, manifest.chunks.len())?;
-            let early = push_chunks(&conn, source, &manifest, &indices, route, wire, recv).await?;
-            recv_done(early, wire, recv, manifest.root).await?;
+            let early =
+                push_chunks(&conn, source, &manifest, &indices, route, wire, frames).await?;
+            recv_done(early, frames, manifest.root).await?;
             tracing::info!(sent = indices.len(), "sync pull complete");
             Ok(())
         }
@@ -841,7 +965,7 @@ async fn send_file_inner(
     conn: &Connection,
     path: &Path,
     send: &mut SendStream,
-    recv: &mut RecvStream,
+    frames: &mut ControlFrames,
     route: rds_core::UniHello,
     wire: Wire,
     cancel_flag: Option<Arc<AtomicBool>>,
@@ -869,7 +993,20 @@ async fn send_file_inner(
         .await
         .context("open source task")??,
     );
-    let manifest = match manifest_from_file(source.clone(), cancel_flag.clone()).await {
+    // Either abort source reaches the scan: the caller token, or the
+    // peer's `Cancel`/death through the shared control stop flag.
+    let peer_stop = frames.stop_flag();
+    let manifest = match manifest_from_file(source.clone(), {
+        let (cancel_flag, peer_stop) = (cancel_flag.clone(), peer_stop.clone());
+        move || {
+            cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Acquire))
+                || peer_stop.load(Ordering::Acquire)
+        }
+    })
+    .await
+    {
         Ok(manifest) => manifest,
         Err(error) => {
             if cancel_flag
@@ -877,6 +1014,9 @@ async fn send_file_inner(
                 .is_some_and(|f| f.load(Ordering::Acquire))
             {
                 bail!("sync transfer canceled by caller");
+            }
+            if peer_stop.load(Ordering::Acquire) {
+                bail!("sync transfer canceled by peer");
             }
             return Err(error);
         }
@@ -902,14 +1042,14 @@ async fn send_file_inner(
     send_manifest(wire, send, &rel, &manifest).await?;
     // `Need` gates on the receiver's journal open — a walk over every
     // stored part — not on wire speed.
-    let indices = match wire.recv_within(recv, PHASE_STALL).await? {
+    let indices = match frames.next(PHASE_STALL).await? {
         SyncMsg::Need { bits } => bits_to_indices(&bits, manifest.chunks.len())?,
         SyncMsg::Refuse { reason } => bail!("offer refused: {reason}"),
         SyncMsg::Cancel { reason } => bail!("receiver canceled before chunks: {reason}"),
         other => bail!("expected Need, got {other:?}"),
     };
-    let early = push_chunks(conn, source, &manifest, &indices, route, wire, recv).await?;
-    recv_done(early, wire, recv, manifest.root).await?;
+    let early = push_chunks(conn, source, &manifest, &indices, route, wire, frames).await?;
+    recv_done(early, frames, manifest.root).await?;
     let stats = Stats {
         fetched: indices.len() as u64,
         total: manifest.chunks.len() as u64,
@@ -954,7 +1094,7 @@ async fn recv_file_inner(
     rel_path: &str,
     dest_dir: &Path,
     send: &mut SendStream,
-    recv: &mut RecvStream,
+    frames: &mut ControlFrames,
     route: rds_core::UniHello,
     wire: Wire,
     cancel_flag: Option<Arc<AtomicBool>>,
@@ -968,7 +1108,7 @@ async fn recv_file_inner(
     )
     .await?;
     // The answer gates on the server's manifest build, not wire speed.
-    let (rel, size, root, chunk_count) = match wire.recv_within(recv, PHASE_STALL).await? {
+    let (rel, size, root, chunk_count) = match frames.next(PHASE_STALL).await? {
         SyncMsg::Offer {
             rel_path,
             size,
@@ -987,11 +1127,11 @@ async fn recv_file_inner(
     if rel != requested {
         bail!("offered path differs from requested path");
     }
-    let manifest = read_manifest(recv, size, root, chunk_count, wire).await?;
+    let manifest = read_manifest(frames, size, root, chunk_count, wire).await?;
     let (dest, stats) = receive(
         conn,
         send,
-        recv,
+        frames,
         dest_dir,
         &rel.to_string_lossy(),
         &manifest,
@@ -1058,18 +1198,12 @@ where
 /// manifest scan of a large source before the transfer aborts.
 async fn manifest_from_file(
     file: Arc<File>,
-    cancel_flag: Option<Arc<AtomicBool>>,
+    stop: impl Fn() -> bool + Send + Sync + 'static,
 ) -> anyhow::Result<Manifest> {
-    disk_job(move || {
-        manifest_of_reader_cancellable(&*file, &move || {
-            cancel_flag
-                .as_ref()
-                .is_some_and(|f| f.load(Ordering::Acquire))
-        })
-    })
-    .await
-    .context("manifest task")?
-    .context("build manifest")
+    disk_job(move || manifest_of_reader_cancellable(&*file, &stop))
+        .await
+        .context("manifest task")?
+        .context("build manifest")
 }
 
 /// Filesystem-bound chunk store: writes run on a dedicated blocking
@@ -1198,7 +1332,7 @@ impl JournalSink {
 async fn receive(
     conn: &Connection,
     send: &mut SendStream,
-    recv: &mut RecvStream,
+    frames: &mut ControlFrames,
     dir: &Path,
     rel: &str,
     manifest: &Manifest,
@@ -1229,21 +1363,24 @@ async fn receive(
     wire.send(send, &SyncMsg::Need { bits }).await?;
 
     // Shared stop for the blocking assembly inside `receive_chunks`: set by
-    // the peer's typed Cancel or a dead control stream here, and by the
-    // caller's cancellation token through `cancel_flag`. A canceled receive
-    // must never publish the destination after reporting the abort.
+    // the peer's typed Cancel or a dead control stream here and by the
+    // shared control reader (`peer_stop`, which fires the moment the
+    // reader sees either even before a phase consumes the frame), and by
+    // the caller's cancellation token through `cancel_flag`. A canceled
+    // receive must never publish the destination after reporting the abort.
     let assemble_stop = Arc::new(AtomicBool::new(false));
+    let peer_stop = frames.stop_flag();
     // v2 control read: only Cancel is valid mid-receive; any other frame
     // is a protocol violation.
     let cancelled = async {
         if wire.is_v2() {
-            wire.recv(recv).await
+            frames.next(READ_STALL).await
         } else {
             std::future::pending().await
         }
     };
     let result = tokio::select! {
-        result = receive_chunks(uni, journal, manifest, wire, cancel_flag, assemble_stop.clone()) => result?,
+        result = receive_chunks(uni, journal, manifest, wire, cancel_flag, assemble_stop.clone(), peer_stop) => result?,
         _ = send.stopped() => {
             assemble_stop.store(true, Ordering::Release);
             bail!("sync control stream closed during receive")
@@ -1274,6 +1411,7 @@ async fn receive_chunks(
     wire: Wire,
     cancel_flag: Option<Arc<AtomicBool>>,
     assemble_stop: Arc<AtomicBool>,
+    peer_stop: Arc<AtomicBool>,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let total = journal.total() as u64;
 
@@ -1380,6 +1518,7 @@ async fn receive_chunks(
         disk_job(move || {
             journal.assemble_cancellable(&move || {
                 assemble_stop.load(Ordering::Acquire)
+                    || peer_stop.load(Ordering::Acquire)
                     || cancel_flag
                         .as_ref()
                         .is_some_and(|f| f.load(Ordering::Acquire))
@@ -1407,13 +1546,12 @@ async fn receive_chunks(
 /// read uses the phase bound.
 async fn recv_done(
     early: Option<crate::ChunkHash>,
-    wire: Wire,
-    recv: &mut RecvStream,
+    frames: &mut ControlFrames,
     expected: crate::ChunkHash,
 ) -> anyhow::Result<()> {
     let msg = match early {
         Some(root) => SyncMsg::Done { root },
-        None => wire.recv_within(recv, PHASE_STALL).await?,
+        None => frames.next(PHASE_STALL).await?,
     };
     match msg {
         SyncMsg::Done { root } if root == expected => Ok(()),
@@ -1437,7 +1575,7 @@ async fn push_chunks(
     indices: &[u32],
     route: rds_core::UniHello,
     wire: Wire,
-    recv: &mut RecvStream,
+    frames: &mut ControlFrames,
 ) -> anyhow::Result<Option<crate::ChunkHash>> {
     let width = wire.limits.fetch_streams as usize;
     let mut tasks = tokio::task::JoinSet::new();
@@ -1501,7 +1639,7 @@ async fn push_chunks(
     }
     let mut cancelled = std::pin::pin!(async {
         if wire.is_v2() {
-            wire.recv(recv).await
+            frames.next(READ_STALL).await
         } else {
             std::future::pending().await
         }
@@ -1583,7 +1721,7 @@ async fn send_manifest(
 /// reassemble and validate. v2 additionally enforces the negotiated
 /// manifest and per-chunk bounds — tighter than the wire ceilings.
 async fn read_manifest(
-    recv: &mut RecvStream,
+    frames: &mut ControlFrames,
     size: u64,
     root: crate::ChunkHash,
     chunk_count: u32,
@@ -1597,7 +1735,7 @@ async fn read_manifest(
     }
     let mut chunks = Vec::with_capacity(chunk_count as usize);
     while chunks.len() < chunk_count as usize {
-        match wire.recv(recv).await? {
+        match frames.next(READ_STALL).await? {
             SyncMsg::ManifestPart { chunks: part } => {
                 if part.is_empty()
                     || part.len() > MANIFEST_BATCH

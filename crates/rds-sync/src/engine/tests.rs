@@ -325,7 +325,12 @@ async fn manifest_scan_honors_cancel_flag() {
 
     let raised = Arc::new(AtomicBool::new(true));
     let file = Arc::new(File::open(&path).unwrap());
-    let err = manifest_from_file(file, Some(raised)).await.unwrap_err();
+    let err = manifest_from_file(file, {
+        let raised = raised.clone();
+        move || raised.load(Ordering::Acquire)
+    })
+    .await
+    .unwrap_err();
     assert!(
         format!("{err:#}").contains("operation interrupted"),
         "expected interrupted scan, got {err:#}"
@@ -334,9 +339,131 @@ async fn manifest_scan_honors_cancel_flag() {
     // A canceled scan leaves the shared file position mid-stream — a
     // fresh handle is the honest rescan, matching engine behavior.
     let file = Arc::new(File::open(&path).unwrap());
-    let scanned = manifest_from_file(file, None).await.unwrap();
+    let scanned = manifest_from_file(file, || false).await.unwrap();
     assert_eq!(
         scanned.root,
         crate::manifest_of(&std::fs::read(&path).unwrap()).root
     );
+}
+
+/// A real bi-stream pair plus its peer half on a second endpoint —
+/// the fixture the `ControlFrames` tests exercise. The accept half is
+/// spawned first so the incoming handshake is driven while `connect`
+/// dials, matching how `spawn_server_v2` pairs endpoints.
+async fn stream_pair() -> (
+    SendStream,
+    RecvStream,
+    SendStream,
+    Connection,
+    Connection,
+    rds_net::Endpoint,
+    rds_net::Endpoint,
+) {
+    let a = rds_net::bind_endpoint(rds_net::EndpointConfig::default())
+        .await
+        .unwrap();
+    let b = rds_net::bind_endpoint(rds_net::EndpointConfig::default())
+        .await
+        .unwrap();
+    let b_addr = b.addr();
+    // The accept future must be polled while `connect` dials (iroh drives
+    // the incoming handshake through it), and `b` must outlive it —
+    // dropping the endpoint closes the accepted connection.
+    let (conn_a, conn_b) = tokio::join!(
+        async { a.connect(b_addr, rds_core::ALPN).await.unwrap() },
+        async { b.accept().await.unwrap().await.unwrap() },
+    );
+    let (mut send, recv) = conn_a.open_bi().await.unwrap();
+    // Stream opens are lazy: the peer's `accept_bi` only yields the
+    // stream after the opener writes its first bytes.
+    write_frame(
+        &mut send,
+        &SyncMsg::Session {
+            transfer_id: [0; 16],
+            msg: SessionMsg::Need { bits: vec![] },
+        },
+    )
+    .await
+    .unwrap();
+    let (peer_send, _peer_recv) = conn_b.accept_bi().await.unwrap();
+    (send, recv, peer_send, conn_a, conn_b, a, b)
+}
+
+/// W1.9 hardening: the shared reader flips `stop` the moment a typed
+/// `Cancel` is decoded — before any phase consumes it — and the frame
+/// still surfaces through `next` in order with its reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_reader_flags_peer_cancel_before_consumption() {
+    let id: [u8; 16] = rand::random();
+    let (_send, recv, mut peer_send, _ca, _cb, _ea, _eb) = stream_pair().await;
+    let mut frames = ControlFrames::open(Wire::v2(id, SessionLimits::LOCAL), recv);
+    write_frame(
+        &mut peer_send,
+        &SyncMsg::Session {
+            transfer_id: id,
+            msg: SessionMsg::Cancel {
+                reason: "peer walked away".into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    flag_watcher_wait(&frames.stop_flag()).await;
+    match frames.next(Duration::from_secs(10)).await.unwrap() {
+        SyncMsg::Cancel { reason } => assert_eq!(reason, "peer walked away"),
+        other => panic!("expected Cancel, got {other:?}"),
+    }
+    frames.close().await;
+}
+
+/// Ordered phase traffic flows through the queue untouched and `stop`
+/// stays clear; the peer finishing its send half ends the reader and
+/// reports the stream closed to the next wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_reader_preserves_order_and_reports_peer_fin() {
+    let id: [u8; 16] = rand::random();
+    let (_send, recv, mut peer_send, _ca, _cb, _ea, _eb) = stream_pair().await;
+    let mut frames = ControlFrames::open(Wire::v2(id, SessionLimits::LOCAL), recv);
+    let root = [7u8; 32];
+    for msg in [
+        SessionMsg::Need { bits: vec![0b11] },
+        SessionMsg::Done { root },
+    ] {
+        write_frame(
+            &mut peer_send,
+            &SyncMsg::Session {
+                transfer_id: id,
+                msg,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    match frames.next(Duration::from_secs(10)).await.unwrap() {
+        SyncMsg::Need { bits } => assert_eq!(bits, vec![0b11]),
+        other => panic!("expected Need, got {other:?}"),
+    }
+    match frames.next(Duration::from_secs(10)).await.unwrap() {
+        SyncMsg::Done { root: got } => assert_eq!(got, root),
+        other => panic!("expected Done, got {other:?}"),
+    }
+    assert!(!frames.stop_flag().load(Ordering::Acquire));
+    peer_send.finish().unwrap();
+    frames.drained().await.unwrap();
+    assert!(frames.stop_flag().load(Ordering::Acquire));
+    assert!(frames.next(Duration::from_secs(10)).await.is_err());
+}
+
+/// `close` runs the `recv.stop` epilogue on the wire: the peer's send
+/// half observes the stop instead of being left open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_reader_close_stops_the_peer_send() {
+    let id: [u8; 16] = rand::random();
+    let (_send, recv, peer_send, _ca, _cb, _ea, _eb) = stream_pair().await;
+    let mut frames = ControlFrames::open(Wire::v2(id, SessionLimits::LOCAL), recv);
+    frames.close().await;
+    tokio::time::timeout(Duration::from_secs(10), peer_send.stopped())
+        .await
+        .expect("peer send must observe the control stop")
+        .unwrap();
 }
