@@ -223,3 +223,78 @@ fn recovery_removes_only_reserved_regular_single_link_temporary_files() {
         }
     }
 }
+
+/// Plant a well-formed journal directory without running `Journal::open`,
+/// so several dead journals can coexist for the same destination.
+fn plant_journal(state: &Path, rel: &str, root: ChunkHash, parts: &[(&ChunkHash, &[u8])]) {
+    let dir = state.join(hex(&root));
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    let meta = Meta {
+        rel_path: rel.to_string(),
+        size: parts.iter().map(|(_, d)| d.len() as u64).sum(),
+        root,
+    };
+    let mut body = postcard::to_allocvec(&meta).unwrap();
+    body.extend_from_slice(blake3::hash(&body).as_bytes());
+    std::fs::write(dir.join("meta"), &body).unwrap();
+    for (hash, data) in parts {
+        std::fs::write(dir.join("parts").join(hex(hash)), data).unwrap();
+    }
+}
+
+#[test]
+fn superseded_journals_are_collected_and_foreign_entries_survive() {
+    // W1.10: an offer carrying a different root makes the dead journal
+    // for the same destination unreachable — a resume can only ever
+    // open the offered root. Verified-meta superseded state is removed;
+    // foreign, malformed, mislabeled and different-relation entries stay.
+    const OTHER: &[u8] = b"other destination remains resumable";
+    const NEXT: &[u8] = b"next verified destination content";
+    let dir = Scratch::new();
+    std::fs::write(dir.0.join("other.bin"), OTHER).unwrap();
+    let state = dir.0.join(STATE_DIR);
+
+    let ma = crate::manifest_of(NEW);
+    plant_journal(&state, "data.bin", ma.root, &[(&ma.chunks[0].hash, NEW)]);
+    let ma2 = crate::manifest_of(b"older superseded content");
+    plant_journal(&state, "data.bin", ma2.root, &[]);
+    let mo = crate::manifest_of(OTHER);
+    plant_journal(&state, "other.bin", mo.root, &[(&mo.chunks[0].hash, OTHER)]);
+
+    let state_a = state.join(hex(&ma.root));
+    let state_a2 = state.join(hex(&ma2.root));
+    let state_o = state.join(hex(&mo.root));
+    std::fs::write(state_a.join("parts").join("foreign.bin"), b"foreign").unwrap();
+    // Malformed, mislabeled and foreign siblings must never be swept.
+    std::fs::create_dir(state.join("a".repeat(64))).unwrap();
+    std::fs::create_dir(state.join("not-a-journal")).unwrap();
+    let mislabeled = state.join("b".repeat(64));
+    std::fs::create_dir(&mislabeled).unwrap();
+    let mut body = postcard::to_allocvec(&Meta {
+        rel_path: "data.bin".to_string(),
+        size: 0,
+        root: ma.root,
+    })
+    .unwrap();
+    body.extend_from_slice(blake3::hash(&body).as_bytes());
+    std::fs::write(mislabeled.join("meta"), &body).unwrap();
+
+    let mb = crate::manifest_of(NEXT);
+    drop(Journal::open(&dir.0, "data.bin", &mb).unwrap());
+
+    assert!(state.join(hex(&mb.root)).exists(), "own journal must open");
+    assert!(!state_a2.exists(), "clean superseded journal collected");
+    // Foreign residue keeps the directory; proven-owned names still go.
+    assert!(!state_a.join("parts").join(hex(&ma.chunks[0].hash)).exists());
+    assert!(state_a.join("parts").join("foreign.bin").exists());
+    assert!(
+        state_o.join("meta").exists(),
+        "other destination stays resumable"
+    );
+    assert!(state.join("a".repeat(64)).exists());
+    assert!(state.join("not-a-journal").exists());
+    assert!(mislabeled.join("meta").exists(), "unattributable stays");
+    // The surviving different-relation journal still resumes.
+    let jo = Journal::open(&dir.0, "other.bin", &mo).unwrap();
+    assert!(jo.complete());
+}

@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AVG_CHUNK, ChunkHash, MAX_CHUNK, MIN_CHUNK, Manifest, SyncError,
@@ -25,7 +25,7 @@ use crate::{
 pub const STATE_DIR: &str = ".rds-sync";
 const ASSEMBLY: &str = "assembly";
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Meta {
     rel_path: String,
     size: u64,
@@ -78,6 +78,12 @@ impl Journal {
             Some(dest_state.lock("receive.lock".as_ref())?)
         };
         dest_state.discard_owned(ASSEMBLY.as_ref())?;
+        // W1.10: a resume always opens the offered root, so verified-meta
+        // journals binding this same destination under a different content
+        // id are unreachable resume state. Collect them under the held
+        // receive locks — everything else (other rels, malformed or
+        // foreign entries) is not attributable and stays.
+        collect_superseded(&state, &rel, &content_id);
         // Refuse symlinks and special files even if they contain no reusable
         // bytes. NONBLOCK + fstat prevents a FIFO from blocking admission.
         let existing = match dest_parent.read_file(&dest_name) {
@@ -278,6 +284,91 @@ fn remove_if_present(dir: &Directory, name: &std::ffi::OsStr, directory: bool) -
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
+}
+
+/// Bounded postcard+b trailer size: rel_path is capped by `check_rel_path`,
+/// so a few KiB covers any meta this engine wrote.
+const META_LIMIT: usize = 8 * 1024;
+
+/// A content-id directory name: the lowercase hex of a BLAKE3 root.
+fn is_content_id(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Postcard body with its BLAKE3 trailer verified — the only decoding
+/// this engine trusts to attribute a journal to a transfer.
+fn decode_meta(body: &[u8]) -> Option<Meta> {
+    let data = body.len().checked_sub(32).map(|n| &body[..n])?;
+    let trailer = &body[data.len()..];
+    if blake3::hash(data).as_bytes() != trailer {
+        return None;
+    }
+    postcard::from_bytes(data).ok()
+}
+
+fn read_meta(dir: &Directory) -> io::Result<Option<Meta>> {
+    match dir.read_state("meta".as_ref(), META_LIMIT) {
+        Ok(body) => Ok(decode_meta(&body)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Remove verified superseded journals for `rel` under `state`. Best
+/// effort: a torn or hostile sibling must never block a fresh transfer,
+/// so per-entry failures are logged and skipped rather than returned.
+fn collect_superseded(state: &Directory, rel: &Path, own: &str) {
+    let rel_str = rel.to_string_lossy();
+    let children = match state.children() {
+        Ok(children) => children,
+        Err(error) => {
+            tracing::warn!(%error, "journal collection could not list state");
+            return;
+        }
+    };
+    for name in children {
+        let Some(name) = name.to_str() else { continue };
+        if name == own || !is_content_id(name) {
+            continue;
+        }
+        let superseded = state
+            .child(name.as_ref(), false)
+            .and_then(|entry| read_meta(&entry).map(|m| (entry, m)))
+            .ok()
+            .and_then(|(entry, meta)| {
+                let meta = meta?;
+                (meta.rel_path == rel_str && hex(&meta.root) == name).then_some((entry, meta))
+            });
+        if let Some((entry, _)) = superseded
+            && let Err(error) = collect_journal(&entry, state, name.as_ref())
+        {
+            tracing::warn!(%error, "superseded journal collection incomplete");
+        }
+    }
+}
+
+/// Remove only the names this engine could have written inside a
+/// verified superseded journal. Each removal re-proves the inode —
+/// regular file, single link — through `discard_owned`, so a planted
+/// alias aborts collection and preserves the journal instead of
+/// unlinking foreign data. `rmdir` refuses non-empty, matching
+/// `cleanup`'s never-sweep-the-unknown contract.
+fn collect_journal(entry: &Directory, state: &Directory, name: &std::ffi::OsStr) -> io::Result<()> {
+    if let Ok(parts) = entry.child("parts".as_ref(), false) {
+        for part in parts.children()? {
+            let Some(p) = part.to_str() else { continue };
+            if is_content_id(p) || p == PENDING {
+                parts.discard_owned(part.as_ref())?;
+            }
+        }
+        parts.sync()?;
+        remove_if_present(entry, "parts".as_ref(), true)?;
+    }
+    entry.discard_owned(PENDING.as_ref())?;
+    entry.discard_owned("meta".as_ref())?;
+    entry.sync()?;
+    remove_if_present(state, name, true)?;
+    state.sync()
 }
 
 fn write_meta(dir: &Directory, meta: &Meta) -> Result<(), SyncError> {

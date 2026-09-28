@@ -126,6 +126,23 @@ impl Directory {
         self.sync()
     }
 
+    /// Entry names in this pinned directory — names only; nothing is
+    /// resolved, opened or followed. The caller decides which names are
+    /// attributable; `.`/`..` are never reported.
+    pub(crate) fn children(&self) -> io::Result<Vec<OsString>> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut dir = rustix::fs::Dir::read_from(&*self.0)?;
+        let mut out = Vec::new();
+        while let Some(entry) = dir.read() {
+            let entry = entry?;
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            if name != "." && name != ".." {
+                out.push(name.to_os_string());
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) fn same_inode(&self, other: &Self) -> io::Result<bool> {
         let a = rustix::fs::fstat(&*self.0)?;
         let b = rustix::fs::fstat(&*other.0)?;
