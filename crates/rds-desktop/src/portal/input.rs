@@ -29,6 +29,7 @@ fn error() -> DesktopError {
 }
 
 struct Request {
+    input_seq: u64,
     lease: u64,
     live: Arc<AtomicBool>,
     era: u64,
@@ -40,6 +41,8 @@ struct Request {
 }
 
 struct Pending {
+    applied_at: Instant,
+    queue_us: u128,
     request: Request,
     done: Rc<Cell<bool>>,
     flushed: bool,
@@ -221,6 +224,7 @@ impl InputSink for Sink {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
             .try_send(Request {
+                input_seq: event.seq,
                 lease: self.lease,
                 live: self.live.clone(),
                 era: self.expected_era,
@@ -628,6 +632,8 @@ fn run(
         origin: Instant::now(),
     };
     let mut pending: Option<Pending> = None;
+    // Diagnostic-only target, capped per actor lifetime. No input payloads.
+    let mut timing_samples = 0_u32;
     while !stop.load(Ordering::Acquire) {
         check_pending(&mut pending, era.load(Ordering::Acquire), Instant::now())?;
         actor.release_closed()?;
@@ -644,6 +650,17 @@ fn run(
         if pending.as_ref().is_some_and(|pending| pending.done.get()) {
             let pending = pending.take().ok_or_else(error)?;
             if pending.canceled_until.is_none() {
+                if timing_samples < 128
+                    && tracing::enabled!(target: "rds_desktop::input_boundary", tracing::Level::DEBUG)
+                {
+                    timing_samples += 1;
+                    tracing::debug!(target: "rds_desktop::input_boundary",
+                        input_seq = pending.request.input_seq,
+                        lease = pending.request.lease,
+                        queue_us = pending.queue_us,
+                        apply_sync_us = pending.applied_at.elapsed().as_micros(),
+                        "EIS input boundary");
+                }
                 let _ = pending.request.reply.try_send(Ok(()));
             }
             // A canceled, already-flushed action is never replayed or ACKed.
@@ -660,6 +677,10 @@ fn run(
                         let _ = request.reply.try_send(Err(error()));
                         continue;
                     }
+                    let applied_at = Instant::now();
+                    let queue_us = applied_at
+                        .duration_since(request.deadline - INPUT_TIMEOUT)
+                        .as_micros();
                     if let Err(error) = actor.apply(&request) {
                         let _ = request.reply.try_send(Err(error));
                         continue;
@@ -671,6 +692,8 @@ fn run(
                         .converter
                         .add_callback_handler(callback, move |_| mark.set(true));
                     pending = Some(Pending {
+                        applied_at,
+                        queue_us,
                         request,
                         done,
                         flushed: false,
@@ -694,6 +717,7 @@ mod exit_tests {
     fn canceled_unflushed_input_fails_closed_and_flushed_sync_drain_remains_bounded() {
         let now = Instant::now();
         let request = |reply| Request {
+            input_seq: 0,
             lease: 1,
             live: Arc::new(AtomicBool::new(false)),
             era: 0,
@@ -705,6 +729,8 @@ mod exit_tests {
         };
         let (reply, response) = mpsc::sync_channel(1);
         let mut unflushed = Some(Pending {
+            applied_at: now,
+            queue_us: 0,
             request: request(reply),
             done: Rc::new(Cell::new(false)),
             flushed: false,
@@ -717,6 +743,8 @@ mod exit_tests {
         );
         let (reply, response) = mpsc::sync_channel(1);
         let mut flushed = Some(Pending {
+            applied_at: now,
+            queue_us: 0,
             request: request(reply),
             done: Rc::new(Cell::new(false)),
             flushed: true,
