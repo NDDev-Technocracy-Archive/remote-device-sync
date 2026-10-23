@@ -35,10 +35,12 @@ pub use workspace::{WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
 pub enum ViewerInput {
     Control(DesktopControl),
     Close,
+    InputStalled,
 }
 
 struct InputState {
     queue: Mutex<VecDeque<ViewerInput>>,
+    pointer_in_flight: Mutex<VecDeque<(u64, tokio::time::Instant)>>,
     ready: Notify,
     pointer_coalesced: AtomicU64,
     input_dropped: AtomicU64,
@@ -46,6 +48,33 @@ struct InputState {
 }
 struct InputSender(Arc<InputState>);
 const INPUT_QUEUE_CAPACITY: usize = 1024;
+// Bound remote injection debt, not just the fast local/network writer queue.
+// At 150ms RTT this allows about 27 pointer updates/sec without accumulating
+// seconds of motion ahead of a click or the control heartbeat.
+const POINTER_IN_FLIGHT: usize = 4;
+const POINTER_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+impl InputState {
+    fn pointer_ack(&self, seq: u64) {
+        let mut pending = self
+            .pointer_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = pending.iter().position(|(sent, _)| *sent == seq) {
+            pending.remove(index);
+            drop(pending);
+            self.ready.notify_one();
+        }
+    }
+
+    fn cancel_pointers(&self) {
+        self.pointer_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.ready.notify_one();
+    }
+}
 
 /// One bounded input consumer. Consecutive pointer positions collapse, while
 /// keys/buttons retain their order relative to the final pointer before them.
@@ -56,12 +85,61 @@ impl InputReceiver {
     pub async fn recv(&mut self) -> Option<ViewerInput> {
         loop {
             let ready = self.0.ready.notified();
-            if let Some(event) = self.try_recv() {
+            if let Some(event) = self.next() {
                 return Some(event);
             }
-            ready.await;
+            let deadline = self
+                .0
+                .pointer_in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .front()
+                .map(|(_, sent)| *sent + POINTER_ACK_TIMEOUT);
+            match deadline {
+                Some(deadline) => tokio::select! {
+                    _ = ready => {},
+                    _ = tokio::time::sleep_until(deadline) => {},
+                },
+                None => ready.await,
+            }
         }
     }
+    fn next(&self) -> Option<ViewerInput> {
+        let mut queue = self
+            .0
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(queue.front(), Some(ViewerInput::Close)) {
+            return queue.pop_front();
+        }
+        let mut pending = self
+            .0
+            .pointer_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending
+            .front()
+            .is_some_and(|(_, sent)| sent.elapsed() >= POINTER_ACK_TIMEOUT)
+        {
+            // A missing handled ACK must not leave a healthy-video session
+            // silently unable to accept pointer input forever. Fail the local
+            // attempt; never manufacture credit or replay the old motion.
+            return Some(ViewerInput::InputStalled);
+        }
+        if let Some(ViewerInput::Control(DesktopControl::Input(event))) = queue.front()
+            && matches!(event.kind, InputKind::PointerMove { .. })
+        {
+            if pending.len() >= POINTER_IN_FLIGHT {
+                // Retain the queued tail so new absolute positions can replace
+                // it. Never skip across a key/button/scroll/display barrier.
+                return None;
+            }
+            pending.push_back((event.seq, tokio::time::Instant::now()));
+        }
+        queue.pop_front()
+    }
+    /// Unpaced dequeue is only for discarding disconnected input, not dispatch.
     pub fn try_recv(&self) -> Option<ViewerInput> {
         self.0
             .queue
@@ -77,6 +155,15 @@ impl InputSender {
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(message, ViewerInput::Close) {
+            // Closing cancels queued controls, just like dropping the sender.
+            // It must not wait for an ACK from an unresponsive remote sink.
+            queue.clear();
+            queue.push_back(message);
+            drop(queue);
+            self.0.ready.notify_one();
+            return Ok(());
+        }
         if let (
             ViewerInput::Control(DesktopControl::Input(next)),
             Some(ViewerInput::Control(DesktopControl::Input(previous))),
@@ -448,6 +535,7 @@ impl ViewerHandle {
         let mut state = lock(&self.state);
         state.status = text.into();
         if state.status == "Reconnecting" {
+            self.input_state.cancel_pointers();
             state.report.input_acks_canceled += state.input_latency.pending.len() as u64;
             state.input_latency.pending.clear();
             state.report.clipboard_transfers_canceled +=
@@ -497,6 +585,7 @@ impl ViewerHandle {
     }
     /// A local epoch distinguishes frame/input sequence numbers after reconnect.
     pub fn begin_session(&self, span: tracing::Span) {
+        self.input_state.cancel_pointers();
         let mut state = lock(&self.state);
         state.clipboard.reset();
         state.frames = FrameMailbox::default();
@@ -554,6 +643,7 @@ impl ViewerHandle {
         lock(&self.state).report.managed_events_separated = true;
     }
     pub fn input_ack(&self, seq: u64) {
+        self.input_state.pointer_ack(seq);
         let mut state = lock(&self.state);
         state.report.input_acks += 1;
         let ack_ms = self.started.elapsed().as_millis() as u64;
@@ -803,6 +893,7 @@ impl SessionView {
     fn new(display: u32, proxy: EventLoopProxy<()>) -> (Self, ViewerHandle, InputReceiver) {
         let input_state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
+            pointer_in_flight: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
             pointer_coalesced: AtomicU64::new(0),
             input_dropped: AtomicU64::new(0),
@@ -1612,6 +1703,7 @@ mod tests {
     async fn pointer_collapse_keeps_click_and_release_order_and_close_wakes_receiver() {
         let state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
+            pointer_in_flight: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
             pointer_coalesced: AtomicU64::new(0),
             input_dropped: AtomicU64::new(0),
@@ -1666,6 +1758,7 @@ mod tests {
     async fn rapid_semantic_burst_preserves_every_button_event() {
         let state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
+            pointer_in_flight: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
             pointer_coalesced: AtomicU64::new(0),
             input_dropped: AtomicU64::new(0),
@@ -1707,11 +1800,223 @@ mod tests {
     fn test_input_state() -> Arc<InputState> {
         Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
+            pointer_in_flight: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
             pointer_coalesced: AtomicU64::new(0),
             input_dropped: AtomicU64::new(0),
             max_depth: AtomicU64::new(0),
         })
+    }
+
+    #[test]
+    fn thousand_hz_motion_over_150ms_wan_has_bounded_debt_and_delivers_latest_position() {
+        let state = test_input_state();
+        let sender = InputSender(state.clone());
+        let receiver = InputReceiver(state.clone());
+        let mut replies = VecDeque::new();
+        let mut latency = InputLatency::default();
+        let mut sent = Vec::new();
+        for now in 0..1300_u64 {
+            while replies.front().is_some_and(|(due, _)| *due <= now) {
+                let (_, seq) = replies.pop_front().unwrap();
+                state.pointer_ack(seq);
+                assert!(latency.ack(seq, now).is_some()); // Only real replies.
+            }
+            if now < 1000 {
+                sender
+                    .send(event(
+                        now,
+                        InputKind::PointerMove {
+                            x: now as f64,
+                            y: 1.,
+                        },
+                    ))
+                    .unwrap();
+            }
+            while let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.next() {
+                latency.sent(input.seq, input.seq, now, InputClass::Other);
+                replies.push_back((now + 150, input.seq));
+                sent.push(input);
+            }
+            assert!(state.pointer_in_flight.lock().unwrap().len() <= POINTER_IN_FLIGHT);
+            assert!(state.queue.lock().unwrap().len() <= 1);
+        }
+        assert!(
+            sent.len() <= 29,
+            "motion rate must follow remote handled ACKs"
+        );
+        assert_eq!(sent.last().unwrap().seq, 999);
+        assert!(matches!(
+            sent.last().unwrap().kind,
+            InputKind::PointerMove { x: 999., .. }
+        ));
+        assert_eq!(
+            state.pointer_coalesced.load(Ordering::Relaxed),
+            1000 - sent.len() as u64
+        );
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+        assert!(state.pointer_in_flight.lock().unwrap().is_empty());
+        assert!(latency.pending.is_empty());
+        assert_eq!(latency.evicted, 0);
+    }
+
+    fn fill_pointer_window(sender: &InputSender, receiver: &InputReceiver, first: u64) {
+        for seq in first..first + POINTER_IN_FLIGHT as u64 {
+            sender
+                .send(event(
+                    seq,
+                    InputKind::PointerMove {
+                        x: seq as f64,
+                        y: 1.,
+                    },
+                ))
+                .unwrap();
+            assert!(receiver.next().is_some());
+        }
+    }
+
+    #[test]
+    fn pointer_window_keeps_semantic_and_cross_display_position_barriers() {
+        let state = test_input_state();
+        let sender = InputSender(state.clone());
+        let receiver = InputReceiver(state.clone());
+        fill_pointer_window(&sender, &receiver, 0);
+        sender
+            .send(event(10, InputKind::PointerMove { x: 10., y: 1. }))
+            .unwrap();
+        for (seq, kind) in [
+            (
+                11,
+                InputKind::PointerButton {
+                    button: 0x110,
+                    pressed: true,
+                },
+            ),
+            (12, InputKind::KeyDown { code: 30 }),
+            (13, InputKind::Scroll { dx: 0., dy: 1. }),
+            (14, InputKind::PointerMotion { dx: 1., dy: 0. }),
+        ] {
+            sender.send(event(seq, kind)).unwrap();
+        }
+        let ViewerInput::Control(DesktopControl::Input(mut other)) =
+            event(15, InputKind::PointerMove { x: 15., y: 1. })
+        else {
+            unreachable!()
+        };
+        other.display_id = 1;
+        sender
+            .send(ViewerInput::Control(DesktopControl::Input(other)))
+            .unwrap();
+        sender
+            .send(event(16, InputKind::PointerMove { x: 16., y: 1. }))
+            .unwrap();
+        assert!(receiver.next().is_none());
+        state.pointer_ack(0);
+        for seq in 10..=14 {
+            let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.next() else {
+                panic!("position/action barrier lost")
+            };
+            assert_eq!(input.seq, seq);
+        }
+        assert!(receiver.next().is_none());
+        state.pointer_ack(1);
+        let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.next() else {
+            panic!("display position lost")
+        };
+        assert_eq!((input.seq, input.display_id), (15, 1));
+        assert!(receiver.next().is_none());
+        state.pointer_ack(2);
+        let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.next() else {
+            panic!("second display position lost")
+        };
+        assert_eq!((input.seq, input.display_id), (16, 0));
+        assert_eq!(state.pointer_coalesced.load(Ordering::Relaxed), 0);
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn real_pointer_ack_wakes_latest_motion_but_unknown_ack_and_cancelled_wait_do_not_spend_credit()
+     {
+        let state = test_input_state();
+        let sender = InputSender(state.clone());
+        let mut receiver = InputReceiver(state.clone());
+        fill_pointer_window(&sender, &receiver, 0);
+        sender
+            .send(event(10, InputKind::PointerMove { x: 10., y: 1. }))
+            .unwrap();
+        state.pointer_ack(999); // Unknown ACK cannot release an input slot.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), receiver.recv())
+                .await
+                .is_err()
+        );
+        sender
+            .send(event(11, InputKind::PointerMove { x: 11., y: 1. }))
+            .unwrap();
+        let acknowledging = state.clone();
+        let ack = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            acknowledging.pointer_ack(0);
+        });
+        let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.recv().await else {
+            panic!("ACK did not wake input")
+        };
+        ack.await.unwrap();
+        assert_eq!(input.seq, 11);
+        state.pointer_ack(0); // Duplicate ACK cannot release another slot.
+        sender
+            .send(event(12, InputKind::PointerMove { x: 12., y: 1. }))
+            .unwrap();
+        assert!(receiver.next().is_none());
+        sender.send(ViewerInput::Close).unwrap();
+        assert!(matches!(receiver.recv().await, Some(ViewerInput::Close)));
+        assert_eq!(
+            state.pointer_in_flight.lock().unwrap().len(),
+            POINTER_IN_FLIGHT
+        );
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn reconnect_cancels_old_pointer_window_without_granting_stale_ack_credit() {
+        let state = test_input_state();
+        let sender = InputSender(state.clone());
+        let receiver = InputReceiver(state.clone());
+        fill_pointer_window(&sender, &receiver, 0);
+        sender
+            .send(event(10, InputKind::PointerMove { x: 10., y: 1. }))
+            .unwrap();
+        state.cancel_pointers();
+        assert!(receiver.try_recv().is_some()); // Discard disconnected input.
+        fill_pointer_window(&sender, &receiver, 100);
+        state.pointer_ack(0);
+        sender
+            .send(event(104, InputKind::PointerMove { x: 104., y: 1. }))
+            .unwrap();
+        assert!(receiver.next().is_none());
+        state.pointer_ack(100);
+        assert!(receiver.next().is_some());
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_pointer_ack_fails_the_attempt_without_fabricating_credit_or_requiring_more_input()
+     {
+        let state = test_input_state();
+        let sender = InputSender(state.clone());
+        let mut receiver = InputReceiver(state.clone());
+        fill_pointer_window(&sender, &receiver, 0);
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ViewerInput::InputStalled)
+        ));
+        assert_eq!(
+            state.pointer_in_flight.lock().unwrap().len(),
+            POINTER_IN_FLIGHT
+        );
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+        sender.send(ViewerInput::Close).unwrap();
+        assert!(matches!(receiver.recv().await, Some(ViewerInput::Close)));
     }
 
     #[test]

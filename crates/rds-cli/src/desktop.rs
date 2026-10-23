@@ -716,6 +716,7 @@ mod native {
                         tokio::time::timeout(Duration::from_secs(2),ctrl.send(message)).await.map_err(|_|anyhow::anyhow!("direct desktop control stalled"))??;
                     },
                     Some(ViewerInput::Close)|None => break Ok(true),
+                    Some(ViewerInput::InputStalled) => anyhow::bail!("pointer input acknowledgement stalled"),
                 },
                 _ = tick.tick() => {
                     control_progress.check()?;

@@ -294,6 +294,17 @@ moves on the same display collapse; motion before a button, key or scroll remain
 a position barrier. Full-queue rejection leaves the accepted prefix intact and
 records overflow before closing. It never evicts an earlier click's position.
 
+Absolute pointer dispatch is also clocked by the remote handled-input ACKs:
+at most four motion events may be outstanding. Further motion stays in the
+existing queue, where adjacent positions collapse to the latest position.
+Keys, buttons, scroll and display changes retain their position barriers and
+order; heartbeats remain independent of a motion waiting for credit. Unknown
+or duplicate ACKs grant no credit, and reconnect cancels the old motion window.
+An eight-second handled-ACK stall fails the local attempt even if video and
+heartbeats remain active; it never grants credit by timeout or replays motion.
+This bounds remote motion debt even when the local writer is faster than the
+target input backend. It changes no wire message or agent requirement.
+
 One pending decoded frame per session is retained for presentation, sharing
 its allocation with that session's newest image for idle-tab restoration. The
 GPU surface selects supported `Mailbox`, otherwise `Fifo`, and requests one
