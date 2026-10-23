@@ -39,6 +39,53 @@ struct Request {
     reply: mpsc::SyncSender<Result<(), DesktopError>>,
 }
 
+struct Pending {
+    request: Request,
+    done: Rc<Cell<bool>>,
+    flushed: bool,
+    canceled_until: Option<Instant>,
+}
+fn check_pending(
+    pending: &mut Option<Pending>,
+    era: u64,
+    now: Instant,
+) -> Result<(), DesktopError> {
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+    let reason = if pending.request.era != era {
+        Some("device generation changed")
+    } else if now >= pending.request.deadline {
+        Some("sync deadline elapsed")
+    } else if !pending.request.live.load(Ordering::Acquire) {
+        Some("caller lease canceled")
+    } else {
+        None
+    };
+    if let Some(reason) = reason
+        && pending.canceled_until.is_none()
+    {
+        tracing::warn!(
+            reason,
+            flushed = pending.flushed,
+            "Wayland EIS input request canceled"
+        );
+        // Unwritten bytes cannot be removed from the protocol buffer. Closing
+        // that peer is the only safe way to prevent stale input from flushing.
+        if !pending.flushed {
+            return Err(error());
+        }
+        pending.request.live.store(false, Ordering::Release);
+        let _ = pending.request.reply.try_send(Err(error()));
+        pending.canceled_until = Some(now + INPUT_TIMEOUT);
+    }
+    if pending.canceled_until.is_some_and(|end| now >= end) && !pending.done.get() {
+        tracing::warn!("Wayland EIS canceled sync drain deadline elapsed");
+        return Err(error());
+    }
+    Ok(())
+}
+
 pub(super) struct Group {
     sender: mpsc::SyncSender<Request>,
     stop: Arc<AtomicBool>,
@@ -70,7 +117,11 @@ impl Group {
                 ready: &readiness,
                 stop: &stopping,
             };
-            run(fd, mappings, receiver, &stopping, &readiness, &generation)
+            let result = run(fd, mappings, receiver, &stopping, &readiness, &generation);
+            if result.is_err() {
+                tracing::warn!("Wayland EIS native worker failed");
+            }
+            result
         });
         Ok(Self {
             sender,
@@ -227,7 +278,10 @@ impl Actor {
             self.converter.handle_event(event).map_err(|_| error())?;
             while let Some(event) = self.converter.next_event() {
                 match event {
-                    EiEvent::Disconnected(_) => return Err(error()),
+                    EiEvent::Disconnected(_) => {
+                        tracing::warn!("Wayland EIS peer disconnected");
+                        return Err(error());
+                    }
                     EiEvent::SeatAdded(event) => event.seat.bind_capabilities(
                         DeviceCapability::Keyboard
                             | DeviceCapability::PointerAbsolute
@@ -258,6 +312,7 @@ impl Actor {
                         }
                     }
                     EiEvent::DevicePaused(event) => {
+                        tracing::info!("Wayland EIS device paused; invalidating old input leases");
                         self.invalidate_device(&event.device);
                         if let Some(device) =
                             self.devices.iter_mut().find(|d| d.device == event.device)
@@ -268,6 +323,7 @@ impl Actor {
                         self.release_closed()?;
                     }
                     EiEvent::DeviceRemoved(event) => {
+                        tracing::info!("Wayland EIS device removed; invalidating old input leases");
                         self.invalidate_device(&event.device);
                         self.devices.retain(|d| d.device != event.device);
                         era.fetch_add(1, Ordering::AcqRel);
@@ -571,35 +627,27 @@ fn run(
         sequence: 0,
         origin: Instant::now(),
     };
-    let mut pending: Option<(Request, Rc<Cell<bool>>)> = None;
+    let mut pending: Option<Pending> = None;
     while !stop.load(Ordering::Acquire) {
-        // Do not flush a buffered action after its caller/deadline expired.
-        // Bytes already written to the peer cannot be rolled back.
-        if pending.as_ref().is_some_and(|(request, _)| {
-            !request.live.load(Ordering::Acquire)
-                || request.era != era.load(Ordering::Acquire)
-                || Instant::now() >= request.deadline
-        }) {
-            return Err(error());
+        check_pending(&mut pending, era.load(Ordering::Acquire), Instant::now())?;
+        actor.release_closed()?;
+        let writable = flush(&actor.context)?;
+        if !writable && let Some(pending) = &mut pending {
+            pending.flushed = true;
         }
-        poll(&actor.context, flush(&actor.context)?)?;
+        poll(&actor.context, writable)?;
         actor.events(era)?;
         let available = actor.ready();
         ready.store(available, Ordering::Release);
+        check_pending(&mut pending, era.load(Ordering::Acquire), Instant::now())?;
         actor.release_closed()?;
-        if let Some((request, done)) = pending.as_ref() {
-            if !request.live.load(Ordering::Acquire)
-                || request.era != era.load(Ordering::Acquire)
-                || Instant::now() >= request.deadline
-            {
-                return Err(error());
+        if pending.as_ref().is_some_and(|pending| pending.done.get()) {
+            let pending = pending.take().ok_or_else(error)?;
+            if pending.canceled_until.is_none() {
+                let _ = pending.request.reply.try_send(Ok(()));
             }
-            if done.get() {
-                let (request, _) = pending.take().ok_or_else(error)?;
-                let _ = request.reply.try_send(Ok(()));
-            } else if Instant::now() >= request.deadline {
-                return Err(error());
-            }
+            // A canceled, already-flushed action is never replayed or ACKed.
+            // Its actual sync callback has now drained, so fresh leases can run.
         }
         if pending.is_none() {
             match requests.try_recv() {
@@ -622,7 +670,12 @@ fn run(
                     actor
                         .converter
                         .add_callback_handler(callback, move |_| mark.set(true));
-                    pending = Some((request, done));
+                    pending = Some(Pending {
+                        request,
+                        done,
+                        flushed: false,
+                        canceled_until: None,
+                    });
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => break,
@@ -637,6 +690,46 @@ fn run(
 #[cfg(test)]
 mod exit_tests {
     use super::*;
+    #[test]
+    fn canceled_unflushed_input_fails_closed_and_flushed_sync_drain_remains_bounded() {
+        let now = Instant::now();
+        let request = |reply| Request {
+            lease: 1,
+            live: Arc::new(AtomicBool::new(false)),
+            era: 0,
+            index: 0,
+            extent: (100, 100),
+            action: InputKind::KeyDown { code: 30 },
+            deadline: now + INPUT_TIMEOUT,
+            reply,
+        };
+        let (reply, response) = mpsc::sync_channel(1);
+        let mut unflushed = Some(Pending {
+            request: request(reply),
+            done: Rc::new(Cell::new(false)),
+            flushed: false,
+            canceled_until: None,
+        });
+        assert!(check_pending(&mut unflushed, 0, now).is_err());
+        assert!(
+            response.try_recv().is_err(),
+            "no fabricated success for bytes that cannot be discarded"
+        );
+        let (reply, response) = mpsc::sync_channel(1);
+        let mut flushed = Some(Pending {
+            request: request(reply),
+            done: Rc::new(Cell::new(false)),
+            flushed: true,
+            canceled_until: None,
+        });
+        assert!(check_pending(&mut flushed, 0, now).is_ok());
+        assert!(response.try_recv().unwrap().is_err());
+        assert!(
+            check_pending(&mut flushed, 0, now + INPUT_TIMEOUT).is_err(),
+            "never accumulate unanswered native callbacks indefinitely"
+        );
+    }
+
     #[test]
     fn input_worker_unwind_seals_old_leases_and_readiness() {
         let ready = AtomicBool::new(true);

@@ -17,10 +17,33 @@ pub struct WaylandDesktop {
     input: Arc<input::Group>,
     clipboard: Option<Arc<super::clipboard::Group>>,
     producers: Arc<Semaphore>,
-    closed: watch::Receiver<bool>,
+    closed: watch::Receiver<Option<StopReason>>,
     close: Mutex<Option<oneshot::Sender<()>>>,
     finished: watch::Receiver<bool>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopReason {
+    LocalStop,
+    Revoked,
+    NativeFailure,
+}
+
+async fn stopped(mut closed: watch::Receiver<Option<StopReason>>) -> Result<(), DesktopError> {
+    loop {
+        let reason = *closed.borrow_and_update();
+        if let Some(reason) = reason {
+            return if reason == StopReason::NativeFailure {
+                Err(error())
+            } else {
+                Ok(())
+            };
+        }
+        if closed.changed().await.is_err() {
+            return Err(error());
+        }
+    }
+}
+
 fn error() -> DesktopError {
     DesktopError::Capture("Wayland desktop is not ready or was revoked".into())
 }
@@ -117,24 +140,39 @@ impl WaylandDesktop {
         let mut owner = granted.owner;
         let mut portal_closed = owner.closed.clone();
         let (close, stop) = oneshot::channel();
-        let (closed_tx, closed) = watch::channel(false);
+        let (closed_tx, closed) = watch::channel(None);
         let (finished_tx, finished) = watch::channel(false);
         tokio::spawn(async move {
             let _store = store;
             let mut tick = tokio::time::interval(Duration::from_millis(20));
             tokio::pin!(stop);
-            loop {
+            let reason = loop {
                 tokio::select! {
-                    _ = &mut stop => break,
+                    biased;
+                    _ = &mut stop => break StopReason::LocalStop,
                     changed = portal_closed.changed() => {
-                        if changed.is_err() || *portal_closed.borrow() { break; }
+                        if changed.is_err() { break StopReason::NativeFailure; }
+                        match *portal_closed.borrow() {
+                            Some(session::Closed::Revoked) => break StopReason::Revoked,
+                            Some(session::Closed::Requested) => break StopReason::LocalStop,
+                            Some(session::Closed::Disconnected) => break StopReason::NativeFailure,
+                            None => {},
+                        }
                     },
                     _ = tick.tick() => {
-                        if closing_input.stopped() || capture.slots.iter().any(|slot| slot.extent().is_err()) { break; }
+                        if closing_input.stopped() {
+                            tracing::warn!("prepared Wayland EIS input worker stopped");
+                            break StopReason::NativeFailure;
+                        }
+                        if capture.slots.iter().any(|slot| slot.extent().is_err()) {
+                            tracing::warn!("prepared Wayland PipeWire capture unavailable");
+                            break StopReason::NativeFailure;
+                        }
                     },
                 }
-            }
-            closed_tx.send_replace(true);
+            };
+            tracing::info!(?reason, "prepared Wayland desktop stopped");
+            closed_tx.send_replace(Some(reason));
             capture.stop();
             closing_input.stop();
             let (video, input) = tokio::join!(capture.close(), closing_input.close());
@@ -165,7 +203,7 @@ impl WaylandDesktop {
         };
         let ready = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if *backend.closed.borrow() {
+                if backend.closed.borrow().is_some() {
                     return Err(error());
                 }
                 if backend
@@ -193,6 +231,11 @@ impl WaylandDesktop {
         }
         Ok(backend)
     }
+    /// Notify the local owner of a sealed backend. Native faults are failures;
+    /// explicit consent revocation remains a clean stop, never an auto-reopen.
+    pub async fn stopped(&self) -> Result<(), DesktopError> {
+        stopped(self.closed.clone()).await
+    }
     pub async fn close(&self) {
         self.request_close();
         let mut finished = self.finished.clone();
@@ -210,7 +253,7 @@ impl WaylandDesktop {
         }
     }
     fn slot(&self, display: u32) -> Result<Arc<capture::Slot>, DesktopError> {
-        if *self.closed.borrow() {
+        if self.closed.borrow().is_some() {
             return Err(error());
         }
         self.slots
@@ -227,7 +270,7 @@ impl Drop for WaylandDesktop {
 }
 impl DesktopSource for WaylandDesktop {
     fn capabilities(&self) -> Result<DesktopCaps, DesktopError> {
-        if *self.closed.borrow() {
+        if self.closed.borrow().is_some() {
             return Err(error());
         }
         let displays = self
@@ -274,7 +317,7 @@ impl DesktopSource for WaylandDesktop {
         self.input.sink(display, extent)
     }
     fn clipboard_supported(&self) -> bool {
-        !*self.closed.borrow()
+        self.closed.borrow().is_none()
             && self
                 .clipboard
                 .as_ref()
@@ -293,6 +336,35 @@ impl DesktopSource for WaylandDesktop {
 #[cfg(test)]
 mod cancellation_tests {
     use super::*;
+    #[tokio::test]
+    async fn sealed_backend_wakes_owner_and_keeps_revocation_distinct_from_native_failure() {
+        for (reason, failure) in [
+            (StopReason::NativeFailure, true),
+            (StopReason::Revoked, false),
+            (StopReason::LocalStop, false),
+        ] {
+            let (close, receiver) = watch::channel(None);
+            let wait = stopped(receiver);
+            tokio::pin!(wait);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(5), &mut wait)
+                    .await
+                    .is_err()
+            );
+            close.send_replace(Some(reason));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), wait)
+                    .await
+                    .unwrap()
+                    .is_err(),
+                failure
+            );
+        }
+        let (sender, receiver) = watch::channel(None);
+        drop(sender);
+        assert!(stopped(receiver).await.is_err());
+    }
+
     use std::os::unix::fs::PermissionsExt;
     struct Directory(std::path::PathBuf);
     impl Drop for Directory {

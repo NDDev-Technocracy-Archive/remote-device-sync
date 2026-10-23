@@ -976,3 +976,19 @@ reach the remote desktop. Native text fields and dialogs release that request.
 The compositor retains its own permission and escape policy; unsupported
 compositors keep their ordinary shortcut behavior. No global keybindings or
 pointer confinement are changed.
+
+A Wayland-serving agent accepts the startup environment
+`RDS_PORTAL_CURSOR_MODE=embedded` (default) or `RDS_PORTAL_CURSOR_MODE=hidden`.
+The selected mode must be advertised by the portal; unsupported or invalid
+values fail preparation without fallback. With hidden capture, keep the local
+viewer cursor visible by omitting `--remote-cursor-embedded` for immediate local
+pointer feedback without a second cursor in the captured image.
+
+A prepared Wayland backend notifies its owning agent when it closes. Native
+capture/input or portal-connection faults end the agent with failure after its
+existing joined cleanup; an owner-configured `Restart=on-failure` supervisor can
+then restore the authorized session at startup. Explicit portal revocation ends
+cleanly and stays closed. Remote requests cannot initiate preparation or revive
+revoked input. An already-flushed canceled input drains its real native sync
+before fresh leases run, without replay or a successful ACK; unsafe unflushed
+cancellation and a bounded sync-drain timeout still fail closed.

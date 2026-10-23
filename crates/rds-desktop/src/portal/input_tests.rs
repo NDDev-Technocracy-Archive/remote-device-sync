@@ -23,17 +23,27 @@ enum Seen {
     Move(f32, f32),
 }
 
+#[derive(Default)]
+struct SyncControl {
+    hold_next: AtomicBool,
+    pause_next: AtomicBool,
+    blocked: AtomicBool,
+    release: AtomicBool,
+}
+
 fn server(
     socket: UnixStream,
     seen: Arc<Mutex<Vec<Seen>>>,
     pause: mpsc::Receiver<()>,
     stop: Arc<AtomicBool>,
+    control: Option<Arc<SyncControl>>,
 ) {
     let context = eis::Context::new(socket).unwrap();
     let mut handshake = EisHandshaker::new(&context, 1);
     let mut converter = None;
     let mut keyboard = None;
     let mut advertised = false;
+    let mut held_sync = None;
     let deadline = Instant::now() + Duration::from_secs(12);
     while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
         if context.read().is_err() {
@@ -44,6 +54,22 @@ fn server(
                 panic!("invalid fixture request");
             };
             if let Some(converter) = converter.as_mut() {
+                if matches!(
+                    &request,
+                    eis::Request::Connection(_, eis::connection::Request::Sync { .. })
+                ) && let Some(control) = &control
+                    && control.hold_next.swap(false, Ordering::AcqRel)
+                {
+                    assert!(held_sync.is_none());
+                    held_sync = Some(request);
+                    if control.pause_next.swap(false, Ordering::AcqRel) {
+                        let keyboard: &reis::request::Device = keyboard.as_ref().unwrap();
+                        keyboard.paused();
+                        keyboard.resumed();
+                    }
+                    control.blocked.store(true, Ordering::Release);
+                    continue;
+                }
                 EisRequestConverter::handle_request(converter, request).unwrap();
             } else if let Some(response) = handshake.handle_request(request).unwrap() {
                 let ready = EisRequestConverter::new(&context, response, 1);
@@ -58,6 +84,13 @@ fn server(
             }
         }
         if let Some(converter) = converter.as_mut() {
+            if let Some(control) = &control
+                && control.release.load(Ordering::Acquire)
+                && let Some(request) = held_sync.take()
+            {
+                converter.handle_request(request).unwrap();
+                control.blocked.store(false, Ordering::Release);
+            }
             while let Some(request) = converter.next_request() {
                 match request {
                     EisRequest::Bind(bind) if !advertised => {
@@ -133,7 +166,7 @@ async fn two_monitor_regions_shared_key_holds_and_pause_invalidate_old_leases() 
     let (pause, commands) = mpsc::sync_channel(1);
     let (recording, stopping) = (seen.clone(), stop.clone());
     let fixture =
-        tokio::task::spawn_blocking(move || server(socket, recording, commands, stopping));
+        tokio::task::spawn_blocking(move || server(socket, recording, commands, stopping, None));
     let mappings = BTreeMap::from([
         (
             10,
@@ -247,4 +280,92 @@ async fn silent_eis_peer_cannot_hold_handshake_admission_forever() {
     until(|| group.stopped()).await;
     assert!(!group.ready.load(Ordering::Acquire));
     assert!(group.close().await.is_err());
+}
+
+async fn canceled_flushed_sync_preserves_the_native_actor(pause_device: bool) {
+    let (client, socket) = UnixStream::pair().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let control = Arc::new(SyncControl::default());
+    let (_pause, commands) = mpsc::sync_channel(1);
+    let (recording, stopping, controlling) = (seen.clone(), stop.clone(), control.clone());
+    let fixture = tokio::task::spawn_blocking(move || {
+        server(socket, recording, commands, stopping, Some(controlling))
+    });
+    let group = Group::start(
+        client.into(),
+        BTreeMap::from([(
+            10,
+            (
+                "4k-region".into(),
+                super::capture::Slot::fixture(10, (3840, 2160)),
+            ),
+        )]),
+    )
+    .unwrap();
+    until(|| group.ready.load(Ordering::Acquire)).await;
+    let mut old = group.sink(10, (3840, 2160)).unwrap();
+    control.pause_next.store(pause_device, Ordering::Release);
+    control.hold_next.store(true, Ordering::Release);
+    let injection = tokio::task::spawn_blocking(move || {
+        let result = old.inject(&event(10, InputKind::KeyDown { code: 40 }));
+        (old, result)
+    });
+    // Seeing Sync on the real socket proves the action was already flushed.
+    until(|| control.blocked.load(Ordering::Acquire)).await;
+    let (mut old, result) = tokio::time::timeout(Duration::from_secs(3), injection)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "canceled input must never receive a successful ACK"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !group.stopped(),
+        "normal pause/caller deadline must not seal all capture/input"
+    );
+    assert!(
+        old.inject(&event(10, InputKind::KeyDown { code: 41 }))
+            .is_err()
+    );
+    control.release.store(true, Ordering::Release);
+    until(|| !control.blocked.load(Ordering::Acquire)).await;
+    until(|| group.ready.load(Ordering::Acquire)).await;
+    let mut fresh = group.sink(10, (3840, 2160)).unwrap();
+    fresh
+        .inject(&event(10, InputKind::KeyDown { code: 42 }))
+        .unwrap();
+    drop(fresh);
+    until(|| seen.lock().unwrap().last() == Some(&Seen::Key(42, false))).await;
+    let events = seen.lock().unwrap().clone();
+    assert_eq!(
+        events.iter().filter(|e| **e == Seen::Key(40, true)).count(),
+        1,
+        "no canceled action replay"
+    );
+    assert!(
+        !events.contains(&Seen::Key(41, true)),
+        "invalidated lease cannot target the new device generation"
+    );
+    if !pause_device {
+        assert!(
+            events.contains(&Seen::Key(40, false)),
+            "caller timeout releases its owned key hold"
+        );
+    }
+    drop(old);
+    group.close().await.unwrap();
+    stop.store(true, Ordering::Release);
+    fixture.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_pause_during_flushed_sync_rejects_old_lease_and_admits_fresh_input() {
+    canceled_flushed_sync_preserves_the_native_actor(true).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_real_sync_after_caller_deadline_does_not_kill_or_replay_native_input() {
+    canceled_flushed_sync_preserves_the_native_actor(false).await;
 }
