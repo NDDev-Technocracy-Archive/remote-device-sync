@@ -36,11 +36,18 @@ pub(super) struct Granted {
     pub clipboard: Option<Arc<super::clipboard::Group>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Closed {
+    Requested,
+    Revoked,
+    Disconnected,
+}
+
 pub(super) struct Owner {
     pending: Arc<Mutex<Option<ashpd::zbus::zvariant::OwnedObjectPath>>>,
     close: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
-    pub closed: watch::Receiver<bool>,
+    pub closed: watch::Receiver<Option<Closed>>,
 }
 
 impl Owner {
@@ -81,10 +88,39 @@ async fn rpc<T>(
         .map_err(|_| error(stage))
 }
 
+fn cursor_mode(value: Option<&std::ffi::OsStr>) -> Result<CursorMode, DesktopError> {
+    match value {
+        None => Ok(CursorMode::Embedded),
+        Some(value) if value == "embedded" => Ok(CursorMode::Embedded),
+        Some(value) if value == "hidden" => Ok(CursorMode::Hidden),
+        Some(_) => Err(DesktopError::Capture(
+            "invalid RDS_PORTAL_CURSOR_MODE; expected embedded or hidden".into(),
+        )),
+    }
+}
+fn require_cursor_mode(
+    available: ashpd::enumflags2::BitFlags<CursorMode>,
+    selected: CursorMode,
+) -> Result<(), DesktopError> {
+    if available.contains(selected) {
+        Ok(())
+    } else {
+        Err(error("requested cursor mode unsupported"))
+    }
+}
+
 pub(super) async fn open(
     restore_token: Option<&str>,
     cancelled: impl Future<Output = ()>,
 ) -> Result<Granted, DesktopError> {
+    let cursor_mode = cursor_mode(std::env::var_os("RDS_PORTAL_CURSOR_MODE").as_deref())?;
+    tracing::info!(
+        mode = match cursor_mode {
+            CursorMode::Hidden => "hidden",
+            _ => "embedded",
+        },
+        "Wayland portal capture cursor mode selected"
+    );
     tokio::pin!(cancelled);
     static SESSIONS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     let admission = tokio::time::timeout(
@@ -132,9 +168,10 @@ pub(super) async fn open(
         }
         let available = rpc("input capabilities", remote.available_device_types()).await?;
         let cursors = rpc("cursor capabilities", screencast.available_cursor_modes()).await?;
-        if !available.contains(devices) || !cursors.contains(CursorMode::Embedded) {
-            return Err(error("required input/cursor capabilities"));
+        if !available.contains(devices) {
+            return Err(error("required input capabilities"));
         }
+        require_cursor_mode(cursors, cursor_mode)?;
         let session = Arc::new(
             rpc(
                 "session creation",
@@ -179,7 +216,7 @@ pub(super) async fn open(
                 SelectSourcesOptions::default()
                     .set_sources(Some(SourceType::Monitor.into()))
                     .set_multiple(true)
-                    .set_cursor_mode(CursorMode::Embedded),
+                    .set_cursor_mode(cursor_mode),
             ),
         )
         .await?
@@ -210,7 +247,7 @@ pub(super) async fn open(
         if !selected.devices().contains(devices)
             || selected.streams().is_empty()
             || selected.streams().len() > MAX_MONITORS
-            || *owner.closed.borrow()
+            || owner.closed.borrow().is_some()
         {
             return Err(error("granted capabilities"));
         }
@@ -298,20 +335,23 @@ fn own_session(
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Owner {
     let (close, stop) = oneshot::channel();
-    let (closed_tx, closed) = watch::channel(false);
+    let (closed_tx, closed) = watch::channel(None);
     let pending = Arc::new(Mutex::new(None));
     let closing_pending = pending.clone();
     let task = tokio::spawn(async move {
         let _permit = permit;
         let signals = tokio::time::timeout(RPC_TIMEOUT, closing_session.receive_closed()).await;
-        if let Ok(Ok(signals)) = signals {
+        let reason = if let Ok(Ok(signals)) = signals {
             tokio::pin!(signals);
             tokio::select! {
-                _ = stop => {},
-                _ = signals.next() => {},
+                _ = stop => Closed::Requested,
+                signal = signals.next() => if signal.is_some() { Closed::Revoked } else { Closed::Disconnected },
             }
-        }
-        closed_tx.send_replace(true);
+        } else {
+            Closed::Disconnected
+        };
+        tracing::info!(?reason, "Wayland portal session closed");
+        closed_tx.send_replace(Some(reason));
         let pending = closing_pending
             .lock()
             .ok()
@@ -393,7 +433,7 @@ async fn start(
     }
     tracing::info!("Wayland local consent request is waiting for its Response");
     let mut closed = owner.closed.clone();
-    if *closed.borrow() {
+    if closed.borrow().is_some() {
         return Err(error("closed before consent"));
     }
     let message = tokio::select! {
@@ -437,6 +477,25 @@ async fn close_request(
 #[cfg(test)]
 mod request_tests {
     use super::*;
+    #[test]
+    fn explicit_cursor_modes_are_validated_without_fallback_or_global_environment_changes() {
+        use std::ffi::OsStr;
+        let embedded = cursor_mode(None).unwrap();
+        assert_eq!(embedded, CursorMode::Embedded);
+        let hidden = cursor_mode(Some(OsStr::new("hidden"))).unwrap();
+        assert_eq!(hidden, CursorMode::Hidden);
+        assert!(require_cursor_mode(CursorMode::Embedded.into(), hidden).is_err());
+        assert!(require_cursor_mode(CursorMode::Embedded | CursorMode::Hidden, hidden).is_ok());
+        let request = SelectSourcesOptions::default().set_cursor_mode(hidden);
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["cursor_mode"]["value"],
+            1
+        );
+        assert!(cursor_mode(Some(OsStr::new("metadata"))).is_err());
+        assert!(cursor_mode(Some(OsStr::new(""))).is_err());
+        assert!(cursor_mode(Some(OsStr::new("Hidden"))).is_err());
+    }
+
     use ashpd::zbus;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -574,7 +633,7 @@ mod request_tests {
         .await
         .unwrap()
         .unwrap();
-        let (_closed, closed) = watch::channel(false);
+        let (_closed, closed) = watch::channel(None);
         let owner = Owner {
             pending: Arc::new(Mutex::new(None)),
             close: None,
@@ -725,7 +784,7 @@ mod request_tests {
             .unwrap();
         assert_eq!(*events.lock().unwrap(), ["request", "session"]);
         assert!(client.is_closed());
-        assert!(*owner.closed.borrow());
+        assert_eq!(*owner.closed.borrow(), Some(Closed::Requested));
         assert_eq!(admission.available_permits(), 1);
         server.close().await.unwrap();
         bus.kill().await.unwrap();

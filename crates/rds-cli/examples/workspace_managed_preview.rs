@@ -365,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
         tabs,
     };
     let options = Options {
+        remote_cursor_embedded: false,
         payload_receipts: true,
         clipboard: false,
         resolution: Resolution::FullHd,

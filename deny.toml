@@ -42,6 +42,15 @@ wildcards = "warn"
 # Cargo.lock is committed; advisories gate on it.
 db-path = "~/.cargo/advisory-db"
 ignore = [
+    # Temporary upstream portal constraint: current ashpd 0.13.13 requires
+    # zbus 5.x. These three standalone crates were merged into zbus 6;
+    # their notices are informational unmaintained, with no vulnerability/CVE
+    # and no compatible patched release. Do not substitute zbus 6 underneath
+    # ashpd. Remove these exact exceptions when a supported ashpd release
+    # adopts the maintained family: https://github.com/z-galaxy/zbus/issues/2043
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
     # atomic-polyfill (unmaintained) via heapless <- postcard: no safe
     # upgrade exists; severity is informational, not a vulnerability.
     "RUSTSEC-2023-0089",

@@ -47,7 +47,10 @@ async fn bounded<T, E>(future: impl Future<Output = Result<T, E>>) -> Result<T, 
 fn nonblocking(fd: OwnedFd) -> Result<AsyncFd<OwnedFd>, DesktopError> {
     let flags = rustix::fs::fcntl_getfl(&fd).map_err(|_| error())?;
     rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK).map_err(|_| error())?;
-    AsyncFd::new(fd).map_err(|_| error())
+    // SAFETY: the OwnedFd keeps this valid descriptor open and unchanged for
+    // AsyncFd's lifetime; transfers only borrow it through get_ref().
+    #[allow(unsafe_code)]
+    unsafe { AsyncFd::register(fd) }.map_err(|_| error())
 }
 async fn read_text(fd: OwnedFd) -> Result<String, DesktopError> {
     let fd = nonblocking(fd)?;

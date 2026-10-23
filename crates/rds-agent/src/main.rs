@@ -482,6 +482,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let result = tokio::select! {
         res = agent.run() => res,
+        res = async {
+            #[cfg(all(target_os = "linux", feature = "portal"))]
+            { match &portal {
+                Some(portal) => portal.stopped().await.map_err(anyhow::Error::from),
+                None => std::future::pending::<anyhow::Result<()>>().await,
+            } }
+            #[cfg(not(all(target_os = "linux", feature = "portal")))]
+            { std::future::pending::<anyhow::Result<()>>().await }
+        } => res,
         res = control.stopped() => {
             res.map_err(anyhow::Error::from).and_then(|()| Err(anyhow::anyhow!("local session manager stopped unexpectedly")))
         },

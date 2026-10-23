@@ -151,6 +151,7 @@ async fn pump_inner(
             message = input.recv() => match message {
                 Some(ViewerInput::Control(message)) => message,
                 Some(ViewerInput::Close) | None => return Ok(true),
+                Some(ViewerInput::InputStalled) => anyhow::bail!("pointer input acknowledgement stalled"),
             },
         };
         send_control(sender, message, &sent).await?;

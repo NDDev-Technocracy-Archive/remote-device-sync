@@ -178,6 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 event = input.recv() => match event {
                                     Some(ViewerInput::Control(DesktopControl::Input(event))) => {
+                                        view.input_sent(&DesktopControl::Input(event.clone()));
                                         controls += 1;
                                         match event.kind {
                                             InputKind::KeyDown { code } => {
@@ -207,6 +208,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                             _ => {},
                                         }
+                                        // This fixture is the synthetic input sink; the
+                                        // handled event supplies its real local reply.
+                                        view.input_ack(event.seq);
                                         println!("tab={id} controls={controls} held_keys={} held_buttons={}", keys.len(), buttons.len());
                                     }
                                     Some(ViewerInput::Control(DesktopControl::ClipboardRequest { id: transfer, .. })) if clipboard_probe => {
@@ -228,6 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                     Some(ViewerInput::Control(_)) => {},
                                     Some(ViewerInput::Close) | None => break,
+                                    Some(ViewerInput::InputStalled) => panic!("synthetic input sink stopped acknowledging"),
                                 }
                             }
                         }

@@ -10,7 +10,7 @@ repository.workspace = true
 default = []
 x11 = ["dep:x11rb", "dep:openh264", "dep:openh264-sys2", "dep:memmap2", "dep:rustix"]
 portal = ["x11", "dep:ashpd", "dep:pipewire", "dep:reis", "dep:futures-util", "dep:serde_json"]
-viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:wayland-backend", "dep:wayland-client", "dep:wayland-protocols"]
 
 [dependencies]
 blake3.workspace = true
@@ -39,6 +39,9 @@ serde.workspace = true
 rustix = { workspace = true, features = ["event", "time", "process"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+wayland-backend = { version = "0.3.17", features = ["client_system", "dlopen"], optional = true }
+wayland-client = { version = "0.31.15", features = ["system", "dlopen"], optional = true }
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable"], optional = true }
 ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "remote_desktop", "screencast", "clipboard"], optional = true }
 pipewire = { version = "=0.10.1", optional = true }
 reis = { version = "=0.7.1", features = ["tokio"], optional = true }

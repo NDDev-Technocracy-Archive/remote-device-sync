@@ -294,6 +294,17 @@ moves on the same display collapse; motion before a button, key or scroll remain
 a position barrier. Full-queue rejection leaves the accepted prefix intact and
 records overflow before closing. It never evicts an earlier click's position.
 
+Absolute pointer dispatch is also clocked by the remote handled-input ACKs:
+at most four motion events may be outstanding. Further motion stays in the
+existing queue, where adjacent positions collapse to the latest position.
+Keys, buttons, scroll and display changes retain their position barriers and
+order; heartbeats remain independent of a motion waiting for credit. Unknown
+or duplicate ACKs grant no credit, and reconnect cancels the old motion window.
+An eight-second handled-ACK stall fails the local attempt even if video and
+heartbeats remain active; it never grants credit by timeout or replays motion.
+This bounds remote motion debt even when the local writer is faster than the
+target input backend. It changes no wire message or agent requirement.
+
 One pending decoded frame per session is retained for presentation, sharing
 its allocation with that session's newest image for idle-tab restoration. The
 GPU surface selects supported `Mailbox`, otherwise `Fifo`, and requests one
@@ -953,3 +964,31 @@ Primary contracts: [winit fullscreen](https://docs.rs/winit/0.30.13/winit/window
 and [Apple Spaces](https://support.apple.com/guide/mac-help/work-in-multiple-spaces-mh14112/mac).
 
 The [October 11 increment report](reports/rds-clipboard-lan-spaces-20261011.md) separates completed checks from native/installed acceptance and retained control-tail failures.
+
+With `--remote-cursor-embedded`, the local pointer is hidden only over connected
+interactive video in the focused window; the cursor captured in the remote image
+remains visible. Select this for a confirmed embedded-cursor capture such as the
+Wayland portal. The default preserves the local pointer for legacy X11 captures. Local controls,
+view-only tabs, focus loss and disconnect restore the local pointer. On Wayland,
+the viewer requests the compositor's per-window keyboard-shortcuts inhibition
+while the remote desktop owns keyboard focus, so combinations such as Alt+Shift
+reach the remote desktop. Native text fields and dialogs release that request.
+The compositor retains its own permission and escape policy; unsupported
+compositors keep their ordinary shortcut behavior. No global keybindings or
+pointer confinement are changed.
+
+A Wayland-serving agent accepts the startup environment
+`RDS_PORTAL_CURSOR_MODE=embedded` (default) or `RDS_PORTAL_CURSOR_MODE=hidden`.
+The selected mode must be advertised by the portal; unsupported or invalid
+values fail preparation without fallback. With hidden capture, keep the local
+viewer cursor visible by omitting `--remote-cursor-embedded` for immediate local
+pointer feedback without a second cursor in the captured image.
+
+A prepared Wayland backend notifies its owning agent when it closes. Native
+capture/input or portal-connection faults end the agent with failure after its
+existing joined cleanup; an owner-configured `Restart=on-failure` supervisor can
+then restore the authorized session at startup. Explicit portal revocation ends
+cleanly and stays closed. Remote requests cannot initiate preparation or revive
+revoked input. An already-flushed canceled input drains its real native sync
+before fresh leases run, without replay or a successful ACK; unsafe unflushed
+cancellation and a bounded sync-drain timeout still fail closed.

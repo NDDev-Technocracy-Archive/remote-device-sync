@@ -134,7 +134,11 @@ impl Group {
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _exit = WorkerExit(&writing);
-            run(video, &sources, &writing, &stopping)
+            let result = run(video, &sources, &writing, &stopping);
+            if result.is_err() {
+                tracing::warn!("Wayland PipeWire capture worker failed");
+            }
+            result
         });
         Ok(Self {
             slots,
@@ -223,6 +227,10 @@ fn run(
                     || (state == pw::stream::StreamState::Unconnected
                         && old != pw::stream::StreamState::Unconnected)
                 {
+                    tracing::warn!(
+                        unconnected = state == pw::stream::StreamState::Unconnected,
+                        "Wayland PipeWire stream failed or disconnected"
+                    );
                     data.slot.fail();
                 }
             })
