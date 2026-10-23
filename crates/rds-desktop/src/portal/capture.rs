@@ -14,6 +14,40 @@ use crate::{DesktopError, RawFrame};
 const MAX_PIXELS_BYTES: usize = 128 * 1024 * 1024;
 const MAX_RETAINED_BYTES: u32 = 256 * 1024 * 1024;
 
+fn copy_interval(value: Option<&str>) -> Result<Option<Duration>, DesktopError> {
+    value
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .ok()
+                .filter(|fps| (1..=240).contains(fps))
+                .map(|fps| Duration::from_secs_f64(1.0 / f64::from(fps)))
+                .ok_or_else(|| DesktopError::Capture("invalid RDS_PORTAL_CAPTURE_MAX_FPS".into()))
+        })
+        .transpose()
+}
+
+#[derive(Default)]
+struct CopyCadence {
+    due: Option<Instant>,
+}
+impl CopyCadence {
+    fn ready(&self, now: Instant) -> bool {
+        self.due.is_none_or(|due| now >= due)
+    }
+
+    fn copied(&mut self, now: Instant, interval: Option<Duration>) {
+        self.due = interval.map(|interval| {
+            // Keep phase across small callback jitter; after a pause start a
+            // fresh interval instead of admitting a burst of catch-up copies.
+            self.due
+                .map(|due| due + interval)
+                .filter(|due| *due > now)
+                .unwrap_or(now + interval)
+        });
+    }
+}
+
 pub(super) struct Image {
     pub frame: RawFrame,
     /// Local PipeWire ingress, not a claim about compositor capture time.
@@ -111,6 +145,18 @@ impl Group {
         if sources.is_empty() || sources.len() > super::session::MAX_MONITORS {
             return Err(failure());
         }
+        // One explicit source-wide cap, read once at preparation. Absent means
+        // the existing native cadence; it does not change encoder negotiation.
+        let configured = std::env::var("RDS_PORTAL_CAPTURE_MAX_FPS");
+        let interval = match configured {
+            Ok(value) => copy_interval(Some(&value))?,
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => {
+                return Err(DesktopError::Capture(
+                    "invalid RDS_PORTAL_CAPTURE_MAX_FPS".into(),
+                ));
+            }
+        };
         static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let permit = WORKERS
             .get_or_init(|| Arc::new(Semaphore::new(4)))
@@ -134,7 +180,7 @@ impl Group {
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _exit = WorkerExit(&writing);
-            let result = run(video, &sources, &writing, &stopping);
+            let result = run(video, &sources, &writing, &stopping, interval);
             if result.is_err() {
                 tracing::warn!("Wayland PipeWire capture worker failed");
             }
@@ -187,6 +233,8 @@ struct Data {
     slot: Arc<Slot>,
     slots: Vec<Arc<Slot>>,
     budget: Arc<Semaphore>,
+    interval: Option<Duration>,
+    cadence: CopyCadence,
 }
 
 fn run(
@@ -194,6 +242,7 @@ fn run(
     sources: &[(u32, u32)],
     slots: &[Arc<Slot>],
     stop: &AtomicBool,
+    interval: Option<Duration>,
 ) -> Result<(), DesktopError> {
     // Rc-backed PipeWire objects are created, used and destroyed on this worker.
     // No unsafe Send wrapper, foreign pointer or loop handle crosses threads.
@@ -221,6 +270,8 @@ fn run(
                 slot: slot.clone(),
                 slots: slots.to_vec(),
                 budget: budget.clone(),
+                interval,
+                cadence: CopyCadence::default(),
             })
             .state_changed(|_, data, old, state| {
                 if matches!(state, pw::stream::StreamState::Error(_))
@@ -258,6 +309,7 @@ fn run(
                 if let Ok(mut state) = data.slot.state.lock() {
                     if state.extent != Some(extent) {
                         state.image = None;
+                        data.cadence = CopyCadence::default();
                     }
                     state.extent = Some(extent);
                 }
@@ -286,6 +338,12 @@ fn run(
                         || (data.slot.readers.load(Ordering::Acquire) == 0
                             && state.image.is_some()))
                 {
+                    return;
+                }
+                // Dropping this dequeued buffer returns it to PipeWire even
+                // when no owned pixels are copied. Gate before allocation.
+                let copy_started = Instant::now();
+                if !data.cadence.ready(copy_started) {
                     return;
                 }
                 let extent = (data.format.size().width, data.format.size().height);
@@ -334,6 +392,7 @@ fn run(
                     if state.failed {
                         return;
                     }
+                    data.cadence.copied(copy_started, data.interval);
                     state.generation = state.generation.saturating_add(1);
                     state.image = Some(Arc::new(Image {
                         frame,
@@ -446,6 +505,43 @@ impl Drop for WorkerExit<'_> {
 #[cfg(test)]
 mod exit_tests {
     use super::*;
+    #[test]
+    fn copy_cap_validates_and_preserves_default() {
+        assert_eq!(copy_interval(None).unwrap(), None);
+        assert_eq!(
+            copy_interval(Some("15")).unwrap(),
+            Some(Duration::from_secs_f64(1.0 / 15.0))
+        );
+        for value in ["0", "241", "", "no", "15.5"] {
+            assert!(copy_interval(Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn copy_cadence_skips_intermediate_callbacks_and_resumes_without_burst() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(66);
+        let mut cadence = CopyCadence::default();
+        assert!(cadence.ready(start));
+        cadence.copied(start, Some(interval));
+        assert!(!cadence.ready(start + Duration::from_millis(33)));
+        // A late callback must not shift every subsequent deadline later.
+        let late = start + Duration::from_millis(70);
+        assert!(cadence.ready(late));
+        cadence.copied(late, Some(interval));
+        assert!(cadence.ready(start + interval * 2));
+        let resumed = start + Duration::from_secs(2);
+        assert!(cadence.ready(resumed));
+        cadence.copied(resumed, Some(interval));
+        assert!(!cadence.ready(resumed));
+        assert!(cadence.ready(resumed + interval));
+        // Resize resets the cadence, allowing the first new-geometry image.
+        cadence = CopyCadence::default();
+        assert!(cadence.ready(resumed));
+        cadence.copied(resumed, None);
+        assert!(cadence.ready(resumed));
+    }
+
     #[test]
     fn native_worker_unwind_invalidates_retained_monitor_inventory() {
         let slots = vec![Slot::fixture(10, (3840, 2160))];
