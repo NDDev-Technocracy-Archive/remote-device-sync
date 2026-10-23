@@ -2,6 +2,24 @@
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 use winit::event_loop::EventLoop;
 
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
+pub(super) use wayland::KeyboardShortcuts;
+
+#[cfg(not(target_os = "linux"))]
+pub(super) struct KeyboardShortcuts;
+#[cfg(not(target_os = "linux"))]
+impl KeyboardShortcuts {
+    pub fn new(
+        _window: std::sync::Arc<winit::window::Window>,
+        _display: winit::event_loop::OwnedDisplayHandle,
+    ) -> Option<Self> {
+        None
+    }
+    pub fn set_active(&mut self, _active: bool) {}
+}
+
 /// Own-window diagnostics, read on the OS main thread. No title/content/geometry.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct NativeWindowState {

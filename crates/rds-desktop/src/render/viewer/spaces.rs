@@ -147,6 +147,8 @@ impl Screens {
             scoped_window: true,
             window_closed: false,
             fullscreen: tab.is_some(),
+            native_input: NativeInputPolicy::default(),
+            shortcuts: None,
         };
         app.resumed(event_loop);
         if tab.is_some()

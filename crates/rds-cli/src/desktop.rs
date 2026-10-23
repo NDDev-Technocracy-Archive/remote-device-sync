@@ -47,6 +47,9 @@ pub struct Options {
     pub display: u32,
     #[arg(long, default_value = "30")]
     pub max_fps: NonZeroU32,
+    /// Hide the local pointer over video when the server embeds its cursor.
+    #[arg(long)]
+    pub remote_cursor_embedded: bool,
     /// Decode/statistics without opening a native window.
     #[arg(long, conflicts_with = "report")]
     pub headless: bool,
@@ -383,6 +386,7 @@ mod native {
         input: &mut InputReceiver,
         stop: CancellationToken,
     ) -> anyhow::Result<()> {
+        view.remote_cursor_embedded(options.remote_cursor_embedded);
         let started = Instant::now();
         let mut failures = 0u32;
         loop {

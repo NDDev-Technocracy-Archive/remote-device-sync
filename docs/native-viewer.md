@@ -964,3 +964,15 @@ Primary contracts: [winit fullscreen](https://docs.rs/winit/0.30.13/winit/window
 and [Apple Spaces](https://support.apple.com/guide/mac-help/work-in-multiple-spaces-mh14112/mac).
 
 The [October 11 increment report](reports/rds-clipboard-lan-spaces-20261011.md) separates completed checks from native/installed acceptance and retained control-tail failures.
+
+With `--remote-cursor-embedded`, the local pointer is hidden only over connected
+interactive video in the focused window; the cursor captured in the remote image
+remains visible. Select this for a confirmed embedded-cursor capture such as the
+Wayland portal. The default preserves the local pointer for legacy X11 captures. Local controls,
+view-only tabs, focus loss and disconnect restore the local pointer. On Wayland,
+the viewer requests the compositor's per-window keyboard-shortcuts inhibition
+while the remote desktop owns keyboard focus, so combinations such as Alt+Shift
+reach the remote desktop. Native text fields and dialogs release that request.
+The compositor retains its own permission and escape policy; unsupported
+compositors keep their ordinary shortcut behavior. No global keybindings or
+pointer confinement are changed.

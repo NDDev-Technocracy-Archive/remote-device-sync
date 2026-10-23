@@ -394,6 +394,7 @@ struct State {
     submission_debt: SubmissionDebt,
     wake_pending: bool,
     presenting: bool,
+    remote_cursor_embedded: bool,
     status: String,
     label: String,
     extent: (u32, u32),
@@ -530,6 +531,12 @@ impl ViewerHandle {
         if state.presenting {
             self.wake(&mut state);
         }
+    }
+    /// Caller-confirmed capture property; legacy X11 video need not embed a cursor.
+    pub fn remote_cursor_embedded(&self, enabled: bool) {
+        let mut state = lock(&self.state);
+        state.remote_cursor_embedded = enabled;
+        self.wake(&mut state);
     }
     pub fn status(&self, text: impl Into<String>) {
         let mut state = lock(&self.state);
@@ -810,6 +817,8 @@ impl Viewer {
             scoped_window: false,
             window_closed: false,
             fullscreen: false,
+            native_input: NativeInputPolicy::default(),
+            shortcuts: None,
         };
         Ok((
             Self {
@@ -909,6 +918,7 @@ impl SessionView {
                 submission_debt: SubmissionDebt::default(),
                 wake_pending: false,
                 presenting: true,
+                remote_cursor_embedded: false,
                 status: "Connecting".into(),
                 label: "RDS".into(),
                 extent: (0, 0),
@@ -949,6 +959,29 @@ impl SessionView {
     }
 }
 
+/// Pointer visibility follows video hover; shortcut ownership follows keyboard focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NativeInputPolicy {
+    hide_cursor: bool,
+    inhibit_shortcuts: bool,
+}
+impl NativeInputPolicy {
+    fn for_remote(
+        focused: bool,
+        connected: bool,
+        interactive: bool,
+        local_ui: bool,
+        video_hover: bool,
+        embedded_cursor: bool,
+    ) -> Self {
+        let remote_keyboard = focused && connected && interactive && !local_ui;
+        Self {
+            hide_cursor: remote_keyboard && video_hover && embedded_cursor,
+            inhibit_shortcuts: remote_keyboard,
+        }
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
@@ -962,8 +995,49 @@ struct App {
     scoped_window: bool,
     window_closed: bool,
     fullscreen: bool,
+    native_input: NativeInputPolicy,
+    shortcuts: Option<super::platform::KeyboardShortcuts>,
 }
 impl App {
+    fn sync_native_input(&mut self, after_ui_output: bool) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let (connected, embedded_cursor) = {
+            let state = lock(&self.session.handle.state);
+            (
+                state.status == "Connected" && state.presenting && !state.close,
+                state.remote_cursor_embedded,
+            )
+        };
+        let (interactive, local_ui) = self.workspace.as_ref().map_or((true, false), |deck| {
+            (
+                deck.active
+                    .and_then(|id| deck.model.tab(id))
+                    .is_some_and(|tab| tab.spec.profile.interactive),
+                deck.chrome
+                    .as_ref()
+                    .is_some_and(super::workspace::chrome::Chrome::editing),
+            )
+        });
+        let policy = NativeInputPolicy::for_remote(
+            window.has_focus(),
+            connected,
+            interactive,
+            local_ui,
+            self.session.pointer,
+            embedded_cursor,
+        );
+        // egui may restore visibility when its cursor icon changes during paint.
+        // Reassert remote-video ownership after native UI output was applied.
+        if after_ui_output || policy.hide_cursor != self.native_input.hide_cursor {
+            window.set_cursor_visible(!policy.hide_cursor);
+        }
+        if let Some(shortcuts) = &mut self.shortcuts {
+            shortcuts.set_active(policy.inhibit_shortcuts);
+        }
+        self.native_input = policy;
+    }
     fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {
         if self.workspace_clipboard_work(event_loop) {
             return;
@@ -1053,6 +1127,13 @@ impl App {
         self.close_window(event_loop);
     }
     fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(true);
+        }
+        if let Some(shortcuts) = &mut self.shortcuts {
+            shortcuts.set_active(false);
+        }
+        self.native_input = NativeInputPolicy::default();
         self.release(event_loop);
         lock(&self.session.handle.state).clipboard.reset();
         let _ = self.session.input.send(ViewerInput::Close);
@@ -1204,6 +1285,7 @@ impl App {
             chrome.prepare(window, &deck.model, &deck.devices, &status);
         }
         self.workspace_actions(event_loop);
+        self.sync_native_input(self.workspace.is_some());
         self.update_window_title();
         lock(&self.session.handle.state).report.redraws += 1;
         let Some(gpu) = &mut self.gpu else {
@@ -1290,6 +1372,7 @@ impl App {
 
 impl ApplicationHandler<()> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.sync_native_input(false);
         let paste_deadline = self.workspace_paste_deadline();
         let ui_deadline = self
             .workspace
@@ -1344,6 +1427,10 @@ impl ApplicationHandler<()> for App {
                 if let Some(deck) = &mut self.workspace {
                     deck.chrome = Some(super::workspace::chrome::Chrome::new(&window));
                 }
+                self.shortcuts = super::platform::KeyboardShortcuts::new(
+                    window.clone(),
+                    event_loop.owned_display_handle(),
+                );
                 self.window = Some(window);
                 self.gpu = Some(gpu);
                 lock(&self.session.handle.state).clipboard.focus(true);
@@ -1407,6 +1494,7 @@ impl ApplicationHandler<()> for App {
         lock(&self.session.handle.state).last_ui_ms =
             self.session.handle.started.elapsed().as_millis() as u64;
         if self.workspace_event(event_loop, &event) {
+            self.sync_native_input(false);
             return;
         }
         match event {
@@ -1414,6 +1502,9 @@ impl ApplicationHandler<()> for App {
                 self.close_window(event_loop);
             }
             WindowEvent::Resized(size) => {
+                // The previous hit test belongs to the old video/letterbox geometry.
+                self.session.pointer = false;
+                self.session.pointer_point = None;
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size);
                 }
@@ -1423,6 +1514,8 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => {
+                self.session.pointer = false;
+                self.session.pointer_point = None;
                 self.modifiers = Default::default();
                 lock(&self.session.handle.state).clipboard.focus(false);
                 if let Some(probe) = &mut lock(&self.session.handle.state).visual_probe {
@@ -1538,6 +1631,10 @@ impl ApplicationHandler<()> for App {
                     }
                 }
             }
+            WindowEvent::CursorLeft { .. } => {
+                self.session.pointer = false;
+                self.session.pointer_point = None;
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let extent = lock(&self.session.handle.state).extent;
                 if let Some(window) = &self.window {
@@ -1602,12 +1699,52 @@ impl ApplicationHandler<()> for App {
             }
             _ => {}
         }
+        self.sync_native_input(false);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_cursor_and_shortcut_policy_keep_distinct_pointer_and_keyboard_ownership() {
+        let remote = NativeInputPolicy::for_remote(true, true, true, false, true, true);
+        assert!(remote.hide_cursor && remote.inhibit_shortcuts);
+        // Legacy X11 captures do not embed a cursor: retain the local pointer,
+        // independently of forwarding the focused window's keyboard shortcuts.
+        let legacy = NativeInputPolicy::for_remote(true, true, true, false, true, false);
+        assert!(!legacy.hide_cursor && legacy.inhibit_shortcuts);
+        // Moving onto toolbar/letterboxing restores the local cursor without
+        // handing Alt+Shift to the compositor while remote keyboard focus remains.
+        let chrome_hover = NativeInputPolicy::for_remote(true, true, true, false, false, true);
+        assert!(!chrome_hover.hide_cursor && chrome_hover.inhibit_shortcuts);
+        for (focused, connected, interactive, local_ui) in [
+            (false, true, true, false), // another local app owns focus
+            (true, false, true, false), // disconnect/reconnect or no first frame
+            (true, true, false, false), // view-only remote tab
+            (true, true, true, true),   // native text field/dialog owns keyboard
+        ] {
+            for hovered in [false, true] {
+                assert_eq!(
+                    NativeInputPolicy::for_remote(
+                        focused,
+                        connected,
+                        interactive,
+                        local_ui,
+                        hovered,
+                        true
+                    ),
+                    NativeInputPolicy::default()
+                );
+            }
+        }
+        // Re-entering connected interactive video reacquires only this window's policy.
+        assert_eq!(
+            NativeInputPolicy::for_remote(true, true, true, false, true, true),
+            remote
+        );
+    }
+
     #[test]
     fn clipboard_measurements_match_size_and_id_without_replaying_duplicates() {
         let mut latency = ClipboardLatency::default();
