@@ -237,6 +237,96 @@ struct Data {
     cadence: CopyCadence,
 }
 
+fn stream_format(interval: Option<Duration>) -> Result<Vec<u8>, DesktopError> {
+    // Mutter uses variable framerate=0 and negotiates its work through
+    // maxFramerate. Capping downstream copies alone still permits 60Hz paint.
+    let maximum = interval.map_or(60, |period| {
+        let nanos = period.as_nanos().max(1);
+        ((1_000_000_000 + nanos / 2) / nanos).clamp(1, 60) as u32
+    });
+    let mut format = spa::pod::object!(
+        spa::utils::SpaTypes::ObjectParamFormat,
+        spa::param::ParamType::EnumFormat,
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaType,
+            Id,
+            spa::param::format::MediaType::Video
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaSubtype,
+            Id,
+            spa::param::format::MediaSubtype::Raw
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            spa::param::video::VideoFormat::BGRA,
+            spa::param::video::VideoFormat::BGRA,
+            spa::param::video::VideoFormat::BGRx
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoSize,
+            Choice,
+            Range,
+            Rectangle,
+            spa::utils::Rectangle {
+                width: 1920,
+                height: 1080
+            },
+            spa::utils::Rectangle {
+                width: 1,
+                height: 1
+            },
+            spa::utils::Rectangle {
+                width: 8192,
+                height: 8192
+            }
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction {
+                num: maximum.min(30),
+                denom: 1
+            },
+            spa::utils::Fraction { num: 0, denom: 1 },
+            spa::utils::Fraction {
+                num: maximum,
+                denom: 1
+            }
+        )
+    );
+    if interval.is_some() {
+        format.properties.push(spa::pod::property!(
+            spa::param::format::FormatProperties::VideoMaxFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction {
+                num: maximum,
+                denom: 1
+            },
+            spa::utils::Fraction { num: 1, denom: 1 },
+            spa::utils::Fraction {
+                num: maximum,
+                denom: 1
+            }
+        ));
+    }
+    let bytes = spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(format),
+    )
+    .map_err(|_| failure())?
+    .0
+    .into_inner();
+    Ok(bytes)
+}
+
 fn run(
     video: OwnedFd,
     sources: &[(u32, u32)],
@@ -404,63 +494,7 @@ fn run(
             })
             .register()
             .map_err(|_| failure())?;
-        let format = spa::pod::object!(
-            spa::utils::SpaTypes::ObjectParamFormat,
-            spa::param::ParamType::EnumFormat,
-            spa::pod::property!(
-                spa::param::format::FormatProperties::MediaType,
-                Id,
-                spa::param::format::MediaType::Video
-            ),
-            spa::pod::property!(
-                spa::param::format::FormatProperties::MediaSubtype,
-                Id,
-                spa::param::format::MediaSubtype::Raw
-            ),
-            spa::pod::property!(
-                spa::param::format::FormatProperties::VideoFormat,
-                Choice,
-                Enum,
-                Id,
-                spa::param::video::VideoFormat::BGRA,
-                spa::param::video::VideoFormat::BGRA,
-                spa::param::video::VideoFormat::BGRx
-            ),
-            spa::pod::property!(
-                spa::param::format::FormatProperties::VideoSize,
-                Choice,
-                Range,
-                Rectangle,
-                spa::utils::Rectangle {
-                    width: 1920,
-                    height: 1080
-                },
-                spa::utils::Rectangle {
-                    width: 1,
-                    height: 1
-                },
-                spa::utils::Rectangle {
-                    width: 8192,
-                    height: 8192
-                }
-            ),
-            spa::pod::property!(
-                spa::param::format::FormatProperties::VideoFramerate,
-                Choice,
-                Range,
-                Fraction,
-                spa::utils::Fraction { num: 30, denom: 1 },
-                spa::utils::Fraction { num: 0, denom: 1 },
-                spa::utils::Fraction { num: 60, denom: 1 }
-            )
-        );
-        let bytes = spa::pod::serialize::PodSerializer::serialize(
-            std::io::Cursor::new(Vec::new()),
-            &spa::pod::Value::Object(format),
-        )
-        .map_err(|_| failure())?
-        .0
-        .into_inner();
+        let bytes = stream_format(interval)?;
         let pod = spa::pod::Pod::from_bytes(&bytes).ok_or_else(failure)?;
         stream
             .connect(
@@ -515,6 +549,68 @@ mod exit_tests {
         for value in ["0", "241", "", "no", "15.5"] {
             assert!(copy_interval(Some(value)).is_err());
         }
+    }
+
+    #[test]
+    fn configured_cap_constrains_the_native_variable_rate_offer() {
+        use spa::param::format::FormatProperties;
+        use spa::pod::{ChoiceValue, Value, deserialize::PodDeserializer};
+        use spa::utils::{Choice, ChoiceEnum, Fraction};
+        for fps in 1..=240 {
+            let bytes = stream_format(copy_interval(Some(&fps.to_string())).unwrap()).unwrap();
+            let (_, Value::Object(object)) =
+                PodDeserializer::deserialize_from::<Value>(&bytes).unwrap()
+            else {
+                panic!("expected format object")
+            };
+            for key in [
+                FormatProperties::VideoFramerate,
+                FormatProperties::VideoMaxFramerate,
+            ] {
+                let property = object
+                    .properties
+                    .iter()
+                    .find(|p| p.key == key.as_raw())
+                    .unwrap();
+                let Value::Choice(ChoiceValue::Fraction(Choice(
+                    _,
+                    ChoiceEnum::Range { default, min, max },
+                ))) = &property.value
+                else {
+                    panic!("expected bounded fraction")
+                };
+                assert_eq!(
+                    *max,
+                    Fraction {
+                        num: fps.min(60),
+                        denom: 1
+                    }
+                );
+                assert!(default.num <= max.num);
+                assert!(min.num <= default.num);
+            }
+            // Native decoding also accepts the actual bytes handed to PipeWire.
+            let mut raw = spa::param::video::VideoInfoRaw::default();
+            raw.parse(spa::pod::Pod::from_bytes(&bytes).unwrap())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn absent_cap_preserves_the_native_offer_without_a_new_maximum_property() {
+        use spa::pod::{Value, deserialize::PodDeserializer};
+        let bytes = stream_format(None).unwrap();
+        let (_, Value::Object(object)) =
+            PodDeserializer::deserialize_from::<Value>(&bytes).unwrap()
+        else {
+            panic!("expected format object")
+        };
+        assert!(
+            !object
+                .properties
+                .iter()
+                .any(|p| p.key == spa::param::format::FormatProperties::VideoMaxFramerate.as_raw())
+        );
     }
 
     #[test]
