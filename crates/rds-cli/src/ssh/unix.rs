@@ -209,7 +209,11 @@ impl Io {
         let flags = rustix::fs::fcntl_getfl(&file)?;
         let registered = file.try_clone()?;
         rustix::fs::fcntl_setfl(&file, flags | OFlags::NONBLOCK)?;
-        match AsyncFd::new(registered) {
+        // SAFETY: this owned File keeps its descriptor open and unchanged for
+        // AsyncFd's lifetime; readiness operations only borrow it via get_ref.
+        #[allow(unsafe_code)]
+        let registration = unsafe { AsyncFd::register(registered) }.map_err(io::Error::from);
+        match registration {
             Ok(ready) => Ok(Self {
                 kind: Kind::Ready(ready),
                 flags: Some((file, flags)),
@@ -321,5 +325,61 @@ impl Signals {
     pub async fn cancelled(&mut self) -> u8 {
         // SIGTSTP is 20 on Linux and 18 on Darwin; use the OS constant.
         tokio::select! { _ = self.interrupt.recv() => 130, _ = self.terminate.recv() => 143, _ = self.hangup.recv() => 129, _ = self.quit.recv() => 131, _ = self.suspend.recv() => 128 + rustix::process::Signal::TSTP.as_raw() as u8 }
+    }
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+    use tokio::io::AsyncReadExt as _;
+
+    #[tokio::test]
+    async fn registration_owns_its_descriptor_after_the_callers_file_closes_and_restores_flags() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let shared = reader.try_clone().unwrap();
+        let flags = rustix::fs::fcntl_getfl(&shared).unwrap();
+        let mut registered = Io::new(&reader).unwrap();
+        assert!(
+            rustix::fs::fcntl_getfl(&shared)
+                .unwrap()
+                .contains(OFlags::NONBLOCK)
+        );
+        drop(reader);
+        writer.write_all(b"owned").unwrap();
+        let mut data = [0; 5];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registered.read_exact(&mut data),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&data, b"owned");
+        drop(registered);
+        assert_eq!(rustix::fs::fcntl_getfl(&shared).unwrap(), flags);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn registration_error_restores_flags_and_keeps_only_the_existing_dev_null_fallback() {
+        let null = File::open("/dev/null").unwrap();
+        let null_flags = rustix::fs::fcntl_getfl(&null).unwrap();
+        let mut registered = Io::new(&null).unwrap();
+        assert!(matches!(&registered.kind, Kind::File(_)));
+        assert_eq!(rustix::fs::fcntl_getfl(&null).unwrap(), null_flags);
+        assert_eq!(registered.read(&mut [0; 1]).await.unwrap(), 0);
+
+        let zero = File::open("/dev/zero").unwrap();
+        let zero_flags = rustix::fs::fcntl_getfl(&zero).unwrap();
+        let error = Io::new(&zero)
+            .err()
+            .expect("non-null character device must fail");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::PERM.raw_os_error())
+        );
+        assert_eq!(rustix::fs::fcntl_getfl(&zero).unwrap(), zero_flags);
     }
 }
