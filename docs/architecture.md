@@ -891,3 +891,11 @@ consented multi-monitor PipeWire/EI backend. Native types remain below serving
 policy; local preparation precedes remote admission and revocation seals leases.
 See [the Wayland contract](wayland-portal.md) for requirements, identity, cleanup,
 fixture coverage and separate native acceptance.
+
+Record-store anchor writes now retain an exact pending database successor only
+for classified ENOSPC/quota failures after a successful durable database commit.
+A later access keeps both exclusive locks, verifies the current database metadata
+and the previous-or-successor anchor, then synchronizes that exact anchor before
+serving records or allocating another revision. Repeated capacity failures remain
+unavailable. Changed state and unrelated I/O permanently close this recovery path
+until a validated reopen. Signed lease/tombstone history and admission do not reset.

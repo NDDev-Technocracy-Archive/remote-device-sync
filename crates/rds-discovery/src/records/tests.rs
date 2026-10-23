@@ -21,10 +21,10 @@ impl Drop for Temp {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn signer() -> SigningKey {
+pub(super) fn signer() -> SigningKey {
     SigningKey::from_bytes(&[82; 32])
 }
-fn record() -> EndpointRecord {
+pub(super) fn record() -> EndpointRecord {
     EndpointRecord::publish(
         &signer(),
         1,
@@ -35,7 +35,7 @@ fn record() -> EndpointRecord {
     )
     .unwrap()
 }
-fn key() -> EndpointKey {
+pub(super) fn key() -> EndpointKey {
     EndpointKey(signer().verifying_key().to_bytes())
 }
 
