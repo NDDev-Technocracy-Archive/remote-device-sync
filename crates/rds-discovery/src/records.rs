@@ -31,6 +31,8 @@ pub use migration::{MigrationReceipt, migrate_v2};
 #[cfg(test)]
 mod expiry_tests;
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -164,6 +166,9 @@ struct Inner {
     anchor: AtomicFile,
     metadata: Metadata,
     failed: bool,
+    // Only an ENOSPC/quota failure after the database committed may retry
+    // the exact anchor. Database I/O failures remain fail-closed until reopen.
+    pending_anchor: Option<Metadata>,
     observed_wall: Duration,
     cursor: Option<[u8; 32]>,
     #[cfg(test)]
@@ -340,6 +345,7 @@ impl FileStore {
                 anchor,
                 metadata,
                 failed: false,
+                pending_anchor: None,
                 observed_wall: Duration::ZERO,
                 cursor: None,
                 #[cfg(test)]
@@ -527,7 +533,12 @@ impl Inner {
         txn.commit().map_err(error)?;
         #[cfg(test)]
         self.checkpoint(Phase::AfterDatabase)?;
-        self.anchor.write(&encode_anchor(&next)?)?;
+        if let Err(error) = self.anchor.write(&encode_anchor(&next)?) {
+            if matches!(error, DiscoveryError::StorageUnavailable(_)) {
+                self.pending_anchor = Some(next);
+            }
+            return Err(error);
+        }
         #[cfg(test)]
         self.checkpoint(Phase::AfterAnchor)?;
         self.metadata = next;
@@ -547,7 +558,42 @@ impl Inner {
         }
         Ok(())
     }
-    fn healthy(&self) -> Result<(), DiscoveryError> {
+    fn healthy(&mut self) -> Result<(), DiscoveryError> {
+        if self.failed
+            && let Some(next) = self.pending_anchor.clone()
+        {
+            // Keep the original exclusive locks. A retry may finish only
+            // this process's known database commit, never adopt other state.
+            let recovered = (|| {
+                let anchored = self
+                    .anchor
+                    .read()?
+                    .ok_or_else(|| error("record commit anchor disappeared"))?;
+                let anchored = decode_anchor(&anchored)?;
+                if anchored != self.metadata && anchored != next {
+                    return Err(error("record recovery anchor changed"));
+                }
+                let txn = self.db.begin_read().map_err(error)?;
+                let table = txn.open_table(META).map_err(error)?;
+                let value = table
+                    .get(0)
+                    .map_err(error)?
+                    .ok_or_else(|| error("record metadata missing"))?;
+                if exact::<Metadata>(value.value())? != next {
+                    return Err(error("record recovery database changed"));
+                }
+                self.anchor.write(&encode_anchor(&next)?)
+            })();
+            if let Err(error) = recovered {
+                if !matches!(error, DiscoveryError::StorageUnavailable(_)) {
+                    self.pending_anchor = None;
+                }
+                return Err(error);
+            }
+            self.metadata = next;
+            self.pending_anchor = None;
+            self.failed = false;
+        }
         if self.failed {
             Err(error("record commit outcome uncertain; reopen required"))
         } else {
