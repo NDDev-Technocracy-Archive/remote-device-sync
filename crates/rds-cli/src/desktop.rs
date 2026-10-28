@@ -404,7 +404,17 @@ mod native {
                         Source::Managed { client,session,peer,grant,binding,local_addresses } => {
                             *peer = binding.target(peer);
                             view.stage("checking managed session");
-                            if session.is_none() || client.selected(*session).await.is_err() {
+                            // A session the agent opened again to the same peer, after its own
+                            // or its route's reconnect, keeps this window without resolving the
+                            // peer anew; a granted window still connects with its grant.
+                            let lost = session.is_none() || client.selected(*session).await.is_err();
+                            let replacement = if lost && session.is_some() && grant.is_none() {
+                                replacement_session(&client.snapshot().await?.sessions, peer)
+                            } else { None };
+                            if let Some(id) = replacement {
+                                view.stage("adopting replacement session");
+                                *session = Some(id);
+                            } else if lost {
                                 view.stage("connecting peer");
                                 let Reply::Connected(id) = client.request(connect_command(peer.clone(),grant.clone(),local_addresses.clone())).await? else { anyhow::bail!("unexpected local connection response"); };
                                 // After the first authenticated connect retain the exact peer
@@ -491,6 +501,48 @@ mod native {
         } else {
             // A verified name freezes to its authenticated identity.
             Ok(authenticated)
+        }
+    }
+
+    /// The agent's one connected session to `peer`; none when several could be meant.
+    fn replacement_session(sessions: &[rds_core::local::Session], peer: &str) -> Option<SessionId> {
+        let id = rds_net::parse_target(peer)
+            .map(|pinned| pinned.id.to_string())
+            .unwrap_or_else(|_| peer.to_owned());
+        let mut connected = sessions
+            .iter()
+            .filter(|s| s.peer == id && s.status == rds_core::local::Status::Connected);
+        let first = connected.next()?;
+        connected.next().is_none().then_some(first.id)
+    }
+
+    #[test]
+    fn a_reconnect_adopts_the_one_connected_session_to_the_same_peer() {
+        use rds_core::local::{Session, Status};
+        let usa = rds_net::SecretKey::generate().public().to_string();
+        let mac = rds_net::SecretKey::generate().public().to_string();
+        let session = |id: u8, peer: &str, status| Session {
+            id: SessionId([id; 16]),
+            peer: peer.to_owned(),
+            status,
+        };
+        let replaced = [
+            session(1, &mac, Status::Connected),
+            session(2, &usa, Status::Connected),
+        ];
+        assert_eq!(
+            replacement_session(&replaced, &usa),
+            Some(SessionId([2; 16]))
+        );
+        for sessions in [
+            vec![session(3, &usa, Status::Connecting)],
+            vec![session(4, &mac, Status::Connected)],
+            vec![
+                session(5, &usa, Status::Connected),
+                session(6, &usa, Status::Connected),
+            ],
+        ] {
+            assert_eq!(replacement_session(&sessions, &usa), None);
         }
     }
 
