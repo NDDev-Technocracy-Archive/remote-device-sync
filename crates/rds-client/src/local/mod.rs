@@ -26,8 +26,11 @@ pub use tcp::TcpStream;
 const PRELUDE_TIMEOUT: Duration = Duration::from_secs(5);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(45);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(55);
-const MAX_WORKERS: usize = 96;
-const MAX_STREAMS: usize = 64;
+// A device's forwards share these: one worker and one stream per forwarded connection. 256 streams
+// match one peer connection's stream budget, so a forward serving several CI lanes at once is not
+// refused; workers keep room for control requests beside them.
+const MAX_WORKERS: usize = 320;
+const MAX_STREAMS: usize = 256;
 const SYNC_TIMEOUT: Duration = rds_sync::engine::TRANSFER_TIMEOUT.saturating_add(OPERATION_TIMEOUT);
 
 #[derive(Debug, thiserror::Error)]
