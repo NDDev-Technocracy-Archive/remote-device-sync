@@ -20,6 +20,11 @@ impl Observation {
     pub(crate) fn stalled(self, rtt: Duration) -> bool {
         self.progress.stalled(self.now, rtt)
     }
+    /// Closing a path gives up its in-flight work, so only a path without ACK progress for the
+    /// longer confirmation budget is retired; a merely stalled one stays open, only ineligible.
+    pub(crate) fn unresponsive(self, rtt: Duration) -> bool {
+        self.progress.unresponsive(self.now, rtt)
+    }
     /// Retiring reliable work needs proof from the sibling during the failure,
     /// not an idle ACK that happened before both routes could have stopped.
     pub(crate) fn can_replace(self, failed: Self, rtt: Duration) -> bool {
@@ -84,6 +89,11 @@ impl Progress {
     }
     pub(crate) fn stalled(self, now: Instant, rtt: Duration) -> bool {
         let budget = rtt.saturating_mul(4).max(Duration::from_millis(500));
+        self.pending_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= budget)
+    }
+    pub(crate) fn unresponsive(self, now: Instant, rtt: Duration) -> bool {
+        let budget = rtt.saturating_mul(8).max(Duration::from_secs(2));
         self.pending_since
             .is_some_and(|since| now.saturating_duration_since(since) >= budget)
     }
@@ -277,6 +287,26 @@ mod tests {
         standby.progress.pending_since = None;
         standby.now += Duration::from_secs(2);
         assert!(!standby.can_replace(failed, rtt));
+    }
+
+    #[test]
+    fn a_queued_path_is_ineligible_before_it_may_be_retired() {
+        // A relay path shared with a desktop stream: 145 ms RTT and an 819 ms ACK gap.
+        let epoch = Instant::now();
+        let rtt = Duration::from_millis(145);
+        let progress = Progress {
+            pending_since: Some(epoch),
+            confirmed_at: Some(epoch),
+        };
+        assert!(progress.stalled(epoch + Duration::from_millis(819), rtt));
+        assert!(!progress.unresponsive(epoch + Duration::from_millis(819), rtt));
+        assert!(!progress.unresponsive(epoch + Duration::from_millis(1999), rtt));
+        assert!(progress.unresponsive(epoch + Duration::from_secs(2), rtt));
+        // A high RTT keeps its own longer budget.
+        let slow = Duration::from_secs(1);
+        assert!(!progress.unresponsive(epoch + Duration::from_millis(7999), slow));
+        assert!(progress.unresponsive(epoch + Duration::from_secs(8), slow));
+        assert!(!Progress::default().unresponsive(epoch + Duration::from_secs(60), rtt));
     }
 
     #[test]
