@@ -523,7 +523,8 @@ impl Agent {
                                 }
                             }
                             Ok(Err(error)) => {
-                                rds_observe::emit(rds_observe::Event::HandshakeFailed);
+                                let failure = rds_net::handshake_failure(&error);
+                                rds_observe::handshake_failed(handshake_reason(failure.kind), failure.code);
                                 debug!(%error, "incoming handshake failed");
                             }
                             Err(_) => {
@@ -1168,6 +1169,21 @@ async fn serve_stream(
     }
     .instrument(span)
     .await
+}
+
+/// The exported reason for a failed inbound handshake.
+fn handshake_reason(kind: rds_net::HandshakeKind) -> Reason {
+    use rds_net::HandshakeKind as K;
+    match kind {
+        K::Protocol => Reason::Protocol,
+        K::Version => Reason::Unsupported,
+        K::PeerClosed => Reason::PeerClosed,
+        K::Reset => Reason::Reset,
+        K::TimedOut => Reason::Timeout,
+        K::Local => Reason::LocalClosed,
+        K::Authentication => Reason::Denied,
+        K::Other => Reason::Transport,
+    }
 }
 
 /// The service a `StreamHello` selects; `None` for `Authz`, which is

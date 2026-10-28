@@ -403,3 +403,34 @@ fn session_ids_mint_monotonic() {
     let first = next_session_id();
     assert!(next_session_id() > first);
 }
+
+#[test]
+fn handshake_failure_exports_its_reason_and_shows_its_code_only_in_text() {
+    for format in [Format::Json, Format::Text] {
+        let capture = Capture::default();
+        let (subscriber, telemetry) = subscriber(
+            Service::Agent,
+            Config::new(format, "info").unwrap(),
+            capture.clone(),
+        )
+        .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            handshake_failed(Reason::Protocol, Some(0x178));
+            handshake_failed(Reason::Timeout, None);
+        });
+        assert!(telemetry.shutdown().drained);
+        if format == Format::Json {
+            let records = capture.records();
+            assert_eq!(records.len(), 2);
+            for (record, reason) in records.iter().zip(["protocol", "timeout"]) {
+                assert_eq!(record["event"], "handshake_failed");
+                assert_eq!(record["reason"], reason);
+                assert!(record.get("code").is_none());
+            }
+        } else {
+            let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+            assert!(output.contains("reason=\"protocol\" code=376"), "{output}");
+            assert!(output.contains("reason=\"timeout\""), "{output}");
+        }
+    }
+}
