@@ -26,8 +26,11 @@ pub use tcp::TcpStream;
 const PRELUDE_TIMEOUT: Duration = Duration::from_secs(5);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(45);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(55);
-const MAX_WORKERS: usize = 96;
-const MAX_STREAMS: usize = 64;
+// A device's forwards share these: one worker and one stream per forwarded connection. 256 streams
+// match one peer connection's stream budget, so a forward serving several CI lanes at once is not
+// refused; workers keep room for control requests beside them.
+const MAX_WORKERS: usize = 320;
+const MAX_STREAMS: usize = 256;
 const SYNC_TIMEOUT: Duration = rds_sync::engine::TRANSFER_TIMEOUT.saturating_add(OPERATION_TIMEOUT);
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +86,21 @@ impl Prepared {
     }
 }
 
+/// What a device's forwards share at once: one worker and one stream per
+/// forwarded connection, with workers to spare for control requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capacity {
+    pub streams: usize,
+    pub workers: usize,
+}
+
+impl Capacity {
+    pub const DEFAULT: Self = Self {
+        streams: MAX_STREAMS,
+        workers: MAX_WORKERS,
+    };
+}
+
 /// Owns the runner, requests, streams and outgoing connections. Does not own
 /// endpoint shutdown: inbound agent service uses that same endpoint.
 pub struct Server {
@@ -99,6 +117,16 @@ impl Server {
         endpoint: Endpoint,
         directory: Option<rds_discovery::client::Client>,
     ) -> Self {
+        Self::start_with_capacity(prepared, endpoint, directory, Capacity::DEFAULT)
+    }
+
+    /// [`Server::start`] with another capacity, such as a small one that a test fills.
+    pub fn start_with_capacity(
+        prepared: Option<Prepared>,
+        endpoint: Endpoint,
+        directory: Option<rds_discovery::client::Client>,
+        capacity: Capacity,
+    ) -> Self {
         let stop = CancellationToken::new();
         let enabled = prepared.is_some();
         let (task, observer) = if let Some(prepared) = prepared {
@@ -111,6 +139,7 @@ impl Server {
                     owner,
                     endpoint,
                     directory,
+                    capacity,
                     stop.clone(),
                 ))),
                 Some(observer),
@@ -175,10 +204,11 @@ async fn run(
     owner: state::Owner,
     endpoint: Endpoint,
     directory: Option<rds_discovery::client::Client>,
+    capacity: Capacity,
     stop: CancellationToken,
 ) -> Result<(), Error> {
     let mut workers = JoinSet::new();
-    let streams = Arc::new(Semaphore::new(MAX_STREAMS));
+    let streams = Arc::new(Semaphore::new(capacity.streams));
     let transfers = Arc::new(Semaphore::new(sync::MAX_TRANSFERS));
     let events = Arc::new(desktop_events::Registry::default());
     let mut sample = tokio::time::interval(Duration::from_secs(1));
@@ -198,7 +228,7 @@ async fn run(
                     Err(e) => break Err(e.into()),
                 }
             }
-            accepted = prepared.listener.accept(), if workers.len() < MAX_WORKERS => {
+            accepted = prepared.listener.accept(), if workers.len() < capacity.workers => {
                 let (stream, _) = match accepted { Ok(pair) => pair, Err(e) => break Err(e.into()) };
                 if socket::authenticate(&stream).is_err() { continue; }
                 let shared = owner.0.clone();
