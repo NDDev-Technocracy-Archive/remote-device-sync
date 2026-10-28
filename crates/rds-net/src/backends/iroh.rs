@@ -87,6 +87,17 @@ pub(crate) fn close_kind(error: iroh::endpoint::ConnectionError) -> crate::Close
     }
 }
 
+/// Configured relays without QUIC address discovery. The RDS relay serves HTTP only, so
+/// discovery probes to it never answer; through a UDP tunnel that sends every datagram of a
+/// socket to its first destination, they reach an unrelated peer instead.
+fn owned_relay_map(relays: &[RelayUrl]) -> RelayMap {
+    RelayMap::from_iter(
+        relays
+            .iter()
+            .map(|url| iroh::RelayConfig::new(convert::relay(url), None)),
+    )
+}
+
 /// Bind an rds endpoint: configured ALPNs, identity and relay mode.
 ///
 /// With a custom relay the endpoint uses `presets::Minimal` — no n0 address
@@ -95,11 +106,8 @@ pub(crate) fn close_kind(error: iroh::endpoint::ConnectionError) -> crate::Close
 pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     config.validate_for(crate::Backend::Iroh)?;
     let mut builder = match (config.relays.is_empty(), config.discovery) {
-        (false, _) => {
-            Endpoint::builder(iroh::endpoint::presets::Minimal).relay_mode(RelayMode::Custom(
-                RelayMap::from_iter(config.relays.iter().map(convert::relay)),
-            ))
-        }
+        (false, _) => Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(RelayMode::Custom(owned_relay_map(&config.relays))),
         (true, true) => Endpoint::builder(iroh::endpoint::presets::N0),
         // No relay, no lookup: Minimal binds a plain QUIC socket.
         (true, false) => Endpoint::builder(iroh::endpoint::presets::Minimal),
@@ -317,6 +325,20 @@ pub fn relay_url_of(addr: &EndpointAddr) -> Option<RelayUrl> {
 mod tests {
     use super::*;
     use crate::SecretKey;
+
+    #[test]
+    fn owned_relays_get_no_quic_address_discovery() {
+        let relays: Vec<RelayUrl> = ["http://192.0.2.1:3340", "http://192.0.2.2:3340"]
+            .iter()
+            .map(|url| url.parse().unwrap())
+            .collect();
+        let map = owned_relay_map(&relays);
+        assert_eq!(map.len(), 2);
+        for url in &relays {
+            let config = map.get(&convert::relay(url)).expect("relay kept");
+            assert!(config.quic.is_none(), "{url} must not be probed for QAD");
+        }
+    }
 
     #[test]
     fn ticket_roundtrip() {
