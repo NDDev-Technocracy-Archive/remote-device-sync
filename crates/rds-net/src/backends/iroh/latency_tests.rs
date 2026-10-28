@@ -536,8 +536,9 @@ async fn actual_iroh_actor_reopens_a_retired_standby_before_the_next_failure() {
         .expect("restored path did not emit/drop pending data");
         selector.phase.store(2, Ordering::Release);
         let mut body = [0; 22];
+        // Retirement now waits for `max(8 RTT, 2s)` without ACK progress before recovery.
         let result =
-            tokio::time::timeout(Duration::from_secs(3), reply.read_exact(&mut body)).await;
+            tokio::time::timeout(Duration::from_secs(5), reply.read_exact(&mut body)).await;
         if result.is_err() {
             for path in server.paths().iter() {
                 eprintln!(
@@ -677,11 +678,12 @@ async fn actual_iroh_actor_retires_blackholed_preferred_link_and_delivers_pendin
             }
         }).await.expect("fixture did not emit and drop the already-pending stream frame");
         armed.store(true,Ordering::Release);
-        let mut body=[0;22];let result=tokio::time::timeout(Duration::from_secs(3),reply.read_exact(&mut body)).await;
+        // Retirement waits for `max(8 RTT, 2s)` without ACK progress, so recovery follows it.
+        let mut body=[0;22];let result=tokio::time::timeout(Duration::from_secs(5),reply.read_exact(&mut body)).await;
         let elapsed=started.elapsed().as_millis();let injected=dropped.load(Ordering::Relaxed);
         tokio::join!(a.close(),b.close());
         assert!(injected>0,"blackhole fixture did not drop a packet");
         result.expect("Iroh left the existing reliable stream stalled after its preferred path blackholed").unwrap();
-        assert_eq!(&body,b"pending reliable bytes");assert!(elapsed<3000);
+        assert_eq!(&body,b"pending reliable bytes");assert!(elapsed<5000,"{elapsed} ms");
     }).await.expect("isolated Iroh blackhole fixture did not terminate");
 }

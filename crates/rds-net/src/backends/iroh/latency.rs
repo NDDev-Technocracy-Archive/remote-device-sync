@@ -87,7 +87,7 @@ fn select(ctx: &PathSelectionContext<'_>, order: Option<&[iroh::RelayUrl]>) -> P
         if !stream_work {
             continue;
         }
-        if !progress.is_some_and(|state| state.stalled(*rtt)) {
+        if !progress.is_some_and(|state| state.unresponsive(*rtt)) {
             continue;
         }
         for (fallback, other_rtt, state, _) in &paths {

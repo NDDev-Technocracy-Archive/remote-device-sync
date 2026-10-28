@@ -530,8 +530,10 @@ async fn exercise(automatic: bool) {
             remote_secondary.set_status(PathStatus::Available).unwrap();
             b.path(noq::PathId::ZERO).unwrap().close().unwrap();
         }
+        // Automatic retirement waits for `max(8 RTT, 2s)` without ACK progress, so that a merely
+        // queued path is never closed with its peer's data in flight; recovery follows it.
         let result =
-            tokio::time::timeout(Duration::from_secs(2), reply.read_exact(&mut body)).await;
+            tokio::time::timeout(Duration::from_secs(4), reply.read_exact(&mut body)).await;
         let delivered_ms = started.elapsed().as_millis();
         if result.is_err() {
             for id in [noq::PathId::ZERO, remote_secondary.id()] {
@@ -555,7 +557,7 @@ async fn exercise(automatic: bool) {
             .expect("retired path left reliable bytes stranded")
             .unwrap();
         assert_eq!(&body, b"pending reliable bytes");
-        assert!(delivered_ms < 2000);
+        assert!(delivered_ms < 4000, "{delivered_ms} ms");
         if let Some(driver) = driver {
             tokio::time::timeout(Duration::from_secs(1), driver)
                 .await

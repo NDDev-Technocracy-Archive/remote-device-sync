@@ -601,7 +601,7 @@ fn reselect(
         if !stream_work {
             continue;
         }
-        if !state.is_some_and(|state| state.stalled(rtt.measured)) {
+        if !state.is_some_and(|state| state.unresponsive(rtt.measured)) {
             continue;
         }
         let fallback = candidates.iter().find(|(other, other_rtt, sibling, _)| {
