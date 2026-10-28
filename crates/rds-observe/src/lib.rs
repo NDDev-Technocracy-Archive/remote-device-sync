@@ -383,6 +383,18 @@ pub fn session_closed(reason: Reason, elapsed: Duration) {
         reason = reason.name(), elapsed_us = micros(elapsed));
 }
 
+/// An inbound handshake produced no connection. `code` is the QUIC transport
+/// error code when the cause has one; only text mode shows it, and the JSON
+/// export keeps the typed reason.
+pub fn handshake_failed(reason: Reason, code: Option<u64>) {
+    match code {
+        Some(code) => tracing::warn!(target: "rds_telemetry", event = "handshake_failed",
+            reason = reason.name(), code),
+        None => tracing::warn!(target: "rds_telemetry", event = "handshake_failed",
+            reason = reason.name()),
+    }
+}
+
 /// A request was refused before entering a service path. Emitted at the
 /// decision point, inside the session span when one exists.
 pub fn request_refused(reason: Reason) {

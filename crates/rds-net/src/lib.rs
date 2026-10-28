@@ -715,6 +715,115 @@ pub enum CloseKind {
     Transport,
 }
 
+/// Why an inbound handshake produced no connection, folded from either
+/// backend's error into owned kinds so telemetry can name the cause without
+/// exporting backend text, peer keys or addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeFailure {
+    pub kind: HandshakeKind,
+    /// QUIC transport error code when the cause carries one; a TLS alert
+    /// arrives as `0x100 + alert`, e.g. `0x178` for an unknown ALPN.
+    pub code: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeKind {
+    /// The QUIC or TLS exchange failed, such as an unknown ALPN or a bad certificate.
+    Protocol,
+    /// The peer offered no QUIC version this endpoint speaks.
+    Version,
+    /// The peer closed the attempt with CONNECTION_CLOSE or APPLICATION_CLOSE.
+    PeerClosed,
+    /// Stateless reset observed during the handshake.
+    Reset,
+    /// The transport idled out before the handshake completed.
+    TimedOut,
+    /// This endpoint closed or rejected the attempt.
+    Local,
+    /// The exchange completed, but the peer's endpoint identity did not authenticate.
+    Authentication,
+    /// Any other cause, including internal endpoint failures.
+    Other,
+}
+
+/// Classify an error returned by awaiting an [`Incoming`].
+pub fn handshake_failure(error: &anyhow::Error) -> HandshakeFailure {
+    use iroh::endpoint::{ConnectingError, ConnectionError};
+    let connection = |error: &ConnectionError| match error {
+        ConnectionError::TransportError(e) => (HandshakeKind::Protocol, Some(u64::from(e.code))),
+        ConnectionError::ConnectionClosed(close) => {
+            (HandshakeKind::PeerClosed, Some(u64::from(close.error_code)))
+        }
+        ConnectionError::ApplicationClosed(_) => (HandshakeKind::PeerClosed, None),
+        ConnectionError::VersionMismatch => (HandshakeKind::Version, None),
+        ConnectionError::Reset => (HandshakeKind::Reset, None),
+        ConnectionError::TimedOut => (HandshakeKind::TimedOut, None),
+        ConnectionError::LocallyClosed => (HandshakeKind::Local, None),
+        ConnectionError::CidsExhausted => (HandshakeKind::Other, None),
+    };
+    let found = error.chain().find_map(|cause| {
+        if let Some(e) = cause.downcast_ref::<ConnectingError>() {
+            return Some(match e {
+                ConnectingError::ConnectionError { source, .. } => connection(source),
+                ConnectingError::HandshakeFailure { .. } => (HandshakeKind::Authentication, None),
+                ConnectingError::LocallyRejected { .. } => (HandshakeKind::Local, None),
+                _ => (HandshakeKind::Other, None),
+            });
+        }
+        cause.downcast_ref::<ConnectionError>().map(connection)
+    });
+    let (kind, code) = found.unwrap_or((HandshakeKind::Other, None));
+    HandshakeFailure { kind, code }
+}
+
+#[cfg(test)]
+mod handshake_failure_tests {
+    use super::{HandshakeFailure, HandshakeKind, handshake_failure};
+    use iroh::endpoint::{ConnectingError, ConnectionClose, ConnectionError as E};
+    use noq_proto::{MaybeFrame, TransportError, TransportErrorCode};
+
+    fn failure(error: anyhow::Error) -> (HandshakeKind, Option<u64>) {
+        let HandshakeFailure { kind, code } = handshake_failure(&error);
+        (kind, code)
+    }
+
+    /// Both backends' handshake errors, also under added context, name their
+    /// cause; a TLS alert keeps its transport code.
+    #[test]
+    fn handshake_errors_fold_into_owned_kinds_with_their_codes() {
+        let alpn = E::TransportError(TransportError::new(
+            TransportErrorCode::crypto(0x78),
+            String::new(),
+        ));
+        assert_eq!(
+            failure(ConnectingError::from(alpn).into()),
+            (HandshakeKind::Protocol, Some(0x178))
+        );
+        let closed = E::ConnectionClosed(ConnectionClose {
+            error_code: TransportErrorCode::PROTOCOL_VIOLATION,
+            frame_type: MaybeFrame::None,
+            reason: Default::default(),
+        });
+        assert_eq!(
+            failure(anyhow::Error::from(closed).context("accept")),
+            (HandshakeKind::PeerClosed, Some(0xa))
+        );
+        for (error, kind) in [
+            (E::TimedOut, HandshakeKind::TimedOut),
+            (E::Reset, HandshakeKind::Reset),
+            (E::VersionMismatch, HandshakeKind::Version),
+            (E::LocallyClosed, HandshakeKind::Local),
+            (E::CidsExhausted, HandshakeKind::Other),
+        ] {
+            assert_eq!(failure(ConnectingError::from(error).into()), (kind, None));
+        }
+        assert_eq!(
+            failure(anyhow::anyhow!("peer id missing")),
+            (HandshakeKind::Other, None)
+        );
+    }
+}
+
 /// Scope of the accompanying path observation, not a delivery guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathStatsCoverage {

@@ -396,6 +396,8 @@ struct State {
     presenting: bool,
     remote_cursor_embedded: bool,
     status: String,
+    // A problem beside the connection, such as the clipboard; never a connection state.
+    notice: Option<String>,
     label: String,
     extent: (u32, u32),
     report: ViewerReport,
@@ -532,6 +534,13 @@ impl ViewerHandle {
             self.wake(&mut state);
         }
     }
+    /// Show a problem beside the connection without changing its state, so
+    /// keyboard and cursor ownership stay with a connected remote window.
+    pub fn notice(&self, text: impl Into<String>) {
+        let mut state = lock(&self.state);
+        state.notice = Some(text.into());
+        self.wake(&mut state);
+    }
     /// Caller-confirmed capture property; legacy X11 video need not embed a cursor.
     pub fn remote_cursor_embedded(&self, enabled: bool) {
         let mut state = lock(&self.state);
@@ -541,6 +550,7 @@ impl ViewerHandle {
     pub fn status(&self, text: impl Into<String>) {
         let mut state = lock(&self.state);
         state.status = text.into();
+        state.notice = None;
         if state.status == "Reconnecting" {
             self.input_state.cancel_pointers();
             state.report.input_acks_canceled += state.input_latency.pending.len() as u64;
@@ -879,7 +889,7 @@ impl SessionView {
                 Err(error) => {
                     lock(&self.handle.state).clipboard.publication_failed();
                     self.handle
-                        .status(format!("Clipboard unavailable: {error}"));
+                        .notice(format!("Clipboard unavailable: {error}"));
                 }
             }
         }
@@ -920,6 +930,7 @@ impl SessionView {
                 presenting: true,
                 remote_cursor_embedded: false,
                 status: "Connecting".into(),
+                notice: None,
                 label: "RDS".into(),
                 extent: (0, 0),
                 report: ViewerReport::default(),
@@ -956,6 +967,18 @@ impl SessionView {
             pointer_point: None,
         };
         (session, handle, receiver)
+    }
+}
+
+/// Whether the remote video is live; a notice such as a clipboard failure does not end it.
+fn remote_connected(status: &str, presenting: bool, close: bool) -> bool {
+    status == "Connected" && presenting && !close
+}
+
+fn window_title(label: &str, status: &str, notice: Option<&str>) -> String {
+    match notice {
+        Some(notice) => format!("{label} — {status} — {notice}"),
+        None => format!("{label} — {status}"),
     }
 }
 
@@ -1006,7 +1029,7 @@ impl App {
         let (connected, embedded_cursor) = {
             let state = lock(&self.session.handle.state);
             (
-                state.status == "Connected" && state.presenting && !state.close,
+                remote_connected(&state.status, state.presenting, state.close),
                 state.remote_cursor_embedded,
             )
         };
@@ -1109,7 +1132,7 @@ impl App {
             Err(error) => {
                 self.session
                     .handle
-                    .status(format!("Clipboard unavailable: {error}"));
+                    .notice(format!("Clipboard unavailable: {error}"));
                 return false;
             }
         }
@@ -1268,7 +1291,7 @@ impl App {
     }
     fn update_window_title(&mut self) {
         let state = lock(&self.session.handle.state);
-        let status = format!("{} — {}", state.label, state.status);
+        let status = window_title(&state.label, &state.status, state.notice.as_deref());
         drop(state);
         if self.last_window_status.as_deref() != Some(status.as_str())
             && let Some(window) = &self.window
@@ -1743,6 +1766,28 @@ mod tests {
             NativeInputPolicy::for_remote(true, true, true, false, true, true),
             remote
         );
+    }
+
+    #[test]
+    fn a_notice_beside_the_connection_keeps_remote_keyboard_ownership() {
+        // A clipboard failure is shown as a notice; the status stays the connection's.
+        assert!(remote_connected("Connected", true, false));
+        assert_eq!(
+            window_title("USA", "Connected", Some("Clipboard unavailable: busy")),
+            "USA — Connected — Clipboard unavailable: busy"
+        );
+        assert_eq!(
+            window_title("USA", "Reconnecting", None),
+            "USA — Reconnecting"
+        );
+        for (status, presenting, close) in [
+            ("Clipboard unavailable: busy", true, false),
+            ("Reconnecting", true, false),
+            ("Connected", false, false),
+            ("Connected", true, true),
+        ] {
+            assert!(!remote_connected(status, presenting, close));
+        }
     }
 
     #[test]
