@@ -5,12 +5,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rds_agent::{Agent, AgentPolicy};
-use rds_client::local::{Client, Error, Prepared, Server};
+use rds_client::local::{Capacity, Client, Error, Prepared, Server};
 use rds_core::local::{Command, ErrorCode, Reply, SessionId, Status};
 use rds_net::{Backend, Endpoint, EndpointConfig, Ticket, bind_endpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket, UnixStream};
 use tokio::task::JoinSet;
+
+/// The small manager capacity the capacity test fills; the default is larger.
+const CAPACITY: Capacity = Capacity {
+    streams: 64,
+    workers: 96,
+};
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -982,10 +988,11 @@ async fn abandoned_silent_tcp_bodies_release_capacity_but_half_close_preserves_r
     let runner = tokio::spawn(async move {
         agent.run().await.unwrap();
     });
-    let mut server = Server::start(
+    let mut server = Server::start_with_capacity(
         Some(Prepared::bind(&path).await.unwrap()),
         local.clone(),
         None,
+        CAPACITY,
     );
     let client = Client::new(&path);
     let id = connect(&client, Ticket::of(&remote).to_string()).await;
@@ -1072,7 +1079,7 @@ async fn abandoned_silent_tcp_bodies_release_capacity_but_half_close_preserves_r
     }
     let mut held = Vec::new();
     let mut services = Vec::new();
-    for _ in 0..64 {
+    for _ in 0..CAPACITY.streams {
         held.push(client.open_tcp(id, target.clone()).await.unwrap());
         services.push(tcp.accept().await.unwrap().0);
     }
@@ -1100,7 +1107,8 @@ async fn abandoned_silent_tcp_bodies_release_capacity_but_half_close_preserves_r
     runner.await.unwrap();
     assert!(
         result.is_ok(),
-        "abandoned IPC bodies retained all 64 stream slots"
+        "abandoned IPC bodies retained all {} stream slots",
+        CAPACITY.streams
     );
 }
 
