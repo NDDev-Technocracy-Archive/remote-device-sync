@@ -505,6 +505,7 @@ impl Agent {
                         debug!("connection refused: admission budget exhausted");
                         continue;
                     };
+                    let remote = incoming.remote();
                     let audience = *self.endpoint.id().as_bytes();
                     let policy = self.policy.clone();
                     let desktop = self.desktop.clone();
@@ -524,7 +525,7 @@ impl Agent {
                             }
                             Ok(Err(error)) => {
                                 let failure = rds_net::handshake_failure(&error);
-                                rds_observe::handshake_failed(handshake_reason(failure.kind), failure.code);
+                                rds_observe::handshake_failed(handshake_reason(failure.kind), failure.code, &remote);
                                 debug!(%error, "incoming handshake failed");
                             }
                             Err(_) => {

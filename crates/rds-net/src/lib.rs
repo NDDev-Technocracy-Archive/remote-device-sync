@@ -444,19 +444,35 @@ impl Endpoint {
         };
         match &self.inner {
             EndpointInner::Iroh(ep) => ep.accept().await.map(|incoming| {
-                Incoming(Box::pin(async move {
-                    incoming
-                        .await
-                        .map(Connection::new_iroh)
-                        .map(counted)
-                        .map_err(anyhow::Error::from)
-                }))
+                let remote = match incoming.remote_addr() {
+                    iroh::endpoint::IncomingAddr::Ip(addr) => IncomingRemote::Direct(addr),
+                    iroh::endpoint::IncomingAddr::Relay { endpoint_id, .. } => {
+                        IncomingRemote::Relay(backends::iroh::convert::id_from(endpoint_id))
+                    }
+                    _ => IncomingRemote::Unknown,
+                };
+                Incoming {
+                    remote,
+                    future: Box::pin(async move {
+                        incoming
+                            .await
+                            .map(Connection::new_iroh)
+                            .map(counted)
+                            .map_err(anyhow::Error::from)
+                    }),
+                }
             }),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.accept().await.map(|incoming| {
-                Incoming(Box::pin(async move {
-                    incoming.await.map(Connection::new_noq).map(counted)
-                }))
+                let remote = incoming
+                    .remote_address()
+                    .map_or(IncomingRemote::Unknown, IncomingRemote::Direct);
+                Incoming {
+                    remote,
+                    future: Box::pin(async move {
+                        incoming.await.map(Connection::new_noq).map(counted)
+                    }),
+                }
             }),
         }
     }
@@ -478,13 +494,42 @@ impl fmt::Debug for Endpoint {
 }
 
 /// An inbound connection attempt; awaiting completes the handshake.
-pub struct Incoming(Pin<Box<dyn Future<Output = anyhow::Result<Connection>> + Send>>);
+pub struct Incoming {
+    remote: IncomingRemote,
+    future: Pin<Box<dyn Future<Output = anyhow::Result<Connection>> + Send>>,
+}
+
+impl Incoming {
+    /// Where the attempt came from, known before its handshake.
+    pub fn remote(&self) -> IncomingRemote {
+        self.remote
+    }
+}
 
 impl Future for Incoming {
     type Output = anyhow::Result<Connection>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.0.as_mut().poll(cx)
+        self.future.as_mut().poll(cx)
+    }
+}
+
+/// The source of an inbound attempt: a direct address, or the endpoint id a
+/// relay delivered it from. It names a peer, so only private text logs show it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncomingRemote {
+    Direct(SocketAddr),
+    Relay(EndpointId),
+    Unknown,
+}
+
+impl fmt::Display for IncomingRemote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct(addr) => write!(f, "direct {addr}"),
+            Self::Relay(id) => write!(f, "relay {id}"),
+            Self::Unknown => f.write_str("unknown"),
+        }
     }
 }
 

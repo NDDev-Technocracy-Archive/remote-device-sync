@@ -415,8 +415,8 @@ fn handshake_failure_exports_its_reason_and_shows_its_code_only_in_text() {
         )
         .unwrap();
         tracing::subscriber::with_default(subscriber, || {
-            handshake_failed(Reason::Protocol, Some(0x178));
-            handshake_failed(Reason::Timeout, None);
+            handshake_failed(Reason::Protocol, Some(0x178), &"relay PRIVATE_SENTINEL");
+            handshake_failed(Reason::Timeout, None, &"direct 192.0.2.1:3345");
         });
         assert!(telemetry.shutdown().drained);
         if format == Format::Json {
@@ -426,10 +426,19 @@ fn handshake_failure_exports_its_reason_and_shows_its_code_only_in_text() {
                 assert_eq!(record["event"], "handshake_failed");
                 assert_eq!(record["reason"], reason);
                 assert!(record.get("code").is_none());
+                assert!(record.get("remote").is_none());
             }
+            assert!(
+                !String::from_utf8(capture.0.lock().unwrap().clone())
+                    .unwrap()
+                    .contains("PRIVATE_SENTINEL")
+            );
         } else {
             let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-            assert!(output.contains("reason=\"protocol\" code=376"), "{output}");
+            assert!(
+                output.contains("reason=\"protocol\" code=376 remote=relay PRIVATE_SENTINEL"),
+                "{output}"
+            );
             assert!(output.contains("reason=\"timeout\""), "{output}");
         }
     }

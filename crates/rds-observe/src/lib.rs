@@ -384,14 +384,14 @@ pub fn session_closed(reason: Reason, elapsed: Duration) {
 }
 
 /// An inbound handshake produced no connection. `code` is the QUIC transport
-/// error code when the cause has one; only text mode shows it, and the JSON
-/// export keeps the typed reason.
-pub fn handshake_failed(reason: Reason, code: Option<u64>) {
+/// error code when the cause has one, and `remote` where the attempt came
+/// from; only text mode shows them, and the JSON export keeps the typed reason.
+pub fn handshake_failed(reason: Reason, code: Option<u64>, remote: &dyn std::fmt::Display) {
     match code {
         Some(code) => tracing::warn!(target: "rds_telemetry", event = "handshake_failed",
-            reason = reason.name(), code),
+            reason = reason.name(), code, remote = %remote),
         None => tracing::warn!(target: "rds_telemetry", event = "handshake_failed",
-            reason = reason.name()),
+            reason = reason.name(), remote = %remote),
     }
 }
 
