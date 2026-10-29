@@ -32,9 +32,9 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "parki
 # font parsers into the desktop client. Use the window system's decorations.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"], optional = true }
 pollster = { version = "1.0", optional = true }
-egui = { version = "0.36.2", default-features = false, features = ["default_fonts"], optional = true }
-egui-wgpu = { version = "0.36.2", default-features = false, optional = true }
-egui-winit = { version = "0.36.2", default-features = false, features = ["clipboard", "x11", "wayland"], optional = true }
+egui = { version = "0.37.0", default-features = false, features = ["default_fonts"], optional = true }
+egui-wgpu = { version = "0.37.0", default-features = false, optional = true }
+egui-winit = { version = "0.37.0", default-features = false, features = ["clipboard", "x11", "wayland"], optional = true }
 serde.workspace = true
 rustix = { workspace = true, features = ["event", "time", "process"], optional = true }
 
