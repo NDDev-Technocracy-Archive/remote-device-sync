@@ -1,0 +1,20 @@
+# Archived measurement report data in docs/reports (identifiers and digests, not credentials).
+# Reviewed 2026-11-01 during the CI baseline migration; only these exact historical findings are suppressed.
+14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:121
+14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:176
+14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:289
+a0776ca1f70084e09770abed52fc270d0ebb9fb7:docs/reports/rds-admin-metrics-20260925-data.json:generic-api-key:29
+a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:138
+a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:192
+a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:304
+a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:178
+a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:238
+a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:351
+a89e7dc8d893486bc8f74ec3551cee82484ae9e6:docs/reports/rds-tcp-target-20260925-data.json:generic-api-key:6
+b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:151
+b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:212
+b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:326
+beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:202
+beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:261
+beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:374
+bf42c2d8cda2aba472f9f4f62a3bb8123841d423:docs/reports/rds-agent-lifecycle-20260925-data.json:generic-api-key:6
