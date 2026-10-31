@@ -1,63 +1,74 @@
 name: ci
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
-# Two supported targets: Linux x86_64 (Ubuntu) and macOS arm64.
-# GitHub-hosted runners only — this is a public module.
-#
-# The build/test/lint jobs are the pinned `rust-ci` reusable from
-# NDDev-Technocracy-Sandbox/ci-workflows; one pin per repository (see
-# supply-chain.yml and codeql.yml — same SHA). Native release packaging
-# runs separately in release.yml using pinned official actions.
-
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Obsolete pull-request heads are cancelled; a running main validation always completes.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
-    name: rust
-    permissions:
-      contents: read
-    uses: NDDev-Technocracy-Archive/ci-workflows-20261014/.github/workflows/rust-ci.yml@7d3f40eb5864a3b73e046ea98afcfe89a1b2d190 # commit:93eeb2a65e98a29e9dbff7909f67c6419abff046
-    with:
-      runner: ubuntu-latest
-      toolchain: "1.98.1"
-      components: "clippy,rustfmt"
-      build_command: "cargo build --locked --workspace --all-targets"
-      # Tests run per-OS. The noq/owned-relay and metrics lanes run on both
-      # targets; the x11 lane is Linux-only (no X11 on macOS runners).
-      test_matrix_os: '["ubuntu-latest", "macos-latest"]'
-      test_command: >-
-        cargo test --locked --workspace --no-fail-fast
-        && cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml --lib --no-fail-fast
-        && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay --no-fail-fast
-        && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast
-        && cargo test --locked -p rds-client --features transport-noq --test multiple_desktops --no-fail-fast
-        && cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --no-fail-fast
-        && { [ "$(uname -s)" != "Linux" ] || {
-        cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast
-        && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24"
-        cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1
-        && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24"
-        sh -c 'setxkbmap -keycodes xfree86 -layout us,ru && cargo test --locked -p rds-desktop --features x11 --test x11_native native_alt_navigation_resolves_the_actual_xkb_physical_map -- --ignored --exact --test-threads=1';
-        }; }
-      fmt_command: "cargo fmt --all -- --check"
-      # Clippy runs once on Linux: default features, then every
-      # feature-gated lane (owned transport, metrics export, x11/desktop).
-      clippy_command: >-
-        cargo clippy --locked --workspace --all-targets -- -D warnings
-        && cargo clippy --locked --workspace --all-targets --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay,rds-server/owned-relay -- -D warnings
-        && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings
-        && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings
-        && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
-      timeout_minutes: 45
-
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Select the Rust toolchain
+      run: |
+        rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+        echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
+    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@ab62f45b2a3067e5a7425d703f7fd07f1618b72c # nddev-cicd-v0.6.14
+      with:
+        ecosystems: cargo
+    - name: Format
+      shell: bash
+      run: |
+        cargo fmt --all -- --check
+    - name: Clippy
+      shell: bash
+      run: |
+        cargo clippy --locked --workspace --all-targets -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay,rds-server/owned-relay -- -D warnings && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
+    - name: Build
+      shell: bash
+      run: |
+        cargo build --locked --workspace --all-targets
+    - name: Test
+      shell: bash
+      run: |
+        cargo test --locked --workspace --no-fail-fast && cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml --lib --no-fail-fast && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay --no-fail-fast && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast && cargo test --locked -p rds-client --features transport-noq --test multiple_desktops --no-fail-fast && cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --no-fail-fast && { [ "$(uname -s)" != "Linux" ] || { cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1 && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" sh -c 'setxkbmap -keycodes xfree86 -layout us,ru && cargo test --locked -p rds-desktop --features x11 --test x11_native native_alt_navigation_resolves_the_actual_xkb_physical_map -- --ignored --exact --test-threads=1'; }; }
+  rust-platforms:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    if: ${{ github.event_name != 'pull_request' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - macos-26
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Select the Rust toolchain
+      run: |
+        rustup toolchain install 1.98.1 --profile minimal
+        echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
+    - name: Test
+      shell: bash
+      run: |
+        cargo test --locked --workspace --no-fail-fast && cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml --lib --no-fail-fast && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay --no-fail-fast && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast && cargo test --locked -p rds-client --features transport-noq --test multiple_desktops --no-fail-fast && cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --no-fail-fast && { [ "$(uname -s)" != "Linux" ] || { cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1 && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" sh -c 'setxkbmap -keycodes xfree86 -layout us,ru && cargo test --locked -p rds-desktop --features x11 --test x11_native native_alt_navigation_resolves_the_actual_xkb_physical_map -- --ignored --exact --test-threads=1'; }; }
   portal:
     name: Wayland portal boundaries
     runs-on: ubuntu-24.04
@@ -65,22 +76,48 @@ jobs:
     permissions:
       contents: read
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: '2'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+      with:
+        toolchain: 1.98.1
+        components: clippy
+        cache: false
+    - name: Install PipeWire ABI and bindgen headers
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev libclang-dev dbus-daemon
+    - name: Check portal and agent ownership
+      run: cargo clippy --locked -p rds-agent -p rds-desktop --all-targets --features rds-agent/portal -- -D warnings
+    - name: Exercise EI socket and filesystem boundaries
+      run: 'cargo test --locked -p rds-desktop --features portal --lib portal:: -- --test-threads=1'
+    - name: Exercise serving regressions with the portal build
+      run: cargo test --locked -p rds-agent --features portal --lib
+
+  workflows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+          fetch-depth: 0
+      - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@ab62f45b2a3067e5a7425d703f7fd07f1618b72c # nddev-cicd-v0.6.14
         with:
-          toolchain: "1.98.1"
-          components: clippy
-          cache: false
-      - name: Install PipeWire ABI and bindgen headers
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev libclang-dev dbus-daemon
-      - name: Check portal and agent ownership
-        run: cargo clippy --locked -p rds-agent -p rds-desktop --all-targets --features rds-agent/portal -- -D warnings
-      - name: Exercise EI socket and filesystem boundaries
-        run: >-
-          cargo test --locked -p rds-desktop --features portal --lib portal:: -- --test-threads=1
-      - name: Exercise serving regressions with the portal build
-        run: cargo test --locked -p rds-agent --features portal --lib
+          capability: security
+      - name: Lint and audit workflows
+        run: |
+          actionlint
+          zizmor --offline --no-progress .github/workflows/ci.yml .github/workflows/observability.yml .github/workflows/supply-chain.yml .github/workflows/security.yml .github/dependabot.yml
+      - name: Scan new pull request commits, or the full history on main
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -n "$BASE" ]; then
+            gitleaks git --no-banner --redact --log-opts="$BASE..$HEAD" .
+          else
+            gitleaks git --no-banner --redact .
+          fi
+

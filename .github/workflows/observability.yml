@@ -2,53 +2,52 @@ name: observability
 
 on:
   pull_request:
-    paths:
-      - "crates/rds-observe/**"
-      - "ops/observability/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/observability.yml"
   push:
     branches: [main]
-    paths:
-      - "crates/rds-observe/**"
-      - "ops/observability/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/observability.yml"
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
-  group: observability-${{ github.ref }}
-  cancel-in-progress: true
+  group: observability-${{ github.event.pull_request.number || github.ref }}
+  # Obsolete pull-request heads are cancelled; a running main validation always completes.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pipeline:
-    permissions:
-      contents: read
-    uses: NDDev-Technocracy-Archive/ci-workflows-20261014/.github/workflows/rust-ci.yml@7d3f40eb5864a3b73e046ea98afcfe89a1b2d190 # commit:93eeb2a65e98a29e9dbff7909f67c6419abff046
-    with:
-      runner: ubuntu-latest
-      toolchain: "1.98.1"
-      components: "clippy,rustfmt"
-      build_command: "cargo build --locked -p rds-observe --example fixture"
-      test_matrix_os: '["ubuntu-latest"]'
-      test_command: >-
-        bash -euo pipefail -c '
-        . ops/observability/images.env;
-        pull_image() {
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Select the Rust toolchain
+      run: |
+        rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+        echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
+    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@ab62f45b2a3067e5a7425d703f7fd07f1618b72c # nddev-cicd-v0.6.14
+      with:
+        ecosystems: cargo
+    - name: Format
+      shell: bash
+      run: |
+        cargo fmt --all -- --check
+    - name: Clippy
+      shell: bash
+      run: |
+        cargo clippy --locked -p rds-observe --all-targets -- -D warnings
+    - name: Build
+      shell: bash
+      run: |
+        cargo build --locked -p rds-observe --example fixture
+    - name: Test
+      shell: bash
+      run: |
+        bash -euo pipefail -c ' . ops/observability/images.env; pull_image() {
           for delay in 0 10 30; do
             sleep "$delay";
             if timeout 120 docker pull "$1"; then return 0; fi;
           done;
           return 1;
-        };
-        pull_image "$RDS_VECTOR_IMAGE";
-        pull_image "$RDS_OPENOBSERVE_IMAGE";
-        cargo build --locked -p rds-observe --example fixture;
-        cargo test --locked -p rds-observe --test pipeline -- --ignored --nocapture'
-      fmt_command: "cargo fmt --all -- --check"
-      clippy_command: "cargo clippy --locked -p rds-observe --all-targets -- -D warnings"
-      timeout_minutes: 20
+        }; pull_image "$RDS_VECTOR_IMAGE"; pull_image "$RDS_OPENOBSERVE_IMAGE"; cargo build --locked -p rds-observe --example fixture; cargo test --locked -p rds-observe --test pipeline -- --ignored --nocapture'
