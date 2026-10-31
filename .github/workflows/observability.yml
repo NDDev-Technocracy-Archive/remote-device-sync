@@ -26,7 +26,7 @@ jobs:
       run: |
         rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
         echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@ab62f45b2a3067e5a7425d703f7fd07f1618b72c # nddev-cicd-v0.6.14
+    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@365415f32190ae22ff22462e791a4829ad6e91fc # nddev-cicd-v0.6.14
       with:
         ecosystems: cargo
     - name: Format
