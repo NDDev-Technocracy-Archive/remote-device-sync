@@ -33,5 +33,5 @@ jobs:
       shell: bash
       run: |
         cargo deny --manifest-path ./Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
-        (cd . && cargo audit)
+        (cd . && cargo audit --db "$RUNNER_TEMP/rustsec-advisory-db")
         (cd . && cargo-machete --skip-metadata-dir)
