@@ -15,6 +15,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Select the Rust toolchain
+      run: |
+        rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+        echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
+    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@365415f32190ae22ff22462e791a4829ad6e91fc # nddev-cicd-v0.6.16
+      with:
+        ecosystems: cargo
+        # clippy and test builds are different artifacts; each keeps its own entry.
+        key: clippy
+    - name: Format
+      shell: bash
+      run: |
+        cargo fmt --all -- --check
+    - name: Clippy
+      shell: bash
+      run: |
+        cargo clippy --locked --workspace --all-targets -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay,rds-server/owned-relay -- -D warnings && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
+  # Tests and lints run side by side as the retired library ran them; one job holding
+  # both target trees ran out of runner disk.
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -24,19 +50,13 @@ jobs:
         persist-credentials: false
     - name: Select the Rust toolchain
       run: |
-        rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+        rustup toolchain install 1.98.1 --profile minimal
         echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@ab62f45b2a3067e5a7425d703f7fd07f1618b72c # nddev-cicd-v0.6.14
+    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@365415f32190ae22ff22462e791a4829ad6e91fc # nddev-cicd-v0.6.16
       with:
         ecosystems: cargo
-    - name: Format
-      shell: bash
-      run: |
-        cargo fmt --all -- --check
-    - name: Clippy
-      shell: bash
-      run: |
-        cargo clippy --locked --workspace --all-targets -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay,rds-server/owned-relay -- -D warnings && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
+        # clippy and test builds are different artifacts; each keeps its own entry.
+        key: test
     - name: Build
       shell: bash
       run: |
