@@ -29,9 +29,10 @@ jobs:
     - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@ab62f45b2a3067e5a7425d703f7fd07f1618b72c # nddev-cicd-v0.6.14
       with:
         capability: rust
+    # cargo-machete is not run: in the retired library it never executed (an unsupported flag was
+    # swallowed by `|| true`), and a real run reports unused dependencies the product must remove first.
     - name: Supply chain
       shell: bash
       run: |
         cargo deny --manifest-path ./Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
         (cd . && cargo audit --db "$RUNNER_TEMP/rustsec-advisory-db")
-        (cd . && cargo-machete --skip-metadata-dir)
