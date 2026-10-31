@@ -1,20 +1,39 @@
-# Archived measurement report data in docs/reports (identifiers and digests, not credentials).
-# Reviewed 2026-11-01 during the CI baseline migration; only these exact historical findings are suppressed.
-14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:121
-14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:176
-14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:289
+# Reviewed historical Gitleaks findings (2026-11-01, CI baseline migration, std-0004-ci-cd-workflows#205).
+# Each fingerprint below is a proven non-credential; values are never copied here. New findings stay blocking.
+
+# docs/reports/rds-admin-metrics-20260925-data.json:29 @a0776ca1f700 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
 a0776ca1f70084e09770abed52fc270d0ebb9fb7:docs/reports/rds-admin-metrics-20260925-data.json:generic-api-key:29
-a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:138
-a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:192
-a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:304
-a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:178
-a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:238
-a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:351
-a89e7dc8d893486bc8f74ec3551cee82484ae9e6:docs/reports/rds-tcp-target-20260925-data.json:generic-api-key:6
-b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:151
-b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:212
-b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:326
-beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:202
-beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:261
-beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:374
+# docs/reports/rds-agent-lifecycle-20260925-data.json:6 @bf42c2d8cda2 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
 bf42c2d8cda2aba472f9f4f62a3bb8123841d423:docs/reports/rds-agent-lifecycle-20260925-data.json:generic-api-key:6
+# docs/reports/rds-grant-leases-20260925-data.json:178 @a3cdbd036b54 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:178
+# docs/reports/rds-grant-leases-20260925-data.json:238 @a3cdbd036b54 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:238
+# docs/reports/rds-grant-leases-20260925-data.json:351 @a3cdbd036b54 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c:docs/reports/rds-grant-leases-20260925-data.json:generic-api-key:351
+# docs/reports/rds-identity-migration-20260925-data.json:121 @14dcb79e1cb9 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:121
+# docs/reports/rds-identity-migration-20260925-data.json:176 @14dcb79e1cb9 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:176
+# docs/reports/rds-identity-migration-20260925-data.json:289 @14dcb79e1cb9 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+14dcb79e1cb9091bc902eeef505aca0784eb3d14:docs/reports/rds-identity-migration-20260925-data.json:generic-api-key:289
+# docs/reports/rds-local-sessions-20260925-data.json:138 @a34ac1fbd986 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:138
+# docs/reports/rds-local-sessions-20260925-data.json:192 @a34ac1fbd986 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:192
+# docs/reports/rds-local-sessions-20260925-data.json:304 @a34ac1fbd986 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+a34ac1fbd9862107ec8531057ec6e2c319d740c6:docs/reports/rds-local-sessions-20260925-data.json:generic-api-key:304
+# docs/reports/rds-service-scopes-20260926-data.json:151 @b650dd67efda [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:151
+# docs/reports/rds-service-scopes-20260926-data.json:212 @b650dd67efda [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:212
+# docs/reports/rds-service-scopes-20260926-data.json:326 @b650dd67efda [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+b650dd67efdaefc7bdb63d0386b158166545ecf2:docs/reports/rds-service-scopes-20260926-data.json:generic-api-key:326
+# docs/reports/rds-ssh-20260925-data.json:202 @beb3a7a578a7 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:202
+# docs/reports/rds-ssh-20260925-data.json:261 @beb3a7a578a7 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:261
+# docs/reports/rds-ssh-20260925-data.json:374 @beb3a7a578a7 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+beb3a7a578a782f31e51791b7ec8e50584eafb7f:docs/reports/rds-ssh-20260925-data.json:generic-api-key:374
+# docs/reports/rds-tcp-target-20260925-data.json:6 @a89e7dc8d893 [generic-api-key]: SHA-256 digest of the named source file in an archived measurement report (verified against the blob at that commit)
+a89e7dc8d893486bc8f74ec3551cee82484ae9e6:docs/reports/rds-tcp-target-20260925-data.json:generic-api-key:6
