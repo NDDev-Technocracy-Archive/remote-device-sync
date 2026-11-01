@@ -26,7 +26,7 @@ jobs:
       run: |
         rustup toolchain install 1.98.1 --profile minimal
         echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@ab62f45b2a3067e5a7425d703f7fd07f1618b72c # nddev-cicd-v0.6.14
+    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
       with:
         capability: rust
     # cargo-machete is not run: in the retired library it never executed (an unsupported flag was
