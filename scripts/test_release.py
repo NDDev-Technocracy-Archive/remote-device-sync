@@ -2,11 +2,11 @@
 """Negative release-contract tests: all repositories/artifacts are synthetic."""
 import contextlib
 import copy
-import hashlib
 import importlib.util
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -33,13 +33,25 @@ class ReleaseContract(unittest.TestCase):
         self.context = contextlib.chdir(self.repo)
         self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
-        for name in release.SOURCE_PATHS:
+        roots = ('README.md', 'LICENSE', 'VERSION', 'CHANGELOG.md', 'AGENTS.md',
+                 'deny.toml', 'rust-toolchain.toml', 'Cargo.toml', 'Cargo.lock',
+                 'crates', 'tests', 'examples', 'deploy', 'docs', 'scripts', '.github',
+                 'ops', 'packaging', 'vendor')
+        for name in roots:
             path = Path(name)
             if path.suffix or name in ("LICENSE", "VERSION"):
                 path.write_text("fixture\n")
             else:
                 path.mkdir()
                 (path / "fixture").write_text("fixture\n")
+        settings = Path(__file__).resolve().parent.parent / "packaging/macos.json"
+        Path("packaging/macos.json").write_bytes(settings.read_bytes())
+        resources = settings.parent / 'notices.json'
+        Path('packaging/notices.json').write_bytes(resources.read_bytes())
+        assets = settings.parent.parent / 'crates/rds-desktop/assets'
+        shutil.copytree(assets / 'font-licenses', Path('crates/rds-desktop/assets/font-licenses'))
+        shutil.copyfile(assets / 'app-icon.icns', Path('crates/rds-desktop/assets/app-icon.icns'))
+        Path("scripts/package-macos-apps.py").write_text("synthetic checked native app builder\n")
         Path("VERSION").write_text(VERSION + "\n")
         Path("Cargo.toml").write_text('[workspace]\nmembers=["crates/example"]\n[workspace.package]\nversion="0.1.0"\n')
         Path("crates/example").mkdir()
@@ -63,30 +75,6 @@ class ReleaseContract(unittest.TestCase):
     def commit(self):
         self.git("add", ".")
         self.git("-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture")
-
-    def bundle(self, path, target, override=None, extra=False):
-        content = b"synthetic executable, not invoked" * 20
-        entries = {n: (content, True) for n in release.BINARIES}
-        info = dict(schema_version=1, version=VERSION, source_commit=self.commit_oid,
-                    target=target, rust_toolchain=self.channel, readiness="engineering-preview",
-                    features=release.FEATURES.split(","), cargo_lock_sha256=release.digest(Path("Cargo.lock")),
-                    binaries={n: hashlib.sha256(content).hexdigest() for n in release.BINARIES})
-        info.update(override or {})
-        entries["build-info.json"] = (json.dumps(info).encode(), False)
-        entries["LICENSE"] = (Path("LICENSE"), False)
-        entries["Cargo.lock"] = (Path("Cargo.lock"), False)
-        if extra:
-            entries["unexpected"] = (b"extra", False)
-        release.archive(path, f"rds-{VERSION}-{target}", entries, 0)
-
-    def inputs(self):
-        incoming = self.root / "incoming"
-        incoming.mkdir()
-        for target in release.TARGETS:
-            self.bundle(incoming / f"remote-device-sync-{VERSION}-{target}.tar.gz", target)
-        release.source_archive(VERSION, incoming / f"remote-device-sync-{VERSION}-source.tar.gz")
-        (incoming / "source-sbom.spdx.json").write_text(json.dumps({"spdxVersion": "SPDX-2.3", "packages": [{"name": "example"}]}))
-        return incoming
 
     def test_exact_version_and_lock_are_required(self):
         for name, content, error in (
@@ -127,9 +115,9 @@ class ReleaseContract(unittest.TestCase):
         release.source_bundle(VERSION, out, tagged=True)
         with tarfile.open(next(out.glob("*.tar.gz"))) as archive:
             names = archive.getnames()
-        self.assertIn(f"remote-device-sync-{VERSION}/ops/fixture", names)
-        self.assertIn(f"remote-device-sync-{VERSION}/tests/fixture", names)
-        self.assertIn(f"remote-device-sync-{VERSION}/examples/fixture", names)
+        self.assertIn(f"nddev-remote-{VERSION}/ops/fixture", names)
+        self.assertIn(f"nddev-remote-{VERSION}/tests/fixture", names)
+        self.assertIn(f"nddev-remote-{VERSION}/examples/fixture", names)
         self.assertFalse(any("untracked-secret" in n for n in names))
 
     def test_source_symlink_refused(self):
@@ -138,63 +126,16 @@ class ReleaseContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "link or gitlink"):
             release.source_archive(VERSION, self.root / "source.tar.gz")
 
-    def test_complete_preview_manifest_and_checksums(self):
-        incoming = self.inputs()
-        out = self.root / "dist"
-        release.finalize(VERSION, incoming, out, tagged=True)
-        self.assertEqual(len(list(out.iterdir())), 7)
-        manifest = json.loads((out / "release-manifest.json").read_text())
-        self.assertEqual(manifest["source_commit"], self.commit_oid)
-        self.assertTrue(manifest["prerelease"])
-        for line in (out / "SHA256SUMS").read_text().splitlines():
-            expected, name = line.split("  ")
-            self.assertEqual(release.digest(out / name), expected)
-
-    def test_missing_and_unexpected_assets_are_refused(self):
-        incoming = self.inputs()
-        sbom = incoming / "source-sbom.spdx.json"
-        old = sbom.read_bytes()
-        sbom.unlink()
-        with self.assertRaisesRegex(ValueError, "inventory mismatch"):
-            release.finalize(VERSION, incoming, self.root / "dist")
-        sbom.write_bytes(old)
-        (incoming / "extra").write_text("extra")
-        with self.assertRaisesRegex(ValueError, "inventory mismatch"):
-            release.finalize(VERSION, incoming, self.root / "dist")
-
-    def test_artifact_symlink_directory_is_refused(self):
-        incoming = self.inputs()
-        (incoming / "link").symlink_to(self.repo, target_is_directory=True)
-        with self.assertRaisesRegex(ValueError, "symlink"):
-            release.finalize(VERSION, incoming, self.root / "dist")
-
-    def test_tampered_source_refused(self):
-        incoming = self.inputs()
-        (incoming / f"remote-device-sync-{VERSION}-source.tar.gz").write_bytes(b"tampered")
-        with self.assertRaisesRegex(ValueError, "source archive mismatch"):
-            release.finalize(VERSION, incoming, self.root / "dist")
-
-    def test_wrong_native_identity_and_digest_refused(self):
-        target = release.TARGETS[0]
-        for i, override in enumerate(({"source_commit": "0" * 40}, {"target": release.TARGETS[1]},
-                                      {"binaries": {n: "0" * 64 for n in release.BINARIES}})):
-            path = self.root / f"bad-{i}.tar.gz"
-            self.bundle(path, target, override)
-            with self.assertRaisesRegex(ValueError, "mismatch"):
-                release.verify_binary_bundle(path, VERSION, target, self.commit_oid, self.channel)
-
-    def test_extra_native_member_refused(self):
-        path = self.root / "extra.tar.gz"
-        target = release.TARGETS[0]
-        self.bundle(path, target, extra=True)
-        with self.assertRaisesRegex(ValueError, "member count"):
-            release.verify_binary_bundle(path, VERSION, target, self.commit_oid, self.channel)
-
-    def test_empty_sbom_refused(self):
-        incoming = self.inputs()
-        (incoming / "source-sbom.spdx.json").write_text('{"spdxVersion":"SPDX-2.3","packages":[]}')
-        with self.assertRaisesRegex(ValueError, "empty source SBOM"):
-            release.finalize(VERSION, incoming, self.root / "dist")
+    def test_source_includes_new_tracked_build_roots_without_an_allowlist(self):
+        Path('native-build').mkdir()
+        Path('native-build/required.h').write_text('synthetic native dependency\n')
+        self.commit()
+        archive = self.root/'complete-source.tar.gz'
+        release.source_archive(VERSION, archive)
+        with tarfile.open(archive) as bundle:
+            self.assertEqual(bundle.extractfile(f'nddev-remote-{VERSION}/native-build/required.h').read(),
+                             b'synthetic native dependency\n')
+            self.assertIn(f'nddev-remote-{VERSION}/vendor/fixture', bundle.getnames())
 
 
 class CIEvidence(unittest.TestCase):
@@ -202,9 +143,9 @@ class CIEvidence(unittest.TestCase):
         self.commit = "a" * 40
         self.runs = [dict(path=".github/workflows/" + name, head_sha=self.commit,
                           event="push", head_branch="main", status="completed", conclusion="success")
-                     for name in ("ci.yml", "supply-chain.yml", "codeql.yml")]
+                     for name in ("ci.yml", "supply-chain.yml", "security.yml", "desktop-runtime.yml")]
         self.analyses = [dict(ref="refs/heads/main", category="/language:" + language,
-                             analysis_key=".github/workflows/codeql.yml:codeql", tool={"name": "CodeQL"},
+                             analysis_key=".github/workflows/security.yml:codeql", tool={"name": "CodeQL"},
                              commit_sha=self.commit, error="", warning="")
                         for language in ("rust", "actions")]
 

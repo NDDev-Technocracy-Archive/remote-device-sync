@@ -55,6 +55,9 @@ def main():
                 raise SystemExit('runtime depends on an unbundled library: ' + dependency)
     root = Path(__file__).resolve().parent.parent
     settings = json.loads((root / 'packaging/macos.json').read_text())
+    notices = json.loads((root / 'packaging/notices.json').read_text())
+    if base.get('notices') != {name: digest(root / path) for name, path in notices.items()}:
+        raise SystemExit('native package notices differ from the selected source')
     args.out.mkdir(parents=True, exist_ok=True, mode=0o700)
     filename = 'nddev-remote-macos-apps-' + source + '.tar.gz'
     archive = args.out / filename
@@ -74,6 +77,7 @@ def main():
             info = {
                 'CFBundleIdentifier': app['identifier'], 'CFBundleName': app['name'],
                 'CFBundleDisplayName': app['name'], 'CFBundleExecutable': app['executable'],
+                'CFBundleIconFile': settings['icon']['name'],
                 'CFBundleVersion': version[1], 'CFBundleShortVersionString': version[1],
                 'CFBundlePackageType': 'APPL', 'LSMinimumSystemVersion': settings['minimum_os'],
                 'LSUIElement': app['background'], 'NSHighResolutionCapable': True,
@@ -81,6 +85,16 @@ def main():
             (contents / 'Info.plist').write_bytes(plistlib.dumps(info, sort_keys=True))
             (contents / 'Resources' / 'build-info.json').write_text(
                 json.dumps(base, indent=2, sort_keys=True) + '\n')
+            resources = {settings['icon']['name']: settings['icon']['source']}
+            resources.update({'Notices/' + name: path for name, path in notices.items()})
+            for name, source_path in resources.items():
+                source_file = root / source_path
+                if (source_file.is_symlink() or not source_file.is_file()
+                        or Path(name).is_absolute() or '..' in Path(name).parts):
+                    raise SystemExit('invalid application resource')
+                destination = contents / 'Resources' / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source_file, destination)
             subprocess.run(['codesign', '--force', '--sign', args.sign_identity,
                             '--options', 'runtime', '--timestamp=none', str(bundle)], check=True)
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(bundle)], check=True)

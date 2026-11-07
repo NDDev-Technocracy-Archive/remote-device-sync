@@ -50,6 +50,15 @@ def main():
                 or not 0 < info.st_size <= 256 * 1024 * 1024):
             raise SystemExit('missing or unsafe native executable: ' + name)
         payload[name] = path.read_bytes()
+    root = Path(__file__).resolve().parent.parent
+    notices = json.loads((root / 'packaging/notices.json').read_text())
+    for name, source_path in notices.items():
+        path = root / source_path
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 128 * 1024
+                or Path(name).is_absolute() or '..' in Path(name).parts or name in payload):
+            raise SystemExit('invalid package notice: ' + name)
+        payload[name] = path.read_bytes()
     manifest = {
         'schema_version': 1,
         'source': source,
@@ -57,7 +66,9 @@ def main():
         'target': args.target,
         'features': features,
         'rustc': command('rustc', '--version', '--verbose'),
-        'binaries': {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()},
+        'binaries': {name: hashlib.sha256(payload[name]).hexdigest()
+                     for name in ['rds', 'rds-agent', 'nddev-remote']},
+        'notices': {name: hashlib.sha256(payload[name]).hexdigest() for name in notices},
         'build': {key: os.environ[key] for key in ['GITHUB_REPOSITORY', 'GITHUB_WORKFLOW',
                                                  'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
                                                  'GITHUB_REF'] if key in os.environ},
@@ -72,7 +83,7 @@ def main():
                 for name, data in sorted(payload.items()):
                     info = tarfile.TarInfo(name)
                     info.size = len(data)
-                    info.mode = 0o644 if name.endswith('.json') else 0o755
+                    info.mode = 0o755 if name in manifest['binaries'] else 0o644
                     bundle.addfile(info, io.BytesIO(data))
     (args.out / 'build-info.json').write_bytes(metadata)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()

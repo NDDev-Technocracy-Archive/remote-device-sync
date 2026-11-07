@@ -1,132 +1,127 @@
 # Engineering preview releases
 
-This document describes the published `0.1.0` artifact, not the capabilities
-of current `main`. Subsequent implementation and unfinished acceptance are
-tracked in the [capability matrix](capability-matrix.md) and
-[stability plan](stability-plan-20261009.md); an unchanged workspace version
-string does not bind an installed binary to the current source.
+NDDev Remote `0.1.1` packages the standalone remote-screen product. The native
+client is `nddev-remote`, with `rds` for automation and `rds-agent` for the resident
+endpoint. NDS accounts, synchronization, telemetry and build caches are independent
+of screen connections. Current acceptance is recorded separately from build
+support in the [capability matrix](capability-matrix.md).
 
-The `0.1.0` release is an engineering preview for isolated evaluation. It is
-not a production-readiness gate, a completed remote-desktop product, or an
-automatic upgrade of development deployments. The detailed remaining work is
-in [the remediation plan](remediation-plan.md). No consumer source pin or running
-service changes automatically when a release is published.
+## Packages
 
-## Contents and supported build hosts
+A release contains eight assets. `<source>` is the exact 40-character source
+commit in `release-manifest.json`.
 
-| Asset | Contents / build host |
-|---|---|
-| `remote-device-sync-0.1.0-x86_64-unknown-linux-gnu.tar.gz` | Native `rds`, `rds-agent`, `rds-relay`, `rds-server`; Ubuntu 24.04 x86_64 |
-| `remote-device-sync-0.1.0-aarch64-apple-darwin.tar.gz` | Same four native programs; macOS 15 arm64 |
-| `remote-device-sync-0.1.0-source.tar.gz` | Tracked source and shared test fixtures, lockfile, docs, deployment and `ops/observability` configuration |
-| `source-sbom.spdx.json` | Syft SPDX inventory of the **source archive**; not an OS/runtime or complete binary SBOM |
+| Asset | Contents |
+| --- | --- |
+| `nddev-remote-x86_64-unknown-linux-gnu-<source>.tar.gz` | Three desktop-enabled executables, notices and `build-info.json`; native Ubuntu 24.04 x86_64 build, X11 and consented Wayland host |
+| `nddev-remote-aarch64-apple-darwin-<source>.tar.gz` | The same three executables, notices and metadata; native macOS arm64 build, ScreenCaptureKit/CGEvent host |
+| `nddev-remote-macos-apps-<source>.tar.gz` | `NDDev Remote.app`, `NDDev Remote Host.app` and signed-file receipts |
+| `nddev-remote-0.1.1-source.tar.gz` | All tracked source, including vendored build dependencies, lockfile, packaging, tests, documentation, deployment and observability configuration |
+| `source-sbom.spdx.json` | SPDX inventory of the source archive, not an OS or complete binary SBOM |
 | `release-notes.md` | Compatibility and readiness notes |
-| `release-manifest.json` | Source commit/tag object, target list, asset sizes and SHA-256 digests |
-| `SHA256SUMS` | Digests of the other six assets |
+| `release-manifest.json` | Exact source/tag object, native producer, binary hashes and asset inventory |
+| `SHA256SUMS` | Digests of the other seven assets |
 
-Each native archive includes `build-info.json`, `Cargo.lock` and `LICENSE`.
-Build info binds compiler, source commit, target, features and each binary's
-SHA-256. Rust is pinned to `1.98.1`; Cargo uses `--locked`. The build enables
-`rds-agent/transport-noq`, `rds-cli/transport-noq`, `rds-relay/owned-relay` and
-`rds-server/owned-relay`, alongside the default transport. Desktop features are
-excluded. All four installed programs are Rust executables; Python, Syft and
-GitHub CLI are build/verification tooling, not runtime requirements.
+The Linux and macOS executable archives enable the native viewer and both
+transport implementations. Linux adds the portal agent; macOS adds the native
+host. The repository pins Rust and dependencies. Python, Syft and GitHub CLI are
+packaging/verification tools, not installed runtime requirements.
 
-Linux uses the build host's GNU libc; older distributions are not qualified.
-macOS binaries are not Apple Developer ID signed/notarized or distributed as an
-installer. Older macOS releases, Windows and other architectures are not
-qualified. Archive determinism is tested; bit-for-bit reproducibility of Rust
-binaries across independent hosts is not claimed.
+Public Mac applications use ad hoc signatures. They are not Developer ID signed
+or notarized installers. The bundle's minimum OS declaration is macOS 13;
+older-OS acceptance requires native testing. Linux uses the build host's GNU
+libc; older distributions, Windows and other architectures are unqualified.
+Deterministic packaging does not claim bit-for-bit Rust rebuilds across hosts.
 
-## Download and verify before use
+## Verify and install
 
-Use a new, empty working directory. These commands require GitHub CLI for
-verification, not for running RDS. Choose exactly the target that matches the
-host; the example is Linux:
+Download into a new empty directory. GitHub CLI is needed for verification only.
 
 ```sh
-version=0.1.0
-repo=NDDev-OpenNetwork/remote-device-sync
+version=0.1.1
+repo=NDDev-Technocracy-OpenNetwork/nddev-remote
 target=x86_64-unknown-linux-gnu
-# For an Apple Silicon Mac: target=aarch64-apple-darwin
+# Apple Silicon: target=aarch64-apple-darwin
 gh release download "$version" --repo "$repo"
 gh attestation verify SHA256SUMS --repo "$repo" \
   --signer-workflow "$repo/.github/workflows/release.yml" \
   --source-ref "refs/tags/$version" --deny-self-hosted-runners
-# Linux:
 sha256sum -c SHA256SUMS
-# macOS equivalent: shasum -a 256 -c SHA256SUMS
-archive="remote-device-sync-$version-$target.tar.gz"
+# macOS: shasum -a 256 -c SHA256SUMS
+source=$(python3 -c 'import json; print(json.load(open("release-manifest.json"))["source_commit"])')
+archive="nddev-remote-$target-$source.tar.gz"
 gh attestation verify "$archive" --repo "$repo" \
   --signer-workflow "$repo/.github/workflows/release.yml" \
-  --source-ref "refs/tags/$version" --deny-self-hosted-runners
+  --source-ref "refs/tags/$version" --source-digest "$source" --deny-self-hosted-runners
 tar -xzf "$archive"
-"./rds-$version-$target/rds" --version
-"./rds-$version-$target/rds" --help
+./rds --version
+./nddev-remote --help
 ```
 
-The attestation source commit must match `release-manifest.json` and the
-archive's `build-info.json`. An operator with an independently approved commit
-can additionally pass `--source-digest <40-hex-commit>` to verification. A hash
-file by itself does not authenticate a download: verify its attestation first.
-The workflow verifies the published bytes and provenance after upload as well.
+Verify the Mac application archive the same way before extracting it. Move both
+applications to the chosen Applications directory. Run the host's explicit local
+setup action and grant Screen Recording and Accessibility in System Settings:
 
-Evaluate from the extracted directory before integrating with a service
-manager. Read [SSH](ssh.md), [shared sessions](local-sessions.md),
-[grant leases](grant-leases.md), [policy state](policy-state.md),
-[record state](record-state.md) and [observability](observability.md). Use the
-current `--help` for each binary. Existing running agents are not replaced by
-these instructions.
+```sh
+"NDDev Remote Host.app/Contents/MacOS/rds-agent" --request-desktop-permission
+"NDDev Remote Host.app/Contents/MacOS/rds-agent" --desktop-permission-status
+```
 
-## Compatibility and remaining acceptance gates
+Consent belongs to the installed application and device. A changed ad hoc code
+signature may require new local consent; a package never copies or bypasses a
+TCC grant. The manager remains available while the native owner waits for grants.
+On Wayland, use the [portal's local consent flow](wayland-portal.md). X11 uses its
+native session authorization. An SSH login alone grants neither screen access.
 
-This is the first published workspace release, but it breaks earlier
-unreleased development contracts: grant v3 (v2 payloads still verify), local IPC v3, signed policy/name
-formats and durable directory format 3. Old peers may refuse new scopes and
-wire messages. A supported automatic old-state migration does not yet exist.
-Do not point preview executables at an existing deployment's state directory;
-retain old keys/data and evaluate with explicit, separate enrollment and state.
+Upgrade the CLI, viewer and agent together. Keep each endpoint's keys, authorized
+peers and native consent under its existing owner. A deployment pins the archive
+digest and source in its own repository before installing; public packages
+contain no private endpoint/profile facts. A running service does not change
+merely because a release is published. Device-specific rollback must retain its
+accepted predecessor without resetting identity, keyrings or the desktop session.
 
-Native SSH, manager/session selection and single-file synchronization have
-local and CI coverage. Automated GDS grant issuance/renewal, complete managed
-viewer/sync UX, interactive desktop rendering, native macOS/Wayland desktop
-backends and input seat/key ownership remain open. Tests using synthetic
-capture/input do not qualify a physical desktop. LAN/WAN/NAT, mixed-load,
-physical-device, update/rollback and clean-machine platform qualification still
-require W0–W10 evidence. Cloudflare/WARP is not a runtime dependency or a
-qualified fallback in this release.
+## Publication contract
 
-## Maintainer publication contract
+`desktop-runtime.yml` builds and tests the three desktop executables natively on
+Linux and macOS. Its successful `main` push attests the exact executable and Mac
+application archives. PR artifacts remain test inputs, without main acceptance
+provenance. `release.yml` checks the promotion contract and generates the exact
+source archive/SBOM on PRs and `main`, with no publication authority.
 
-`release.yml` builds and assembles identical asset types on pull requests and
-`main` without publication rights. The tag path additionally requires:
+An annotated signed numeric tag may publish only when all of these hold:
 
-1. An annotated numeric tag matching `VERSION`, workspace/lockfile versions,
-   changelog and clean checked-out source; sign the tag when creating it.
-2. That exact source commit on `main`, with successful default-branch `ci`,
-   `supply-chain` and `codeql` runs, completed Rust/Actions CodeQL analyses for
-   that same revision, and no unresolved code-scanning alerts. All API pages
-   are checked. A successful scanner workflow alone does not qualify its
-   findings; individually reviewed test-only/false-positive dispositions remain
-   recorded in GitHub. No inherited evidence from a predecessor or later fix.
-3. Successful native builds on both hosts, executable version smoke checks,
-   exact archive membership, source reconstruction, digests and SPDX validation.
-4. The `release` environment's configured protections, official artifact
-   attestations, and absence of an existing release. Network/auth errors cannot
-   be interpreted as absence.
-5. One creation containing all seven assets with `prerelease=true` and
-   `latest=false`; existing release assets are never overwritten. Download,
-   inventory, checksum and attestation verification follow publication.
+1. The tag matches `VERSION`, workspace/lockfile versions, changelog and clean
+   checked-out source already on `main`.
+2. That exact main source has successful CI, security, supply-chain and desktop
+   runtime workflows, complete Rust/Actions CodeQL analyses and no open
+   code-scanning findings. All API pages are checked.
+3. Native packages come from that one successful main desktop run. Their main
+   attestations, source/toolchain/features/producer, exact archive members,
+   executable and signed-app hashes, bundle identities and embedded receipts
+   verify. Source reconstruction and a nonempty SPDX inventory verify too.
+4. Publication promotes the exact checked package bytes without recompiling or
+   signing again. The release environment grants publication rights only to the
+   tag path. Authentication/network errors cannot mean an absent release.
+5. All eight assets are created together as an engineering prerelease with
+   `latest=false`. Published assets are never overwritten. Downloaded inventory,
+   checksums and attestations are verified after publication.
 
-A failure is fixed forward before tagging. If upload/publication fails, inspect
-whether a draft or published release exists before retrying; never delete or
-replace a published version to get a green run. The source SPDX attestation
-applies only to the source archive. Provenance proves workflow origin; no SLSA
-level or Apple code-signature claim is made.
+Failures are fixed forward before tagging; tags never move. Inspect existing
+release state before retrying a failed upload. Source SPDX provenance applies
+only to the source archive; no SLSA level or Apple distribution-signature claim
+is made. The assembly helper has no network or publication authority.
 
-The release workflow's build composition is module-owned because the shared
-source-only publisher cannot attach native artifacts before publication. Shared
-Rust/CodeQL/supply-chain workflows remain pinned. Standard official Actions
-provide artifact transport/attestation; Syft is checksum/size/version pinned.
-The Python stdlib helper only assembles and validates build artifacts; it has
-no network or publication authority.
+## Native acceptance and history
+
+A green build, permission bit, Info response or input acknowledgement does not
+prove interactive desktop behavior. Qualification uses actual native pixels,
+input into an owned application, measured response and recovery after network
+and agent changes. Synthetic capture and Xvfb presentation retain their narrower
+scope. No result proves physical input-to-photon latency without that measurement.
+See [product acceptance](product.md), [platforms](platforms.md),
+[desktop packages](desktop-runtime.md) and [local sessions](local-sessions.md).
+
+The original `0.1.0` release remains unchanged in GitHub history. Its four-program
+SSH/relay/directory packages excluded desktop features and used historical
+`remote-device-sync-*` asset names. Those assets and their original provenance
+are not relabelled as the new desktop product or used as its installer.

@@ -26,10 +26,10 @@ implementation and qualification work; the [remediation plan](docs/remediation-p
 retains its acceptance criteria. The [September 24 audit](docs/reports/rds-audit-20260924.md)
 is historical defect evidence, not the current implementation status.
 
-The `0.1.0` [engineering preview](docs/releases.md) packages native SSH,
-agent, relay and directory binaries for Linux x86_64 and macOS arm64. Desktop
-features are excluded from those binaries. Read the verification, compatibility
-and remaining-qualification notes before evaluating the release.
+The `0.1.1` [engineering preview](docs/releases.md) packages the desktop-enabled
+client, agent and viewer for Linux x86_64 and macOS arm64, including separate Mac
+applications. Read the verification, OS-consent and qualification notes before
+installing. The original `0.1.0` release remains an immutable historical preview.
 
 The [native viewer](docs/native-viewer.md#tabbed-workspace) opens one workspace
 for several computers and displays. Use **Connect**, select a display or
