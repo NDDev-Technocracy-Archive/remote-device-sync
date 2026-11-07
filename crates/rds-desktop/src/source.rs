@@ -75,21 +75,19 @@ mod tests {
             Ok(())
         });
         started.await.unwrap();
-        let closing = drain_native(task, "fixture");
-        tokio::pin!(closing);
-        assert!(
-            tokio::time::timeout(
-                NATIVE_DRAIN_DIAGNOSTIC + Duration::from_secs(1),
-                &mut closing
-            )
-            .await
-            .is_err()
-        );
+        let closing = tokio::spawn(drain_native(task, "fixture"));
+        tokio::task::yield_now().await;
+        // Tokio intentionally inhibits automatic virtual-clock advancement
+        // while blocking work runs. Advance explicitly without releasing it.
+        tokio::time::advance(NATIVE_DRAIN_DIAGNOSTIC + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!closing.is_finished());
         assert!(!ended.load(Ordering::Acquire));
         tokio::time::resume();
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), closing)
             .await
+            .unwrap()
             .unwrap()
             .unwrap();
         assert!(ended.load(Ordering::Acquire));

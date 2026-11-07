@@ -325,7 +325,9 @@ async fn screen_preparation_and_withdrawal_do_not_close_the_authenticated_connec
                 source.1.store(ready, Ordering::Release);
                 let info = rds_client::info(&conn).await.unwrap();
                 assert_eq!(info.desktop.is_some(), ready);
-                assert_eq!(info.services.contains(&ServiceKind::Desktop), ready);
+                // Enabled service support and current screen inventory are
+                // separate: a pending local grant is not an unsupported OS.
+                assert!(info.services.contains(&ServiceKind::Desktop));
                 rds_client::ping(&conn, rand::random()).await.unwrap();
             }
             conn.close(0u32.into(), b"fixture done");

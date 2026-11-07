@@ -904,7 +904,7 @@ async fn serve_stream(
                         ]
                         .into_iter()
                         .filter(|k| {
-                            enabled.contains(k) && (*k != ServiceKind::Desktop || caps.is_some())
+                            enabled.contains(k) && (*k != ServiceKind::Desktop || desktop.enabled())
                         })
                         .collect()
                     },

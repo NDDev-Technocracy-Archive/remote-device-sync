@@ -147,3 +147,10 @@ its worker permit until it returns. Pending/withdrawn hosting does not close the
 resident endpoint or its outgoing session manager. Compile and deterministic
 checks do not replace native screen, owned-application input, restart or latency
 qualification on each supported device.
+
+Enabled desktop service support and current inventory are independent in Info.
+A missing inventory while the service is enabled means the local owner is not
+ready, rather than an unsupported platform. Initial native display discovery
+waits within a bounded read-only readiness budget; saved/interactive sessions
+retain their own reconnect/cancellation ownership. No discovery request opens
+local consent or replays input.

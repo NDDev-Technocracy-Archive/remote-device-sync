@@ -220,17 +220,7 @@ async fn inspect(
     else {
         anyhow::bail!("unexpected connection response");
     };
-    let Reply::Info { info, .. } = client
-        .request(Command::Info {
-            session: Some(session),
-        })
-        .await?
-    else {
-        anyhow::bail!("unexpected display inventory response");
-    };
-    let caps = info
-        .desktop
-        .context("This computer has no available desktop displays")?;
+    let caps = super::wait_for_displays(client, session).await?;
     let authenticated = client
         .snapshot()
         .await?
