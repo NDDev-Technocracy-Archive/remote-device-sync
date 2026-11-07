@@ -137,6 +137,13 @@ budgets. Inactive screens retain an initial image without continuously copying
 frames. Suspended/blank capture clears retained pixels. The same software
 producer, cadence, scaling and encoding implementation serves Wayland and macOS.
 
+The prepared primary display occupies protocol slot 0, matching the Linux
+backend and viewer defaults; secondary displays retain their native display
+IDs. Capture and input retain the actual native ID and geometry of every slot.
+A primary-display/topology change seals that owner and its existing leases
+before a replacement is prepared; an old lease cannot follow the slot onto a
+different native screen.
+
 Mac input uses evdev physical keys mapped to Apple hardware codes, per-display
 pixel-to-logical-point geometry and shared key/button holds across bounded
 control leases. Disconnect releases only that lease's holds. Display changes and

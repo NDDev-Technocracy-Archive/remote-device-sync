@@ -39,7 +39,10 @@ impl Geometry {
 
     pub fn info(self) -> rds_core::DisplayInfo {
         rds_core::DisplayInfo {
-            index: self.id,
+            // The primary-screen slot matches Linux and existing viewer
+            // defaults. Its prepared owner still retains/checks the actual
+            // native ID; secondary screens keep their distinct native IDs.
+            index: if self.primary { 0 } else { self.id },
             width: self.width,
             height: self.height,
             primary: self.primary,
@@ -74,5 +77,6 @@ mod tests {
             assert!(g.point(x, y).is_none());
         }
         assert_eq!(g.info().index, 4);
+        assert_eq!(Geometry { primary: true, ..g }.info().index, 0);
     }
 }

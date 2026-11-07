@@ -447,7 +447,7 @@ pub(crate) fn run(
             {
                 return Err(error());
             }
-            let slot = Slot::new(g.id, Some((g.width, g.height)));
+            let slot = Slot::new(g.info().index, Some((g.width, g.height)));
             streams.push(Stream::open(&display, g, slot.clone(), budget.clone())?);
             geometries.push(g);
             slots.push(slot);

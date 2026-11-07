@@ -146,20 +146,16 @@ impl MacDesktop {
         if self.stop.load(Ordering::Acquire) {
             return Err(sck_native::error());
         }
-        let g = *self
+        let (g, slot) = self
             .geometries
             .iter()
-            .find(|g| g.id == display)
-            .ok_or_else(sck_native::error)?;
-        let slot = self
-            .slots
-            .iter()
-            .find(|slot| slot.index == display)
+            .zip(&self.slots)
+            .find(|(_, slot)| slot.index == display)
             .ok_or_else(sck_native::error)?;
         if slot.extent()? != Some((g.width, g.height)) {
             return Err(sck_native::error());
         }
-        Ok((g, slot.clone()))
+        Ok((*g, slot.clone()))
     }
 }
 
@@ -174,7 +170,7 @@ impl DesktopSource for MacDesktop {
         let displays = self
             .geometries
             .iter()
-            .map(|g| self.selected(g.id).map(|(g, _)| g.info()))
+            .map(|g| self.selected(g.info().index).map(|(g, _)| g.info()))
             .collect::<Result<_, _>>()?;
         Ok(rds_core::DesktopCaps {
             displays,
