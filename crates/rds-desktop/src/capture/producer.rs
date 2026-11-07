@@ -1,6 +1,6 @@
-//! Software encoding consumes the latest owned PipeWire image per monitor.
+//! Software encoding consumes the latest owned native image per monitor.
 
-use crate::capture::latest::{Slot, Subscription};
+use crate::capture::latest::Slot;
 use crate::{
     BgraFrame, DesktopError, Encoder, FrameProducer, H264Encoder, Produced, ProducerControls,
     SessionClock,
@@ -13,7 +13,7 @@ use tokio::sync::OwnedSemaphorePermit;
 
 pub(crate) struct Producer {
     _permit: OwnedSemaphorePermit,
-    subscription: Subscription,
+    slot: Arc<Slot>,
     encoder: H264Encoder,
     extent: (u32, u32),
     height: Option<u32>,
@@ -62,7 +62,7 @@ impl Producer {
         }
         Ok(Self {
             _permit: permit,
-            subscription: slot.subscribe(),
+            slot,
             encoder: H264Encoder::new(4_000_000, 1.0 / interval.as_secs_f32())?,
             extent,
             height,
@@ -79,7 +79,7 @@ impl Producer {
         controls: &ProducerControls,
         clock: &SessionClock,
     ) -> Result<Produced, DesktopError> {
-        let slot = &self.subscription.0;
+        let slot = &self.slot;
         let idle_end = Instant::now() + Duration::from_secs(1);
         let mut image = slot.image(Duration::from_secs(1))?;
         let resumed = image.generation == self.generation;
@@ -170,5 +170,59 @@ impl FrameProducer for Producer {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Decoder, EncodedFrame, H264Decoder, RawFrame};
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn the_first_encoded_frame_contains_the_final_inactive_native_update() {
+        let slot = Slot::new(0, Some((64, 64)));
+        for value in [0, 255] {
+            slot.publish(RawFrame {
+                width: 64,
+                height: 64,
+                stride: 256,
+                data: bytes::Bytes::from([value, value, value, 255].repeat(64 * 64)),
+            });
+        }
+        let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        let mut producer = Producer::new(
+            permit,
+            slot,
+            Duration::from_millis(33),
+            Some(0),
+            Some((64, 64)),
+        )
+        .unwrap();
+        let produced = producer
+            .produce(
+                0,
+                &ProducerControls::new(4_000_000),
+                &SessionClock::default(),
+            )
+            .unwrap();
+        let decoded = H264Decoder::new()
+            .unwrap()
+            .decode(&EncodedFrame {
+                codec: produced.header.codec,
+                data: produced.payload,
+                keyframe: produced.header.keyframe,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!((decoded.width, decoded.height), (64, 64));
+        assert!(
+            decoded
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[..3].iter().all(|value| *value >= 240))
+        );
     }
 }

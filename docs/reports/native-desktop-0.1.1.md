@@ -62,3 +62,7 @@ No physical power cycle, FileVault unlock, physical Wi-Fi handover, monitor
 hotplug, permission-withdrawal journey or arbitrary compositor/hardware matrix
 is established by this report. Native startup jobs and job-restart recovery
 retain their own scope; OS login and consent remain native prerequisites.
+
+A later cold-host, static read-only case reproduced a stale first image in
+0.1.1 ([issue 206](https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote/issues/206)).
+The interactive measurements above did not expose that inactive-capture defect.

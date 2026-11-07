@@ -137,8 +137,10 @@ the outgoing manager remains usable and capture preparation resumes when ready.
 
 ScreenCaptureKit owns three native buffers per display. The prepared source
 retains only the newest tightly packed BGRA image, with aggregate pixel and byte
-budgets. Inactive screens retain an initial image without continuously copying
-frames. Suspended/blank capture clears retained pixels. The same software
+budgets. Complete native updates replace the latest image even without a
+viewer, so a later read-only connection sees the final static update without
+requiring input or unrelated desktop damage. Encoding remains demand-driven.
+Suspended/blank capture clears retained pixels. The same software
 producer, cadence, scaling and encoding implementation serves Wayland and macOS.
 
 The prepared primary display occupies protocol slot 0, matching the Linux
