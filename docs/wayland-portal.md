@@ -28,7 +28,10 @@ its lock must be ordinary, single-link, owned 0600 files; symlink components,
 changed state, duplicate IDs and competing writers are refused.
 
 The agent option `--wayland-state /absolute/private/permission.json` prepares
-consent before binding its endpoint. Its normal explicit allowlist/grant policy
+consent independently of binding its endpoint and starting its local manager.
+Pending, failed or withdrawn screen consent disables incoming screen hosting;
+the resident manager and outgoing connections keep their own lifetime. Shutdown
+still cancels and joins local preparation and native cleanup. Its explicit allowlist/grant policy
 still protects every remote connection. Omitting the flag does not allow a
 remote caller to trigger consent. X11 serving refuses a Wayland environment,
 including Xwayland's DISPLAY, instead of advertising incomplete screen access.

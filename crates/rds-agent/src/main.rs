@@ -9,6 +9,9 @@ use rds_net::{
     default_key_path,
 };
 
+#[cfg(all(target_os = "linux", feature = "portal"))]
+mod desktop_host;
+
 #[derive(Parser)]
 #[command(
     version,
@@ -389,17 +392,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     #[cfg(all(target_os = "linux", feature = "portal"))]
-    let portal = match cli.wayland_state.as_ref() {
-        Some(path) => {
-            let source = if cli.wayland_refresh_permission {
-                rds_desktop::WaylandDesktop::request_permission(path, &mut shutdown).await?
-            } else {
-                rds_desktop::WaylandDesktop::open_with_cancel(path, &mut shutdown).await?
-            };
-            Some(std::sync::Arc::new(source))
-        }
-        None => None,
-    };
+    let desktop_host = cli
+        .wayland_state
+        .as_ref()
+        .map(|path| desktop_host::Host::wayland(path.clone(), cli.wayland_refresh_permission));
     let endpoint = bind_endpoint(config).await?;
     // Binding starts local service. iroh's online() waits indefinitely for a
     // relay, including when relays are disabled or unreachable. Reachability
@@ -456,8 +452,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         ),
     );
     #[cfg(all(target_os = "linux", feature = "portal"))]
-    let agent = match &portal {
-        Some(portal) => agent.with_desktop_source(portal.clone()),
+    let agent = match &desktop_host {
+        Some(host) => agent.with_desktop_source(host.source()),
         None => agent,
     };
     let agent = std::sync::Arc::new(agent);
@@ -482,15 +478,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let result = tokio::select! {
         res = agent.run() => res,
-        res = async {
-            #[cfg(all(target_os = "linux", feature = "portal"))]
-            { match &portal {
-                Some(portal) => portal.stopped().await.map_err(anyhow::Error::from),
-                None => std::future::pending::<anyhow::Result<()>>().await,
-            } }
-            #[cfg(not(all(target_os = "linux", feature = "portal")))]
-            { std::future::pending::<anyhow::Result<()>>().await }
-        } => res,
         res = control.stopped() => {
             res.map_err(anyhow::Error::from).and_then(|()| Err(anyhow::anyhow!("local session manager stopped unexpectedly")))
         },
@@ -511,8 +498,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let ((), admin_result, control_result) =
         tokio::join!(agent.endpoint.close(), admin.close(), control.close());
     #[cfg(all(target_os = "linux", feature = "portal"))]
-    if let Some(portal) = portal {
-        portal.close().await;
+    if let Some(host) = desktop_host {
+        host.close().await?;
     }
     let result = finish_admin(result, admin_result);
     match (result, control_result) {
