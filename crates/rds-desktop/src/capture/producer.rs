@@ -219,7 +219,9 @@ mod tests {
         assert!(
             decoded
                 .data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| pixel[..3].iter().all(|value| *value >= 240))
         );
     }
