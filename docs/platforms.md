@@ -15,6 +15,10 @@ Wayland portal backend is implemented behind separate native qualification; see
 Build support is distinct from serving capability and native acceptance; see
 [the capability matrix](capability-matrix.md).
 
+The [0.1.1 native qualification](reports/native-desktop-0.1.1.md) records actual
+X11, consented Wayland and macOS screen/input journeys, native Metal presentation,
+measured latency and job/path recovery, together with their remaining boundaries.
+
 ## Selection model
 
 Desktop platform capabilities use the `rds-desktop` traits
