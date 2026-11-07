@@ -15,11 +15,6 @@ import subprocess
 import tarfile
 import tomllib
 
-SOURCE_PATHS = ("README.md", "LICENSE", "VERSION", "CHANGELOG.md", "AGENTS.md",
-                "deny.toml", "rust-toolchain.toml", "Cargo.toml", "Cargo.lock",
-                "crates", "tests", "examples", "deploy", "docs", "scripts", ".github", "ops", "packaging")
-
-
 def run(*args):
     return subprocess.check_output(args, text=True, timeout=60).strip()
 
@@ -103,13 +98,14 @@ def regular(path):
 
 
 def source_archive(version, path):
-    # git archive includes only the chosen tracked paths, including observability.
-    listing = subprocess.check_output(["git", "ls-files", "--stage", "--", *SOURCE_PATHS], text=True)
+    # Archive every tracked source root. A maintained directory allowlist can
+    # silently omit a new native build dependency such as vendor/.
+    listing = subprocess.check_output(["git", "ls-files", "--stage"], text=True)
     for line in listing.splitlines():
         require(line.split()[0] in ("100644", "100755"), "source contains a link or gitlink")
     with path.open("xb") as dest, gzip.GzipFile(fileobj=dest, filename="", mode="wb", mtime=0) as gz:
         proc = subprocess.Popen(["git", "archive", "--format=tar", f"--prefix=nddev-remote-{version}/",
-                                 "HEAD", "--", *SOURCE_PATHS], stdout=subprocess.PIPE)
+                                 "HEAD"], stdout=subprocess.PIPE)
         try:
             while data := proc.stdout.read(1024 * 1024):
                 gz.write(data)

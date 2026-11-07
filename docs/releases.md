@@ -16,7 +16,7 @@ commit in `release-manifest.json`.
 | `nddev-remote-x86_64-unknown-linux-gnu-<source>.tar.gz` | Three desktop-enabled executables, notices and `build-info.json`; native Ubuntu 24.04 x86_64 build, X11 and consented Wayland host |
 | `nddev-remote-aarch64-apple-darwin-<source>.tar.gz` | The same three executables, notices and metadata; native macOS arm64 build, ScreenCaptureKit/CGEvent host |
 | `nddev-remote-macos-apps-<source>.tar.gz` | `NDDev Remote.app`, `NDDev Remote Host.app` and signed-file receipts |
-| `nddev-remote-0.1.1-source.tar.gz` | Tracked source, lockfile, packaging, tests, documentation, deployment and observability configuration |
+| `nddev-remote-0.1.1-source.tar.gz` | All tracked source, including vendored build dependencies, lockfile, packaging, tests, documentation, deployment and observability configuration |
 | `source-sbom.spdx.json` | SPDX inventory of the source archive, not an OS or complete binary SBOM |
 | `release-notes.md` | Compatibility and readiness notes |
 | `release-manifest.json` | Exact source/tag object, native producer, binary hashes and asset inventory |

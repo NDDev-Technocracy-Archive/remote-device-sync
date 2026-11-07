@@ -33,7 +33,11 @@ class ReleaseContract(unittest.TestCase):
         self.context = contextlib.chdir(self.repo)
         self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
-        for name in release.SOURCE_PATHS:
+        roots = ('README.md', 'LICENSE', 'VERSION', 'CHANGELOG.md', 'AGENTS.md',
+                 'deny.toml', 'rust-toolchain.toml', 'Cargo.toml', 'Cargo.lock',
+                 'crates', 'tests', 'examples', 'deploy', 'docs', 'scripts', '.github',
+                 'ops', 'packaging', 'vendor')
+        for name in roots:
             path = Path(name)
             if path.suffix or name in ("LICENSE", "VERSION"):
                 path.write_text("fixture\n")
@@ -121,6 +125,17 @@ class ReleaseContract(unittest.TestCase):
         self.commit()
         with self.assertRaisesRegex(ValueError, "link or gitlink"):
             release.source_archive(VERSION, self.root / "source.tar.gz")
+
+    def test_source_includes_new_tracked_build_roots_without_an_allowlist(self):
+        Path('native-build').mkdir()
+        Path('native-build/required.h').write_text('synthetic native dependency\n')
+        self.commit()
+        archive = self.root/'complete-source.tar.gz'
+        release.source_archive(VERSION, archive)
+        with tarfile.open(archive) as bundle:
+            self.assertEqual(bundle.extractfile(f'nddev-remote-{VERSION}/native-build/required.h').read(),
+                             b'synthetic native dependency\n')
+            self.assertIn(f'nddev-remote-{VERSION}/vendor/fixture', bundle.getnames())
 
 
 class CIEvidence(unittest.TestCase):
