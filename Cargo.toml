@@ -22,7 +22,7 @@ members = [
 edition = "2024"
 version = "0.1.0"
 license = "AGPL-3.0-only"
-repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
+repository = "https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote"
 
 # Dependency direction (enforced by convention, not by cargo):
 #   rds-core      leaf: types, framing, tokens — no io, no async runtime

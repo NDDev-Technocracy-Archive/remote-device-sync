@@ -1,13 +1,24 @@
-# remote-device-sync
+# NDDev Remote
 
 <img src="crates/rds-desktop/assets/app-icon.png" width="96" alt="RDS application icon">
 
-Remote device access for the GDS estate: connect from any enrolled device to
-another over SSH, with remote desktop sessions — transport is QUIC via
-[iroh](https://crates.io/crates/iroh), so peers are Ed25519 keys, direct
-paths are hole-punched, and a self-hosted relay covers egress-only
-networks. See [docs/architecture.md](docs/architecture.md) for the research
-and protocol decisions.
+Standalone encrypted remote screens for Linux and macOS, built from the RDS
+engine. The native client is `nddev-remote`; `rds` and `rds-agent` provide its
+connection/automation and resident endpoint interfaces. Peers authenticate with
+Ed25519 identities over QUIC, direct paths are hole-punched, and an optional
+self-hosted relay supports networks that accept only outgoing connections.
+
+The product runs independently of NDS. Its Rust engine libraries also provide
+the integration boundary for an NDS-owned adapter: NDS supplies its account
+authority, telemetry and synchronization without replacing the media engine.
+See [the product boundary](docs/product.md),
+[NDS integration](docs/integration.md) and
+[desktop packages](docs/desktop-runtime.md).
+
+Linux X11 serving and the opt-in consented Wayland portal are implemented;
+the native viewer runs on Linux and macOS. macOS capture/input remain planned
+backends, so a macOS build alone does not establish macOS serving capability.
+See [docs/architecture.md](docs/architecture.md) for the protocol decisions.
 
 Current capabilities and limits are in the [capability matrix](docs/capability-matrix.md).
 The [stability plan](docs/stability-plan-20261009.md) orders remaining

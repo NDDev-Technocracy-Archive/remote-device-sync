@@ -1,8 +1,12 @@
-# remote-device-sync — agent instructions
+# nddev-remote — agent instructions
 
-Public Rust module of the NDDev-OpenNetwork estate. The product is remote
-device access and sync: SSH connectivity, remote desktop sessions and file
-synchronization between devices, brokered through the GDS server.
+Public standalone remote-screen product of NDDev OpenNetwork, retaining the
+RDS engine and its history. Start with `docs/product.md` and `docs/integration.md`.
+The native client is `nddev-remote`; the existing `rds-*` crates own the media,
+transport, session and authorization implementation. NDS integrates through an
+adapter and must not become a required account, telemetry or synchronization
+dependency of this product. Preserve existing endpoint identities, wire formats,
+consent, stored workspaces and explicit scope while migrating callers.
 
 ## What this module is
 
