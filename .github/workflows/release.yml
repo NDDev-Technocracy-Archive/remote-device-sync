@@ -1,8 +1,7 @@
 name: release
 
-# Build the same native packages in PRs, on main and from an annotated numeric
-# tag. Only the tag path can obtain publication credentials. All assets are
-# attached in one release creation; an existing release is never modified.
+# Numeric tags promote exact attested main desktop packages without rebuilding.
+# Only the tag path obtains publication credentials; existing releases are immutable.
 on:
   pull_request:
   push:
@@ -24,10 +23,6 @@ defaults:
   run:
     shell: bash
 
-env:
-  CARGO_BUILD_JOBS: "2"
-  RELEASE_FEATURES: rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay
-
 jobs:
   contract:
     runs-on: ubuntu-24.04
@@ -48,7 +43,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          python3 scripts/test_release.py
+          python3 -m unittest discover -s scripts -p 'test*release.py'
           version="$(cat VERSION)"
           tagged=()
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then tagged=(--tagged); fi
@@ -58,52 +53,6 @@ jobs:
           fi
           python3 scripts/release.py check --version "$version" "${tagged[@]}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-
-  native:
-    needs: contract
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: macos-15
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-        with:
-          toolchain: "1.98.1"
-          cache: false
-      - name: Build native Rust executables
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          cargo build --locked --release --target "$TARGET"             -p rds-cli -p rds-agent -p rds-relay -p rds-server --bins             --features "$RELEASE_FEATURES"
-      - name: Smoke and assemble native bundle
-        env:
-          VERSION: ${{ needs.contract.outputs.version }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          tagged=()
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tagged=(--tagged); fi
-          python3 scripts/release.py binary --version "$VERSION" --target "$TARGET"             --binary-dir "target/$TARGET/release" --out "$RUNNER_TEMP/native" "${tagged[@]}"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: native-${{ matrix.target }}
-          path: ${{ runner.temp }}/native/*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
 
   source:
     needs: contract
@@ -140,7 +89,7 @@ jobs:
           tar -xzf "$archive" -C "$directory" -- syft
           test -f "$directory/syft" && test ! -L "$directory/syft" && test -x "$directory/syft"
           test "$("$directory/syft" version -o json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"])')" = 1.52.0
-          "$directory/syft" scan "dir:$RUNNER_TEMP/source-bundle/source"             --source-name remote-device-sync --source-version "$VERSION"             --output "spdx-json=$RUNNER_TEMP/source-bundle/source-sbom.spdx.json"
+          "$directory/syft" scan "dir:$RUNNER_TEMP/source-bundle/source"             --source-name nddev-remote --source-version "$VERSION"             --output "spdx-json=$RUNNER_TEMP/source-bundle/source-sbom.spdx.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source
@@ -148,45 +97,14 @@ jobs:
             ${{ runner.temp }}/source-bundle/*.tar.gz
             ${{ runner.temp }}/source-bundle/source-sbom.spdx.json
           if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-
-  assemble:
-    needs: [contract, native, source]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          path: ${{ runner.temp }}/incoming
-          digest-mismatch: error
-      - name: Verify complete asset inventory and bind manifests
-        env:
-          VERSION: ${{ needs.contract.outputs.version }}
-        run: |
-          set -euo pipefail
-          tagged=()
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tagged=(--tagged); fi
-          python3 scripts/release.py finalize --version "$VERSION"             --incoming "$RUNNER_TEMP/incoming" --out "$RUNNER_TEMP/dist" "${tagged[@]}"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-dist
-          path: ${{ runner.temp }}/dist/*
-          if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
           compression-level: 0
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [contract, assemble]
+    needs: [contract, source]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     environment: release
     permissions:
       contents: write
@@ -204,12 +122,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release-dist
-          path: ${{ runner.temp }}/dist
-          digest-mismatch: error
-      - name: Recheck source, exact-commit CI and immutable publication preconditions
+      - name: Require exact successful main source and native producer
+        id: producer
         run: |
           set -euo pipefail
           python3 scripts/release.py check --version "$VERSION" --tagged
@@ -227,9 +141,43 @@ jobs:
           python3 scripts/release.py evidence --version "$VERSION" --tagged \
             --checks "$RUNNER_TEMP/checks.json" --analyses "$RUNNER_TEMP/analyses.json" \
             --alerts "$RUNNER_TEMP/alerts.json"
+          python3 - "$RUNNER_TEMP/checks.json" "$GITHUB_OUTPUT" "$commit" <<'PYTHON'
+          import json, sys
+          runs = [r for page in json.load(open(sys.argv[1])) for r in page['workflow_runs']]
+          selected = [r for r in runs if r['path'] == '.github/workflows/desktop-runtime.yml'
+                      and r['head_sha'] == sys.argv[3] and r['event'] == 'push' and r['head_branch'] == 'main']
+          assert len(selected) == 1 and selected[0]['conclusion'] == 'success'
+          with open(sys.argv[2], 'a') as output:
+              output.write('run=' + str(int(selected[0]['id'])) + '\n')
+          PYTHON
           # Do not mistake an authentication/network error for a missing release.
           code="$(curl --disable --silent --show-error --output "$RUNNER_TEMP/preflight.json" --write-out '%{http_code}'             --proto '=https' --tlsv1.2 --max-time 60             -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json'             "https://api.github.com/repos/$GH_REPO/releases/tags/$VERSION")"
           test "$code" = 404
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: desktop-*
+          path: ${{ runner.temp }}/incoming
+          run-id: ${{ steps.producer.outputs.run }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: ${{ runner.temp }}/source
+          digest-mismatch: error
+      - name: Verify native provenance and promote unchanged bytes
+        env:
+          RUNTIME_RUN: ${{ steps.producer.outputs.run }}
+        run: |
+          set -euo pipefail
+          for asset in "$RUNNER_TEMP/incoming/"desktop-*/*.tar.gz; do
+            gh attestation verify "$asset" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/desktop-runtime.yml" \
+              --source-ref refs/heads/main --source-digest "$(git rev-parse HEAD)" --deny-self-hosted-runners
+          done
+          python3 scripts/desktop_release.py --version "$VERSION" --tagged \
+            --incoming "$RUNNER_TEMP/incoming" --source "$RUNNER_TEMP/source" \
+            --runtime-run "$RUNTIME_RUN" --out "$RUNNER_TEMP/dist"
           (cd "$RUNNER_TEMP/dist" && sha256sum -c SHA256SUMS)
       - name: Attest archives, inventory and checksums
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -241,13 +189,13 @@ jobs:
       - name: Attest source SBOM (source archive only)
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/dist/remote-device-sync-${{ needs.contract.outputs.version }}-source.tar.gz
+          subject-path: ${{ runner.temp }}/dist/nddev-remote-${{ needs.contract.outputs.version }}-source.tar.gz
           sbom-path: ${{ runner.temp }}/dist/source-sbom.spdx.json
       - name: Publish complete engineering preview
         run: |
           set -euo pipefail
           test "$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)" = "$(git rev-parse "refs/tags/$VERSION")"
-          gh release create "$VERSION" --verify-tag --prerelease --latest=false             --title "RDS $VERSION — engineering preview"             --notes-file "$RUNNER_TEMP/dist/release-notes.md" "$RUNNER_TEMP/dist/"*
+          gh release create "$VERSION" --verify-tag --prerelease --latest=false             --title "NDDev Remote $VERSION — engineering preview"             --notes-file "$RUNNER_TEMP/dist/release-notes.md" "$RUNNER_TEMP/dist/"*
       - name: Verify published bytes and provenance
         run: |
           set -euo pipefail

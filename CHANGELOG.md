@@ -2,10 +2,38 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-07
+
+**Engineering preview.** NDDev Remote is the standalone OpenNetwork remote-screen
+product, retaining the RDS engine and history. Numeric releases promote the exact
+attested desktop packages built and checked on `main`; publication never rebuilds
+the executables or signs the macOS applications again.
+
+- Linux x86_64 packages contain `nddev-remote`, `rds` and `rds-agent` with X11,
+  the consented Wayland/PipeWire/EIS host and the native wgpu viewer enabled.
+  A Wayland session never silently falls back to capturing Xwayland.
+- macOS arm64 packages add ScreenCaptureKit capture and CGEvent control, and
+  separate viewer/host applications with stable bundle identifiers. Explicit
+  local Screen Recording and Accessibility grants are required. The resident
+  manager remains usable while hosting waits for local consent.
+- Native capture owners retain bounded buffers, input leases and callback
+  drains. Primary displays use protocol slot zero on both platforms. The same
+  software producer, scaling and H.264 implementation serves both native hosts.
+- NDS integrates through an adapter; standalone remote screens require no NDS
+  account, telemetry, synchronization or package-cache service.
+- Desktop artifacts bind source, toolchain, features, producer and binary/file
+  hashes. Releases include both native archives, macOS apps, exact source,
+  source SPDX SBOM, release notes, manifest and checksums. Public macOS packages
+  use ad hoc signatures and are not notarized distribution.
+- Upgrade the CLI, viewer and resident agent together. Existing endpoint keys,
+  local consent and saved workspaces remain owned by each device. Native
+  acceptance, WAN recovery and physical presentation are distinct from a green
+  build; see [the release contract](docs/releases.md).
+
 - File send/receive now reuse the local agent's identity and selected or explicit
   sessions. Per-transfer uni-stream IDs isolate cancellation and late data;
   limits reserve control capacity and preserve unrelated TCP/SSH streams.
-- Local IPC v4 requires upgrading CLI and agent together. Managed transfers
+- Local IPC v5 requires upgrading CLI and agent together. Managed transfers
   require the new remote `SyncTransfer` extension; no legacy downgrade occurs.
 - Safe transfer duration/outcome telemetry is collected by the Vector pipeline.
 

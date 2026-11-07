@@ -5,8 +5,9 @@ commit, the repository's Rust toolchain and the committed dependency lock.
 Both include the native viewer, agent and the existing optional transport.
 The Linux agent also includes the consented Wayland portal backend.
 
-These packages are separate from the numeric engineering-preview release assets,
-whose original feature and publication contracts stay in `release.yml`.
+Numeric engineering-preview releases promote these exact checked `main` packages
+without rebuilding them. The original `0.1.0` assets retain their historical
+feature contract; subsequent releases follow [the desktop release contract](releases.md).
 The workflow emits `desktop-<target>` artifacts with an archive, `build-info.json`
 and `SHA256SUMS`. The archive contains exactly `rds`, `rds-agent`, `nddev-remote`
 and the same build metadata. Metadata records the source commit, target, features,
