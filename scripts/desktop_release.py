@@ -63,6 +63,9 @@ def verify_runtime(directory, target, version, commit, channel, runtime_run):
                            features=FEATURES[target]).items():
         require(info.get(key) == value, 'desktop build identity mismatch: ' + key)
     require(set(info.get('binaries', {})) == BINARIES, 'desktop binary inventory mismatch')
+    notices = json.loads(Path('packaging/notices.json').read_text())
+    require(info.get('notices') == {name: digest(Path(path)) for name, path in notices.items()},
+            'desktop notice inventory mismatch')
     compiler = info.get('rustc', '')
     require(compiler.startswith('rustc ' + channel + ' ') and '\nhost: ' + target + '\n' in compiler,
             'desktop native compiler mismatch')
@@ -71,13 +74,18 @@ def verify_runtime(directory, target, version, commit, channel, runtime_run):
                        'GITHUB_REF': 'refs/heads/main', 'GITHUB_RUN_ID': str(runtime_run)}.items():
         require(build.get(key) == value, 'desktop producer mismatch: ' + key)
     with tarfile.open(directory / name, 'r:gz') as tar:
-        members(tar, BINARIES | {'build-info.json'})
+        members(tar, BINARIES | set(notices) | {'build-info.json'})
         require(json_member(tar, 'build-info.json') == info, 'desktop metadata copies differ')
         for binary in BINARIES:
             require(tar.getmember(binary).mode == 0o755, 'desktop executable mode mismatch')
             with tar.extractfile(binary) as stream:
                 require(hashlib.file_digest(stream, 'sha256').hexdigest() == info['binaries'][binary],
                         'desktop executable digest mismatch')
+        for notice in notices:
+            require(tar.getmember(notice).mode == 0o644, 'desktop notice mode mismatch')
+            with tar.extractfile(notice) as stream:
+                require(hashlib.file_digest(stream, 'sha256').hexdigest() == info['notices'][notice],
+                        'desktop notice digest mismatch')
     return name, info
 
 
@@ -85,6 +93,9 @@ def verify_apps(directory, runtime, commit, version):
     name = f'nddev-remote-macos-apps-{commit}.tar.gz'
     checksum(directory, 'apps-SHA256SUMS', name)
     settings = json.loads(Path('packaging/macos.json').read_text())
+    notices = json.loads(Path('packaging/notices.json').read_text())
+    resources = {settings['icon']['name']: settings['icon']['source']}
+    resources.update({'Notices/' + name: path for name, path in notices.items()})
     require((directory / 'apps-build-info.json').stat().st_size <= 128 * 1024, 'oversized macOS metadata')
     info = json.loads((directory / 'apps-build-info.json').read_text())
     for key, value in dict(schema_version=1, runtime=runtime, signing='ad-hoc', notarized=False,
@@ -96,6 +107,7 @@ def verify_apps(directory, runtime, commit, version):
         prefix = app['name'] + '.app/Contents/'
         expected |= {prefix + suffix for suffix in ('Info.plist', 'Resources/build-info.json',
                                                    '_CodeSignature/CodeResources', 'MacOS/' + app['executable'])}
+        expected |= {prefix + 'Resources/' + name for name in resources}
         applications[app['name']] = app
     require(set(info.get('files', {})) == expected, 'macOS application file inventory mismatch')
     records = info.get('applications', [])
@@ -118,11 +130,15 @@ def verify_apps(directory, runtime, commit, version):
                     'macOS executable mode mismatch')
             require(json_member(tar, prefix + 'Resources/build-info.json') == runtime,
                     'macOS embedded runtime mismatch')
+            for resource, source_path in resources.items():
+                require(info['files'][prefix + 'Resources/' + resource] == digest(Path(source_path)),
+                        'macOS source resource mismatch')
             require(tar.getmember(prefix + 'Info.plist').size <= 64 * 1024, 'oversized application plist')
             plist = plistlib.loads(tar.extractfile(prefix + 'Info.plist').read())
             for key, value in dict(CFBundleIdentifier=app['identifier'], CFBundleName=app['name'],
                                    CFBundleDisplayName=app['name'], NSHighResolutionCapable=True,
                                    CFBundleExecutable=app['executable'], CFBundleVersion=version,
+                                   CFBundleIconFile=settings['icon']['name'],
                                    CFBundleShortVersionString=version, CFBundlePackageType='APPL',
                                    LSMinimumSystemVersion=settings['minimum_os'], LSUIElement=app['background']).items():
                 require(plist.get(key) == value, 'macOS application plist mismatch: ' + key)

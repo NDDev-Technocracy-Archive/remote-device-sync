@@ -1,5 +1,9 @@
 {
   "minimum_os": "13.0",
+  "icon": {
+    "name": "NDDevRemote.icns",
+    "source": "crates/rds-desktop/assets/app-icon.icns"
+  },
   "applications": [
     {
       "name": "NDDev Remote",

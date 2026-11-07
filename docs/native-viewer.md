@@ -275,7 +275,7 @@ launcher; its source and reproducible derivatives live in the desktop assets.
 cargo build --release -p rds-cli --features desktop
 rds desktop <ticket-or-device> --max-fps 60
 rds session desktop --session <session-id>
-rds-viewer <ticket-or-device>
+nddev-remote <ticket-or-device>
 ```
 
 These commands reuse the local agent's endpoint and same-UID session manager.
@@ -390,7 +390,7 @@ above media frames. TCP/sync bodies keep their existing priority. This local
 stream scheduling cannot overtake datagrams already emitted or bypass congestion
 and flow-control limits; complete mixed-load/renewal acceptance remains separate.
 
-The separate `rds-viewer` accepts `--control-dir` and `--grant-file`. The tabbed
+The separate `nddev-remote` accepts `--control-dir` and `--grant-file`. The tabbed
 application uses saved workspace preferences or the optional legacy private
 `viewer.json` beside the endpoint key. The explicit separate-window mode retains
 the selected managed-session fallback:
@@ -403,19 +403,12 @@ An optional `grant_file` names a bounded local signed-grant file. Explicit
 command-line values override the configuration. This file contains deployment
 choices and is not shipped with an application bundle.
 
-Build a new local macOS application:
-
-```sh
-python3 scripts/package-viewer.py --binary target/release/rds-viewer \
-  --output "$HOME/Applications/RDS.app"
-```
-
-The package contains the native executable, generic Info.plist and the shared
-ICNS application icon. Dock and Finder use the bundle icon; direct CLI launches
-set the same application icon through the native AppKit adapter. Its local
-ad-hoc signature is not Developer ID signing or notarization. The engineering
-preview release archives retain their documented binary contents; adding a
-local viewer does not rewrite an existing published archive.
+Use the verified `NDDev Remote.app` and `NDDev Remote Host.app` bundles from
+[the native desktop package](desktop-runtime.md). Their one bundle builder
+preserves stable identities, the shared application icon and font notices;
+releases promote the exact checked native archive without rebuilding it.
+Public packages use ad hoc signatures and are not notarized distribution.
+Direct CLI launches set the same embedded icon through the AppKit adapter.
 
 For a bounded run, use `--duration 30 --report <new-file.json>`. Reports contain
 received/submitted/replaced frames, first/last frame timing, video dimensions,
@@ -453,7 +446,7 @@ while waiting. This also bounds low-FPS diagnostic sessions during active damage
 `RUST_LOG=rds_desktop=debug` reports bitrate changes and deadline-miss counts;
 the `trace` level adds frame sizes and sender stage durations, without pixels.
 
-For a Linux desktop launcher after installing `rds-viewer` on PATH:
+For a Linux desktop launcher after installing `nddev-remote` on PATH:
 
 ```sh
 install -Dm644 crates/rds-desktop/assets/app-icon-512.png \
@@ -555,7 +548,7 @@ timestamps from different hosts require clock qualification before subtraction.
 Concurrent desktops must also be distinguished by their owning connection and
 attempt context, rather than joining an input sequence alone.
 
-`rds-viewer` automatically writes private logs under `viewer-logs` beside the
+`nddev-remote` automatically writes private logs under `viewer-logs` beside the
 endpoint configuration (normally `~/.config/remote-device-sync/viewer-logs`).
 Each log part is 8 MiB maximum; ten generated parts are retained. Files are 0600
 in a validated 0700 directory without symlink components. The existing bounded

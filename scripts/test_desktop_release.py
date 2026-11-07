@@ -26,6 +26,7 @@ class DesktopPromotion(unittest.TestCase):
         self.incoming, self.source = self.root/'incoming', self.root/'source'
         self.incoming.mkdir()
         self.runtime_run = '42'
+        notices = json.loads(Path('packaging/notices.json').read_text())
         self.runtimes = {}
         self.payloads = {}
         for target in desktop.FEATURES:
@@ -36,10 +37,12 @@ class DesktopPromotion(unittest.TestCase):
                         features=desktop.FEATURES[target],
                         rustc='rustc 1.98.1 (fixture)\nhost: '+target+'\nrelease: 1.98.1',
                         binaries={name: hashlib.sha256(value).hexdigest() for name,value in binaries.items()},
+                        notices={name:desktop.digest(Path(path)) for name,path in notices.items()},
                         build=dict(GITHUB_REPOSITORY=desktop.REPOSITORY, GITHUB_WORKFLOW='desktop-runtime',
                                    GITHUB_REF='refs/heads/main', GITHUB_RUN_ID=self.runtime_run))
             self.runtimes[target] = info
             payload = {name:(value,0o755) for name,value in binaries.items()}
+            payload.update({name:(Path(path).read_bytes(),0o644) for name,path in notices.items()})
             payload['build-info.json'] = (encoded(info),0o644)
             self.payloads[target] = payload
             self.write_runtime(target)
@@ -51,6 +54,7 @@ class DesktopPromotion(unittest.TestCase):
             prefix = app['name']+'.app/Contents/'
             plist = dict(CFBundleIdentifier=app['identifier'], CFBundleName=app['name'],
                          CFBundleDisplayName=app['name'], NSHighResolutionCapable=True,
+                         CFBundleIconFile=settings['icon']['name'],
                          CFBundleExecutable=app['executable'], CFBundleVersion=fixture.VERSION,
                          CFBundleShortVersionString=fixture.VERSION, CFBundlePackageType='APPL',
                          LSMinimumSystemVersion=settings['minimum_os'], LSUIElement=app['background'])
@@ -59,6 +63,10 @@ class DesktopPromotion(unittest.TestCase):
             self.apps[prefix+'Resources/build-info.json'] = (encoded(runtime),0o644)
             self.apps[prefix+'_CodeSignature/CodeResources'] = (b'synthetic signature resources',0o644)
             self.apps[prefix+'MacOS/'+app['executable']] = (binary,0o755)
+            resources = {settings['icon']['name']:settings['icon']['source']}
+            resources.update({'Notices/'+name:path for name,path in notices.items()})
+            self.apps.update({prefix+'Resources/'+name:(Path(path).read_bytes(),0o644)
+                              for name,path in resources.items()})
             records.append(dict(name=app['name'],identifier=app['identifier'],
                                 executable_sha256=hashlib.sha256(binary).hexdigest()))
         self.apps_info = dict(schema_version=1, runtime=runtime, signing='ad-hoc', notarized=False,
@@ -154,6 +162,18 @@ class DesktopPromotion(unittest.TestCase):
         self.payloads[target]['extra'] = (b'extra',0o644)
         self.write_runtime(target)
         with self.assertRaisesRegex(ValueError,'archive member mismatch'): self.promote()
+
+    def test_native_notices_and_mac_resource_bytes_are_bound_to_source(self):
+        target = 'x86_64-unknown-linux-gnu'
+        self.payloads[target]['LICENSE'] = (b'substituted notice',0o644)
+        self.write_runtime(target)
+        with self.assertRaisesRegex(ValueError,'notice digest mismatch'): self.promote()
+        self.payloads[target]['LICENSE'] = (Path('LICENSE').read_bytes(),0o644)
+        self.write_runtime(target)
+        filename = 'NDDev Remote.app/Contents/Resources/NDDevRemote.icns'
+        self.apps[filename] = (b'substituted icon',0o644)
+        self.write_apps()
+        with self.assertRaisesRegex(ValueError,'source resource mismatch'): self.promote()
 
     def test_mac_bundle_identity_embedded_source_and_builder_are_bound(self):
         original = copy.deepcopy(self.apps)
