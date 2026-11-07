@@ -106,25 +106,28 @@ impl Owner for rds_desktop::MacDesktop {
 impl Host {
     #[cfg(all(target_os = "linux", feature = "portal"))]
     pub fn wayland(path: PathBuf, refresh: bool) -> Self {
-        Self::start("Wayland", move |stop| async move {
-            if refresh {
-                rds_desktop::WaylandDesktop::request_permission(&path, cancelled(stop)).await
-            } else {
-                rds_desktop::WaylandDesktop::open_with_cancel(&path, cancelled(stop)).await
+        Self::start("Wayland", move |stop, first| {
+            let path = path.clone();
+            async move {
+                if refresh && first {
+                    rds_desktop::WaylandDesktop::request_permission(&path, cancelled(stop)).await
+                } else {
+                    rds_desktop::WaylandDesktop::open_with_cancel(&path, cancelled(stop)).await
+                }
             }
         })
     }
 
     #[cfg(all(target_os = "macos", feature = "desktop"))]
     pub fn macos() -> Self {
-        Self::start("macOS", |stop| {
+        Self::start("macOS", |stop, _first| {
             rds_desktop::MacDesktop::open_with_cancel(cancelled(stop))
         })
     }
 
     fn start<B, F>(
         backend: &'static str,
-        prepare: impl FnOnce(watch::Receiver<bool>) -> F + Send + 'static,
+        mut prepare: impl FnMut(watch::Receiver<bool>, bool) -> F + Send + 'static,
     ) -> Self
     where
         B: Owner,
@@ -134,31 +137,50 @@ impl Host {
         let current = source.clone();
         let (stop, stopping) = watch::channel(false);
         let task = tokio::spawn(async move {
-            let closed = match prepare(stopping.clone()).await {
-                Ok(owner) => {
-                    let owner = Arc::new(owner);
-                    current.set(Some(owner.clone()));
-                    tracing::info!(backend, "screen hosting ready");
-                    tokio::select! {
-                        _ = cancelled(stopping.clone()) => {},
-                        result = owner.stopped() => {
-                            tracing::warn!(backend, ?result, "screen hosting stopped; local sessions remain available");
-                        },
+            const RECOVERY_DELAY: Duration = Duration::from_secs(1);
+            let mut first = true;
+            let mut closed = Ok(());
+            while !*stopping.borrow() {
+                let owner = match prepare(stopping.clone(), first).await {
+                    Ok(owner) => Arc::new(owner),
+                    Err(error) => {
+                        // Failed/cancelled setup may reflect a denied local
+                        // grant. Never loop permission requests after that.
+                        tracing::warn!(backend, %error, "screen hosting unavailable; local sessions remain available");
+                        break;
                     }
-                    current.set(None);
-                    let closed = owner.close().await;
-                    if let Err(error) = &closed {
-                        tracing::warn!(backend, %error, "native screen cleanup failed");
-                    }
-                    closed
+                };
+                first = false;
+                current.set(Some(owner.clone()));
+                tracing::info!(backend, "screen hosting ready");
+                let restore = tokio::select! {
+                    biased;
+                    _ = cancelled(stopping.clone()) => false,
+                    result = owner.stopped() => {
+                        tracing::warn!(backend, ?result, "screen hosting stopped; local sessions remain available");
+                        result.is_err()
+                    },
+                };
+                current.set(None);
+                closed = owner.close().await;
+                if let Err(error) = &closed {
+                    tracing::warn!(backend, %error, "native screen cleanup failed");
+                    break;
                 }
-                Err(error) => {
-                    tracing::warn!(backend, %error, "screen hosting unavailable; local sessions remain available");
-                    Ok(())
+                if !restore {
+                    break;
                 }
-            };
-            // Revocation is final for this local preparation. Never open a new
-            // consent dialog because a remote peer asks for another screen.
+                // A native fault restores only after the old owner drains.
+                // Explicit revocation is a clean stop; macOS preparation also
+                // preflights grants before any native capture call. A refresh
+                // request is never repeated by this recovery loop.
+                tokio::select! {
+                    biased;
+                    _ = cancelled(stopping.clone()) => break,
+                    _ = tokio::time::sleep(RECOVERY_DELAY) => {},
+                }
+            }
+            current.set(None);
             cancelled(stopping).await;
             closed
         });
@@ -197,7 +219,11 @@ impl Drop for Host {
 mod tests {
     use super::*;
 
-    struct Ready;
+    #[derive(Default)]
+    struct Ready {
+        fault: bool,
+        closes: Arc<std::sync::atomic::AtomicUsize>,
+    }
     impl DesktopSource for Ready {
         fn capabilities(&self) -> Result<rds_core::DesktopCaps, DesktopError> {
             Ok(rds_core::DesktopCaps {
@@ -224,6 +250,49 @@ mod tests {
         }
     }
 
+    impl Owner for Ready {
+        async fn stopped(&self) -> Result<(), DesktopError> {
+            if self.fault {
+                Err(unavailable())
+            } else {
+                std::future::pending().await
+            }
+        }
+        async fn close(&self) -> Result<(), DesktopError> {
+            self.closes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_fault_restores_only_after_the_previous_owner_drains() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let closes = Arc::new(AtomicUsize::new(0));
+        let opened = Arc::new(tokio::sync::Notify::new());
+        let closed = closes.clone();
+        let ready = opened.clone();
+        let host = Host::start("fixture", move |_stop, first| {
+            let closes = closed.clone();
+            if !first {
+                assert_eq!(closes.load(Ordering::SeqCst), 1);
+                ready.notify_one();
+            }
+            async move {
+                Ok(Ready {
+                    fault: first,
+                    closes,
+                })
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), opened.notified())
+            .await
+            .unwrap();
+        assert_eq!(host.source().capabilities().unwrap().displays[0].index, 7);
+        host.close().await.unwrap();
+        assert_eq!(closes.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn pending_and_withdrawn_screen_never_fall_back_to_an_ambient_display() {
         let slot = Slot::default();
@@ -232,7 +301,7 @@ mod tests {
             slot.producer(7, Duration::from_millis(16), None, Some((640, 480)))
                 .is_err()
         );
-        slot.set(Some(Arc::new(Ready)));
+        slot.set(Some(Arc::new(Ready::default())));
         assert_eq!(slot.capabilities().unwrap().displays[0].index, 7);
         slot.set(None);
         assert!(slot.capabilities().is_err());

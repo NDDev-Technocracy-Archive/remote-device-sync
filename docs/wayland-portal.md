@@ -171,3 +171,9 @@ diagnostic. After the same diagnostic boundary, the owner closes the portal to
 revoke native peers and continues joining them. The finished signal and state
 lock are released only after those workers return; a timeout cannot impersonate
 completed native cleanup.
+
+After a typed native failure, the local host supervisor drains the old owner and
+attempts restoration from the same state, while the endpoint and outgoing
+manager stay alive. Fresh-consent refresh is attempted only on the initial
+explicit invocation. Clean revocation is final; a failed/denied preparation does
+not loop prompts. macOS recovery likewise preflights its existing OS grants.
