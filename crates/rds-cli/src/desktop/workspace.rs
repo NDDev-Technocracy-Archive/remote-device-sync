@@ -2,7 +2,7 @@
 use super::{Options, Resolution, native, read_grant};
 use anyhow::Context;
 use rds_client::local::Client;
-use rds_core::local::{Command, Reply};
+use rds_core::local::Reply;
 use rds_desktop::render::workspace::{DeviceView, TabId, TabSpec, VideoSize, WorkspaceModel};
 use rds_desktop::render::{Viewer, WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
 use serde::{Deserialize, Serialize};
