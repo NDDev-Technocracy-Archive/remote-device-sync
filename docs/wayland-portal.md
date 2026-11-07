@@ -89,7 +89,10 @@ Each prepared source admits at most eight simultaneous software encoders and
 64 controlling leases; each native worker family has four process-wide slots.
 Encoder permits stay with their producers until actual capture work ends.
 Each monitor retains its newest owned BGRA image. Inactive subscriptions dequeue
-native buffers without continuously copying full-resolution images. Declared
+native buffers without continuously copying full-resolution images. The explicit source FPS cap is negotiated with PipeWire. Every active native
+update is retained, including a final update arriving early in a variable-rate
+burst; there is no second lossy copy deadline. Encoding consumes the latest
+image at its own cadence. Declared
 monitor pixels and retained image bytes are bounded separately. Padded/offset
 single-plane BGRA/BGRx buffers are checked before copying; unsupported native
 layouts fail closed. Native capture timestamps describe local PipeWire ingress,
