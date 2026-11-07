@@ -263,7 +263,7 @@ impl InputSink for Sink {
         if group.stopped.load(Ordering::Acquire)
             || !available()
             || !CGPreflightScreenCaptureAccess()
-            || event.display_id != self.geometry.id
+            || event.display_id != self.geometry.info().index
             || sck_native::geometry(self.geometry.id).ok() != Some(self.geometry)
         {
             return Err(error());
