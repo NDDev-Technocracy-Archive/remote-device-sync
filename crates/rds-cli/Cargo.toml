@@ -43,7 +43,7 @@ name = "rds"
 path = "src/main.rs"
 
 [[bin]]
-name = "rds-viewer"
+name = "nddev-remote"
 path = "src/viewer_main.rs"
 required-features = ["desktop"]
 

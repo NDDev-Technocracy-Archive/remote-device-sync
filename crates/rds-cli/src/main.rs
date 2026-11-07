@@ -20,7 +20,7 @@ mod ssh;
 #[command(
     name = "rds",
     version,
-    about = "Remote device access for the GDS estate"
+    about = "NDDev Remote connection and automation CLI"
 )]
 struct Cli {
     /// New private log file (8 MiB cap); required for SSH with JSON telemetry.

@@ -43,7 +43,7 @@ def main():
     if not any(f in features for f in ['rds-agent/desktop', 'rds-agent/portal']):
         raise SystemExit('the desktop runtime requires its agent feature')
     payload = {}
-    for name in ['rds', 'rds-agent', 'rds-viewer']:
+    for name in ['rds', 'rds-agent', 'nddev-remote']:
         path = args.binary_dir / name
         info = path.lstat()
         if (not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK)
@@ -65,7 +65,7 @@ def main():
     metadata = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()
     payload['build-info.json'] = metadata
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
-    archive = args.out / ('rds-desktop-' + args.target + '-' + source + '.tar.gz')
+    archive = args.out / ('nddev-remote-' + args.target + '-' + source + '.tar.gz')
     with archive.open('xb') as raw:
         with gzip.GzipFile(fileobj=raw, mode='wb', filename='', mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode='w') as bundle:

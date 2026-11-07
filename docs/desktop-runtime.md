@@ -8,10 +8,12 @@ The Linux agent also includes the consented Wayland portal backend.
 These packages are separate from the numeric engineering-preview release assets,
 whose original feature and publication contracts stay in `release.yml`.
 The workflow emits `desktop-<target>` artifacts with an archive, `build-info.json`
-and `SHA256SUMS`. The archive contains exactly `rds`, `rds-agent`, `rds-viewer`
+and `SHA256SUMS`. The archive contains exactly `rds`, `rds-agent`, `nddev-remote`
 and the same build metadata. Metadata records the source commit, target, features,
 compiler identity, binary hashes and the native GitHub build identity.
-Successful `main` push builds attest the archive through GitHub's build provenance;
+Successful `main` push builds attest the archive in a separate job that downloads
+verified artifacts and never executes build inputs. Native build jobs have only
+read access. The attestation uses GitHub's build provenance;
 pull-request artifacts have no acceptance attestation.
 
 Verify the downloaded artifact digest and its archive checksum, then verify the

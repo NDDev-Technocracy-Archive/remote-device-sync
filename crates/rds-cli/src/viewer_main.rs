@@ -6,7 +6,7 @@ use rds_core::local::{Command, Reply};
 use std::{num::NonZeroU32, path::PathBuf};
 
 #[derive(Parser)]
-#[command(version, about = "Native RDS remote desktop")]
+#[command(version, about = "NDDev Remote — native remote screens")]
 struct Cli {
     target: Vec<String>,
     #[arg(long)]
