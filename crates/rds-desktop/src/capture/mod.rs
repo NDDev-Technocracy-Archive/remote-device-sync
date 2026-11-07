@@ -70,11 +70,13 @@ pub fn probe(screen: u32) -> Result<Box<dyn Capturer>, DesktopError> {
 #[cfg(any(test, all(target_os = "linux", feature = "portal")))]
 pub(crate) mod frame;
 #[cfg(any(
+    all(test, feature = "x11"),
     all(target_os = "linux", feature = "portal"),
     all(target_os = "macos", feature = "host")
 ))]
 pub(crate) mod latest;
 #[cfg(any(
+    all(test, feature = "x11"),
     all(target_os = "linux", feature = "portal"),
     all(target_os = "macos", feature = "host")
 ))]

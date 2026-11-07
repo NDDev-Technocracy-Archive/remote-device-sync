@@ -2,10 +2,7 @@
 //! inventory and owned BGRA images cross the service boundary.
 #![allow(unsafe_code)]
 
-use super::{
-    geometry::Geometry,
-    latest::{Image, Slot},
-};
+use super::{geometry::Geometry, latest::Slot};
 use crate::{DesktopError, RawFrame};
 use block2::RcBlock;
 use bytes::Bytes;
@@ -28,7 +25,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) fn error() -> DesktopError {
@@ -128,7 +125,6 @@ fn copy_image(
     sample: &CMSampleBuffer,
     g: Geometry,
     budget: &Arc<Semaphore>,
-    needs_pixels: bool,
 ) -> Result<Update, DesktopError> {
     // SAFETY: ScreenCaptureKit's per-sample attachment array is toll-free
     // bridged to NSArray<NSDictionary<SCStreamFrameInfo, NSNumber>>. The
@@ -157,7 +153,7 @@ fn copy_image(
     }) {
         return Ok(Update::Empty);
     }
-    if status != Some(SCFrameStatus::Complete.0) || !needs_pixels {
+    if status != Some(SCFrameStatus::Complete.0) {
         return Ok(Update::Unchanged);
     }
     // SAFETY: The sample is live for the callback; image_buffer retains its
@@ -230,31 +226,18 @@ define_class!(
             }
             autoreleasepool(|_| {
                 let state = self.ivars();
-                let needs_pixels = match state.slot.state.lock() {
-                    Ok(current) if !current.failed => {
-                        current.image.is_none() || state.slot.readers.load(Ordering::Acquire) > 0
-                    }
-                    _ => return,
-                };
+                if state.slot.extent().is_err() {
+                    return;
+                }
                 if geometry(state.geometry.id).ok() != Some(state.geometry)
                     || !CGPreflightScreenCaptureAccess()
                 {
                     state.slot.fail();
                     return;
                 }
-                match copy_image(sample, state.geometry, &state.budget, needs_pixels) {
+                match copy_image(sample, state.geometry, &state.budget) {
                     Ok(Update::Frame(frame)) => {
-                        if let Ok(mut current) = state.slot.state.lock()
-                            && !current.failed
-                        {
-                            current.generation = current.generation.saturating_add(1);
-                            current.image = Some(Arc::new(Image {
-                                frame,
-                                received: Instant::now(),
-                                generation: current.generation,
-                            }));
-                        }
-                        state.slot.changed.notify_all();
+                        state.slot.publish(frame);
                     }
                     Ok(Update::Empty) => {
                         if let Ok(mut current) = state.slot.state.lock() {

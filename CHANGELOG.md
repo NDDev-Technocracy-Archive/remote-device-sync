@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-08
+
+**Engineering preview.** This patch corrects the first image of a newly opened
+or restored native screen, including a read-only view after capture was idle.
+
+- PipeWire and ScreenCaptureKit retain the last complete native update even
+  without an encoder or viewer. A final static desktop change no longer waits
+  for pointer input or unrelated later damage before a new viewer can see it.
+- Both native callbacks use one bounded latest-image publisher. Obsolete pixels
+  are released on replacement/close; a late native completion cannot revive a
+  closed owner. Encoding remains demand-driven, with the existing native rate,
+  pixel, byte and worker budgets.
+- Keys, wire formats, saved workspaces and supported native entrypoints are
+  unchanged. Mac hosting still requires normal local Screen Recording and
+  Accessibility grants for the installed code signature. Packages retain the
+  unchanged-byte promotion and provenance contract from 0.1.1.
+
 ## [0.1.1] - 2026-11-07
 
 **Engineering preview.** NDDev Remote is the standalone OpenNetwork remote-screen

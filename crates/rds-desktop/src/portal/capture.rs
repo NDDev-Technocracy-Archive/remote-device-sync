@@ -3,7 +3,7 @@
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pipewire as pw;
 use pw::{properties::properties, spa};
@@ -31,7 +31,7 @@ fn copy_interval(value: Option<&str>) -> Result<Option<Duration>, DesktopError> 
         .transpose()
 }
 
-pub(super) use crate::capture::latest::{Image, Slot};
+pub(super) use crate::capture::latest::Slot;
 
 pub(super) struct Group {
     pub slots: Vec<Arc<Slot>>,
@@ -304,19 +304,13 @@ fn run(
                 let Some(mut buffer) = stream.dequeue_buffer() else {
                     return;
                 };
-                // Retain one initial image for inventory/first presentation;
-                // inactive monitor tabs must not copy full-resolution pixels
-                // continuously. The native buffer still returns to PipeWire.
-                if let Ok(state) = data.slot.state.lock()
-                    && (state.failed
-                        || (data.slot.readers.load(Ordering::Acquire) == 0
-                            && state.image.is_some()))
-                {
+                if data.slot.extent().is_err() {
                     return;
                 }
                 // A variable-rate source may stop after this buffer. Copy every
-                // active update: dropping an early final buffer freezes pixels
-                // until some unrelated future desktop change. The native rate
+                // update, including an inactive monitor's final changed image:
+                // the next viewer must not depend on unrelated future damage.
+                // The native rate
                 // is negotiated upstream; encoding has its own newest-wins cadence.
                 // Dropping the guard returns this buffer to PipeWire.
                 let extent = (data.format.size().width, data.format.size().height);
@@ -361,18 +355,7 @@ fn run(
                     pixels: frame.data,
                     _permit: permit,
                 });
-                if let Ok(mut state) = data.slot.state.lock() {
-                    if state.failed {
-                        return;
-                    }
-                    state.generation = state.generation.saturating_add(1);
-                    state.image = Some(Arc::new(Image {
-                        frame,
-                        received: Instant::now(),
-                        generation: state.generation,
-                    }));
-                }
-                data.slot.changed.notify_all();
+                data.slot.publish(frame);
             })
             .register()
             .map_err(|_| failure())?;
