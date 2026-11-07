@@ -215,6 +215,7 @@ define_class!(
     // SAFETY: NSObject has no subclassing requirements; all ivars are Send +
     // Sync Rust state. Callback methods touch them only through atomics/locks.
     #[unsafe(super = NSObject)]
+    #[name = "NDDevRemoteScreenOutput"]
     #[ivars = OutputState]
     struct Output;
     // SAFETY: NSObjectProtocol adds no requirements.

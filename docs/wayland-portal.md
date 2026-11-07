@@ -32,8 +32,11 @@ consent independently of binding its endpoint and starting its local manager.
 Pending, failed or withdrawn screen consent disables incoming screen hosting;
 the resident manager and outgoing connections keep their own lifetime. Shutdown
 still cancels and joins local preparation and native cleanup. Its explicit allowlist/grant policy
-still protects every remote connection. Omitting the flag does not allow a
-remote caller to trigger consent. X11 serving refuses a Wayland environment,
+still protects every remote connection. When the local agent starts a desktop service in a Wayland session without an
+explicit state path, it uses `<key-file-with-wayland-extension>/permission.json`.
+X11 starts no portal. Existing explicit state paths retain their tokens and
+display history. This selection happens only during local startup; a remote
+caller cannot trigger consent. X11 serving refuses a Wayland environment,
 including Xwayland's DISPLAY, instead of advertising incomplete screen access.
 The shared capture/input inventory also checks the server's XWAYLAND extension
 when an SSH/service environment omits session variables.

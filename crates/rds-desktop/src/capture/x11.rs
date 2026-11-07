@@ -361,9 +361,7 @@ pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
 }
 
 fn reject_wayland() -> Result<(), DesktopError> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t.eq_ignore_ascii_case("wayland"))
-    {
+    if crate::wayland_session() {
         return Err(DesktopError::Capture(
             "Wayland requires an explicitly prepared portal backend".into(),
         ));

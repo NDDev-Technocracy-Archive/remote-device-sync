@@ -28,6 +28,10 @@ mod control_observation;
 mod control_read;
 mod decode_work;
 mod delivery_rate;
+#[cfg(target_os = "linux")]
+mod environment;
+#[cfg(target_os = "linux")]
+pub use environment::wayland_session;
 pub mod input;
 pub mod mailbox;
 mod media_repair;

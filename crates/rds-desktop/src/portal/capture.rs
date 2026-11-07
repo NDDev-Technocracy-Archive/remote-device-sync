@@ -9,7 +9,7 @@ use pipewire as pw;
 use pw::{properties::properties, spa};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::{DesktopError, RawFrame};
+use crate::DesktopError;
 
 fn failure() -> DesktopError {
     DesktopError::Capture("PipeWire monitor unavailable".into())

@@ -67,7 +67,7 @@ pub fn probe(screen: u32) -> Result<Box<dyn Capturer>, DesktopError> {
     ))
 }
 
-#[cfg(any(test, all(target_os = "linux", feature = "portal"),))]
+#[cfg(any(test, all(target_os = "linux", feature = "portal")))]
 pub(crate) mod frame;
 #[cfg(any(
     all(target_os = "linux", feature = "portal"),
