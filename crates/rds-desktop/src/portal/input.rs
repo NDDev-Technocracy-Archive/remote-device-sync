@@ -28,6 +28,21 @@ fn error() -> DesktopError {
     DesktopError::Input("Wayland input unavailable or no longer authorized".into())
 }
 
+fn frame_timestamp_us() -> Result<u64, DesktopError> {
+    // ei_device.frame uses the compositor's CLOCK_MONOTONIC epoch in
+    // microseconds, not elapsed time since this input actor started.
+    let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let seconds = u64::try_from(time.tv_sec).map_err(|_| error())?;
+    let nanos = u64::try_from(time.tv_nsec)
+        .ok()
+        .filter(|nanos| *nanos < 1_000_000_000)
+        .ok_or_else(error)?;
+    seconds
+        .checked_mul(1_000_000)
+        .and_then(|micros| micros.checked_add(nanos / 1_000))
+        .ok_or_else(error)
+}
+
 struct Request {
     input_seq: u64,
     lease: u64,
@@ -263,7 +278,6 @@ struct Actor {
     devices: Vec<NativeDevice>,
     holds: BTreeMap<u64, Holds>,
     sequence: u32,
-    origin: Instant,
     converter: EiEventConverter,
     context: ei::Context,
     mappings: Mappings,
@@ -389,11 +403,11 @@ impl Actor {
     fn ready(&self) -> bool {
         self.keyboard().is_ok() && self.mappings.keys().all(|i| self.pointer(*i).is_ok())
     }
-    fn frame(&self, device: &Device) {
-        device.device().frame(
-            self.converter.connection().serial(),
-            self.origin.elapsed().as_micros().min(u64::MAX as u128) as u64,
-        );
+    fn frame(&self, device: &Device) -> Result<(), DesktopError> {
+        device
+            .device()
+            .frame(self.converter.connection().serial(), frame_timestamp_us()?);
+        Ok(())
     }
 
     fn apply(&mut self, request: &Request) -> Result<(), DesktopError> {
@@ -434,7 +448,7 @@ impl Actor {
                             ei::keyboard::KeyState::Released
                         },
                     );
-                    self.frame(device);
+                    self.frame(device)?;
                 }
             }
             InputKind::PointerMove { x, y } => {
@@ -444,7 +458,7 @@ impl Actor {
                     .interface::<ei::PointerAbsolute>()
                     .ok_or_else(error)?
                     .motion_absolute(x as f32, y as f32);
-                self.frame(device);
+                self.frame(device)?;
             }
             InputKind::PointerMotion { .. } => {
                 return Err(DesktopError::Input(
@@ -485,7 +499,7 @@ impl Actor {
                             ei::button::ButtonState::Released
                         },
                     );
-                    self.frame(&device);
+                    self.frame(&device)?;
                 }
             }
             InputKind::Scroll { dx, dy } => {
@@ -504,7 +518,7 @@ impl Actor {
                     .interface::<ei::Scroll>()
                     .ok_or_else(error)?
                     .scroll_discrete(x, y);
-                self.frame(&device);
+                self.frame(&device)?;
             }
         }
         Ok(())
@@ -528,7 +542,7 @@ impl Actor {
                         .interface::<ei::Keyboard>()
                         .ok_or_else(error)?
                         .key(key, ei::keyboard::KeyState::Released);
-                    self.frame(device);
+                    self.frame(device)?;
                 }
             }
             for button in held.buttons {
@@ -544,7 +558,7 @@ impl Actor {
                     .interface::<ei::Button>()
                     .ok_or_else(error)?
                     .button(button, ei::button::ButtonState::Released);
-                self.frame(device);
+                self.frame(device)?;
             }
         }
         Ok(())
@@ -626,7 +640,6 @@ fn run(
         devices: Vec::new(),
         holds: BTreeMap::new(),
         sequence: 0,
-        origin: Instant::now(),
     };
     let mut pending: Option<Pending> = None;
     // Diagnostic-only target, capped per actor lifetime. No input payloads.
@@ -710,6 +723,22 @@ fn run(
 #[cfg(test)]
 mod exit_tests {
     use super::*;
+
+    #[test]
+    fn input_frames_share_the_os_monotonic_epoch() {
+        let before = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+        let first = frame_timestamp_us().unwrap();
+        let second = frame_timestamp_us().unwrap();
+        let after = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+        let before = Duration::try_from(before).unwrap().as_micros();
+        let after = Duration::try_from(after).unwrap().as_micros();
+        assert!(
+            before <= u128::from(first),
+            "an actor-relative clock is invalid EIS time"
+        );
+        assert!(first <= second);
+        assert!(u128::from(second) <= after);
+    }
     #[test]
     fn canceled_unflushed_input_fails_closed_and_flushed_sync_drain_remains_bounded() {
         let now = Instant::now();
