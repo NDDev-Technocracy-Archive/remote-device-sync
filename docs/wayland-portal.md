@@ -107,6 +107,11 @@ physical hold and delegate repeat to the compositor. Ending one tab releases
 only holds whose last RDS owner ended. It never alters another EI application's
 virtual devices or GNOME's global keyboard settings.
 
+Every EI frame carries absolute `CLOCK_MONOTONIC` microseconds, including
+release frames. An input worker's start time cannot become the timestamp epoch;
+the compositor interprets those timestamps in its own system clock domain.
+See the [EI frame contract](https://libinput.pages.freedesktop.org/libei/interfaces/ei_device/index.html#ei_device.frame).
+
 Requests have a two-second deadline and no retry/replay. An EI sync response
 establishes processing through the native protocol peer, not an application
 response or painted pixels. Pause/removal invalidates old leases. Relative
