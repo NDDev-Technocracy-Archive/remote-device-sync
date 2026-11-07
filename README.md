@@ -16,8 +16,8 @@ See [the product boundary](docs/product.md),
 [desktop packages](docs/desktop-runtime.md).
 
 Linux X11 serving and the opt-in consented Wayland portal are implemented;
-the native viewer runs on Linux and macOS. macOS capture/input remain planned
-backends, so a macOS build alone does not establish macOS serving capability.
+the native viewer runs on Linux and macOS. ScreenCaptureKit/CGEvent hosting requires local macOS permissions and native
+qualification; build success alone does not establish macOS serving capability.
 See [docs/architecture.md](docs/architecture.md) for the protocol decisions.
 
 Current capabilities and limits are in the [capability matrix](docs/capability-matrix.md).

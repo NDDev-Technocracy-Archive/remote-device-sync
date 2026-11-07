@@ -56,7 +56,7 @@ objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"], optional = true }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo", "NSArray", "NSDictionary", "NSValue", "NSError"], optional = true }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"], optional = true }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventTypes", "CGEventSource", "CGRemoteOperation", "CGWindow"], optional = true }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventTypes", "CGEventSource", "CGRemoteOperation", "CGWindow", "libc"], optional = true }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "objc2-core-video"], optional = true }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelFormatDescription", "CVReturn"], optional = true }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"], optional = true }
