@@ -1,6 +1,6 @@
 //! Software encoding consumes the latest owned PipeWire image per monitor.
 
-use super::capture::{Slot, Subscription};
+use crate::capture::latest::{Slot, Subscription};
 use crate::{
     BgraFrame, DesktopError, Encoder, FrameProducer, H264Encoder, Produced, ProducerControls,
     SessionClock,
@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::sync::OwnedSemaphorePermit;
 
-pub(super) struct Producer {
+pub(crate) struct Producer {
     _permit: OwnedSemaphorePermit,
     subscription: Subscription,
     encoder: H264Encoder,
@@ -54,10 +54,10 @@ impl Producer {
             },
         };
         let extent =
-            extent.ok_or_else(|| DesktopError::Capture("missing admitted portal extent".into()))?;
+            extent.ok_or_else(|| DesktopError::Capture("missing admitted native extent".into()))?;
         if slot.extent()? != Some(extent) || interval.is_zero() {
             return Err(DesktopError::Capture(
-                "portal display changed during admission".into(),
+                "native display changed during admission".into(),
             ));
         }
         Ok(Self {
@@ -103,7 +103,7 @@ impl Producer {
         let frame = &image.frame;
         if (frame.width, frame.height) != self.extent {
             return Err(DesktopError::Capture(
-                "portal display geometry changed".into(),
+                "native display geometry changed".into(),
             ));
         }
         self.generation = image.generation;
@@ -166,7 +166,7 @@ impl FrameProducer for Producer {
         match self.next(seq, controls, clock) {
             Ok(frame) => Some(frame),
             Err(error) => {
-                tracing::warn!(%error, "portal capture/encode ended");
+                tracing::warn!(%error, "native capture/encode ended");
                 None
             }
         }

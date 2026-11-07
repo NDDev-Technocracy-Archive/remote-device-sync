@@ -14,6 +14,48 @@ use std::{
     path::PathBuf,
 };
 
+/// A resident manager can serve outgoing connections while its local screen
+/// owner is preparing. Discovery waits only for read-only inventory; it never
+/// asks a remote peer to acquire consent or replays application input.
+#[cfg(feature = "desktop")]
+pub async fn wait_for_displays(
+    client: &Client,
+    session: SessionId,
+) -> anyhow::Result<rds_core::DesktopCaps> {
+    const READY_TIMEOUT: Duration = Duration::from_secs(30);
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+    tokio::time::timeout(READY_TIMEOUT, async {
+        loop {
+            let Reply::Info { info, .. } = client
+                .request(Command::Info {
+                    session: Some(session),
+                })
+                .await?
+            else {
+                anyhow::bail!("unexpected display inventory response");
+            };
+            if let Some(caps) = info.desktop {
+                anyhow::ensure!(
+                    !caps.displays.is_empty(),
+                    "peer advertised an empty desktop inventory"
+                );
+                return Ok(caps);
+            }
+            anyhow::ensure!(
+                info.services.contains(&rds_core::ServiceKind::Desktop),
+                "desktop service is disabled on the controlled computer"
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "screen sharing is not ready; check local permission on the controlled computer"
+        )
+    })?
+}
+
 #[derive(clap::ValueEnum, Clone, Copy, Default, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Resolution {

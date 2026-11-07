@@ -14,7 +14,9 @@ pub mod uinput;
 #[cfg(target_os = "linux")]
 pub mod wlr;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, all(target_os = "macos", feature = "host")))]
+mod apple_keys;
+#[cfg(all(target_os = "macos", feature = "host"))]
 pub mod macos;
 
 use crate::{DesktopError, InputSink};
@@ -28,10 +30,7 @@ pub fn probe() -> Result<Box<dyn InputSink>, DesktopError> {
 
 pub(crate) fn probe_for_display(_display: u32) -> Result<Box<dyn InputSink>, DesktopError> {
     #[cfg(all(target_os = "linux", feature = "x11"))]
-    if std::env::var_os("DISPLAY").is_some()
-        && std::env::var_os("WAYLAND_DISPLAY").is_none()
-        && !std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t.eq_ignore_ascii_case("wayland"))
-    {
+    if std::env::var_os("DISPLAY").is_some() && !crate::wayland_session() {
         return Ok(Box::new(x11::XtestInput::for_display(_display)?));
     }
     Err(DesktopError::Input(

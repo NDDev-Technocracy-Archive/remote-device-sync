@@ -28,9 +28,15 @@ its lock must be ordinary, single-link, owned 0600 files; symlink components,
 changed state, duplicate IDs and competing writers are refused.
 
 The agent option `--wayland-state /absolute/private/permission.json` prepares
-consent before binding its endpoint. Its normal explicit allowlist/grant policy
-still protects every remote connection. Omitting the flag does not allow a
-remote caller to trigger consent. X11 serving refuses a Wayland environment,
+consent independently of binding its endpoint and starting its local manager.
+Pending, failed or withdrawn screen consent disables incoming screen hosting;
+the resident manager and outgoing connections keep their own lifetime. Shutdown
+still cancels and joins local preparation and native cleanup. Its explicit allowlist/grant policy
+still protects every remote connection. When the local agent starts a desktop service in a Wayland session without an
+explicit state path, it uses `<key-file-with-wayland-extension>/permission.json`.
+X11 starts no portal. Existing explicit state paths retain their tokens and
+display history. This selection happens only during local startup; a remote
+caller cannot trigger consent. X11 serving refuses a Wayland environment,
 including Xwayland's DISPLAY, instead of advertising incomplete screen access.
 The shared capture/input inventory also checks the server's XWAYLAND extension
 when an SSH/service environment omits session variables.
@@ -159,3 +165,15 @@ restore the newly granted token, and no remote request may trigger a new dialog.
 The preparation diagnostic records only the clipboard-ready boolean, never
 permission tokens or selection contents. GNOME's behavior is visible in its
 [restore path](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/remotedesktop.c).
+
+Native shutdown retains the actual PipeWire/EIS join handles past a slow-shutdown
+diagnostic. After the same diagnostic boundary, the owner closes the portal to
+revoke native peers and continues joining them. The finished signal and state
+lock are released only after those workers return; a timeout cannot impersonate
+completed native cleanup.
+
+After a typed native failure, the local host supervisor drains the old owner and
+attempts restoration from the same state, while the endpoint and outgoing
+manager stay alive. Fresh-consent refresh is attempted only on the initial
+explicit invocation. Clean revocation is final; a failed/denied preparation does
+not loop prompts. macOS recovery likewise preflights its existing OS grants.

@@ -58,7 +58,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | desktop-backend:image-copy | stub | ext-image-copy-capture-v1 compositor; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:kms | stub | DRM/KMS seat; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:pipewire | experimental | Linux `portal` feature; explicitly prepared local RemoteDesktop/ScreenCast permission; mapped BGRA/BGRx floor | [Wayland contract](wayland-portal.md); [native two-monitor capture, restore and EI sync](reports/rds-wayland-native-20261011.md); physical input, revocation and installed acceptance separate |
-| desktop-backend:screencapturekit | stub | macOS 12.3+, screen-record permission; backend unwritten | `probe()` returns `Ok(None)` |
+| desktop-backend:screencapturekit | experimental | macOS 13+, `host` feature, locally prepared Screen Recording and Accessibility grants | bounded native owner and shared software producer; native screen/input/restart qualification required |
 | desktop-backend:dxgi | unavailable | Windows host; no module | roadmap only |
 
 ## Desktop session features
@@ -88,7 +88,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | Capability | State | Runtime prerequisites | Evidence |
 |---|---|---|---|
 | platform:linux-x86_64 | implemented | — | CI ubuntu lane |
-| platform:macos-arm64 | experimental | native viewer; capture/input backends still stubbed; Developer ID distribution/notarization open | CI macos lane compiles+tests, Metal viewer qualification |
+| platform:macos-arm64 | experimental | native viewer; prepared ScreenCaptureKit/CGEvent host requires native qualification; Developer ID distribution/notarization open | CI macos lane compiles+tests, Metal viewer qualification |
 
 ## Discovery, policy, observability
 

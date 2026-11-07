@@ -214,11 +214,19 @@ async fn hello_deadline_comes_from_policy() {
 }
 
 #[cfg(feature = "desktop")]
-struct PreparedSource(std::sync::atomic::AtomicUsize);
+struct PreparedSource(
+    std::sync::atomic::AtomicUsize,
+    std::sync::atomic::AtomicBool,
+);
 #[cfg(feature = "desktop")]
 impl rds_desktop::DesktopSource for PreparedSource {
     fn capabilities(&self) -> Result<rds_core::DesktopCaps, rds_desktop::DesktopError> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self.1.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(rds_desktop::DesktopError::Capture(
+                "local consent unavailable".into(),
+            ));
+        }
         Ok(rds_core::DesktopCaps {
             displays: vec![rds_core::DisplayInfo {
                 index: 10,
@@ -264,7 +272,10 @@ async fn prepared_inventory_is_used_only_when_desktop_service_is_enabled() {
             } else {
                 BTreeSet::from([ServiceKind::Tcp])
             });
-            let source = Arc::new(PreparedSource(std::sync::atomic::AtomicUsize::new(0)));
+            let source = Arc::new(PreparedSource(
+                std::sync::atomic::AtomicUsize::new(0),
+                std::sync::atomic::AtomicBool::new(true),
+            ));
             let agent =
                 Arc::new(Agent::new(server.clone(), policy).with_desktop_source(source.clone()));
             let runner = agent.clone();
@@ -283,6 +294,44 @@ async fn prepared_inventory_is_used_only_when_desktop_service_is_enabled() {
                 assert_eq!(caps.displays[0].index, 10);
             }
             conn.close(0u32.into(), b"fixture done");
+            client.close().await;
+            server.close().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn screen_preparation_and_withdrawal_do_not_close_the_authenticated_connection() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for backend in backends() {
+            let client = endpoint(backend).await;
+            let server = endpoint(backend).await;
+            let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 22));
+            policy.allow.insert(client.id());
+            policy.services = Some(BTreeSet::from([ServiceKind::Desktop]));
+            let source = Arc::new(PreparedSource(AtomicUsize::new(0), AtomicBool::new(false)));
+            let agent =
+                Arc::new(Agent::new(server.clone(), policy).with_desktop_source(source.clone()));
+            let runner = agent.clone();
+            let task = Runner(tokio::spawn(async move {
+                runner.run().await.unwrap();
+            }));
+            let conn = rds_client::connect(&client, server.addr()).await.unwrap();
+            for ready in [false, true, false] {
+                source.1.store(ready, Ordering::Release);
+                let info = rds_client::info(&conn).await.unwrap();
+                assert_eq!(info.desktop.is_some(), ready);
+                // Enabled service support and current screen inventory are
+                // separate: a pending local grant is not an unsupported OS.
+                assert!(info.services.contains(&ServiceKind::Desktop));
+                rds_client::ping(&conn, rand::random()).await.unwrap();
+            }
+            conn.close(0u32.into(), b"fixture done");
+            drop(task);
             client.close().await;
             server.close().await;
         }

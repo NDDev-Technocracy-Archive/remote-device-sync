@@ -21,8 +21,14 @@ pub mod kms;
 #[cfg(target_os = "linux")]
 pub mod pipewire;
 
+#[cfg(any(test, all(target_os = "macos", feature = "host")))]
+pub(crate) mod geometry;
+#[cfg(all(target_os = "macos", feature = "host"))]
+pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 pub mod sck;
+#[cfg(all(target_os = "macos", feature = "host"))]
+pub(crate) mod sck_native;
 
 use crate::{Capturer, DesktopError};
 
@@ -60,3 +66,16 @@ pub fn probe(screen: u32) -> Result<Box<dyn Capturer>, DesktopError> {
         "no capture backend available on this host".into(),
     ))
 }
+
+#[cfg(any(test, all(target_os = "linux", feature = "portal")))]
+pub(crate) mod frame;
+#[cfg(any(
+    all(target_os = "linux", feature = "portal"),
+    all(target_os = "macos", feature = "host")
+))]
+pub(crate) mod latest;
+#[cfg(any(
+    all(target_os = "linux", feature = "portal"),
+    all(target_os = "macos", feature = "host")
+))]
+pub(crate) mod producer;

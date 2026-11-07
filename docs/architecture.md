@@ -1,4 +1,4 @@
-# remote-device-sync architecture
+# NDDev Remote engine architecture
 
 Current behavior is recorded in the [capability matrix](capability-matrix.md)
 and the owning code/contracts; unfinished work is ordered by the
@@ -7,8 +7,10 @@ and the owning code/contracts; unfinished work is ordered by the
 and the [remediation plan](remediation-plan.md) retains acceptance requirements.
 Design goals and dated receipts do not establish current product acceptance.
 
-Remote access for GDS devices: SSH reachability and remote desktop sessions
-between any two enrolled devices, assisted by a GDS-operated server.
+Standalone encrypted screen access between explicitly admitted devices. NDS
+embeds the same engine through its own adapter; it supplies no required runtime
+service for the standalone product. Historical SSH/forwarding code retains its
+own service scopes.
 Design goals, in order: **minimum interactive latency**, **maximum
 connection stability**, defense in depth, no inbound firewall changes.
 

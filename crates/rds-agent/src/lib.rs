@@ -882,6 +882,13 @@ async fn serve_stream(
                 send.finish()?;
             }
             StreamHello::Info => {
+                let caps = if policy.effective_services().contains(&ServiceKind::Desktop)
+                    && desktop.enabled()
+                {
+                    desktop_caps(&desktop).await
+                } else {
+                    None
+                };
                 let info = AgentInfo {
                     protocol: PROTOCOL_VERSION,
                     version: env!("CARGO_PKG_VERSION").to_string(),
@@ -901,11 +908,7 @@ async fn serve_stream(
                         })
                         .collect()
                     },
-                    desktop: if policy.effective_services().contains(&ServiceKind::Desktop) {
-                        desktop_caps(&desktop).await
-                    } else {
-                        None
-                    },
+                    desktop: caps,
                 };
                 write_frame(&mut send, &HelloAck::Info(info)).await?;
                 send.finish()?;

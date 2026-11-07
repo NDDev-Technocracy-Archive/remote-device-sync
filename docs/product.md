@@ -26,9 +26,9 @@ file/clipboard access, a new device enrollment or a broader account scope.
 
 Capture, remote control and viewing are qualified separately on each native OS.
 Linux X11 and the opt-in consented Wayland portal have implemented host paths.
-The native viewer has Linux and macOS implementations. The macOS capture/input
-backends are still stubs and must be implemented and qualified before macOS is
-advertised as a controlled host.
+The native viewer has Linux and macOS implementations. The macOS ScreenCaptureKit/CGEvent host implementation requires local OS
+permissions and native qualification before macOS is advertised as a controlled
+host. A native build alone is insufficient acceptance.
 
 A release is assessed on actual received/presented pixels, input to an owned
 application, delay and recovery after network/agent changes. Active processes,

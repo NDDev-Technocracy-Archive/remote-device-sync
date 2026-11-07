@@ -332,17 +332,7 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
             else {
                 anyhow::bail!("unexpected connection response");
             };
-            let Reply::Info { info, .. } = client
-                .request(Command::Info {
-                    session: Some(session),
-                })
-                .await?
-            else {
-                anyhow::bail!("unexpected device inventory response");
-            };
-            let caps = info
-                .desktop
-                .ok_or_else(|| anyhow::anyhow!("device has no usable desktop inventory"))?;
+            let caps = rds_cli::desktop::wait_for_displays(&client, session).await?;
             if cli.list_displays {
                 for display in &caps.displays {
                     println!(

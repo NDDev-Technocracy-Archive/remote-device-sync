@@ -3,7 +3,7 @@
 use crate::{DesktopError, RawFrame};
 use bytes::Bytes;
 
-pub(super) fn copy_bgra(
+pub(crate) fn copy_bgra(
     memory: &[u8],
     offset: u32,
     size: u32,
@@ -12,7 +12,7 @@ pub(super) fn copy_bgra(
     opaque: bool,
 ) -> Result<RawFrame, DesktopError> {
     let (width, height) = extent;
-    let invalid = || DesktopError::Capture("invalid PipeWire video buffer".into());
+    let invalid = || DesktopError::Capture("invalid native video buffer".into());
     let bytes = crate::frame_bytes(width as usize, height as usize).ok_or_else(invalid)?;
     let row = (width as usize).checked_mul(4).ok_or_else(invalid)?;
     let stride = usize::try_from(stride)

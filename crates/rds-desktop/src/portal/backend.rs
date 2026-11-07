@@ -1,6 +1,7 @@
 //! A prepared consented desktop, owned by the local agent for its lifetime.
 
-use super::{capture, input, producer, session, state};
+use super::{capture, input, session, state};
+use crate::capture::producer;
 use crate::{DesktopError, DesktopSource, FrameProducer, InputSink};
 use rds_core::{Codec, DesktopCaps, DisplayInfo};
 use std::collections::BTreeMap;
@@ -175,13 +176,28 @@ impl WaylandDesktop {
             closed_tx.send_replace(Some(reason));
             capture.stop();
             closing_input.stop();
-            let (video, input) = tokio::join!(capture.close(), closing_input.close());
+            let (video, input) = {
+                let draining = async { tokio::join!(capture.close(), closing_input.close()) };
+                tokio::pin!(draining);
+                match tokio::time::timeout(crate::source::NATIVE_DRAIN_DIAGNOSTIC, &mut draining)
+                    .await
+                {
+                    Ok(result) => {
+                        owner.close().await;
+                        result
+                    }
+                    Err(_) => {
+                        // Closing the portal also revokes its native peers.
+                        // Retain and join their real work after revocation;
+                        // timing out a JoinHandle must never acknowledge drain.
+                        owner.close().await;
+                        draining.await
+                    }
+                }
+            };
             if let Some(clipboard) = closing_clipboard {
                 clipboard.close().await;
             }
-            // Let our native peers drop before closing the portal normally.
-            // A bounded join timeout still proceeds to portal revocation.
-            owner.close().await;
             if video.is_err() || input.is_err() {
                 tracing::warn!("Wayland native close did not complete cleanly");
             }

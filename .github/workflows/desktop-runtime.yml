@@ -8,12 +8,18 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: desktop-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 defaults:
   run:
     shell: bash
 
 env:
   CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   native:
@@ -43,7 +49,6 @@ jobs:
       - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
         with:
           ecosystems: cargo
-          namespace: nddev_remote_desktop
           key: ${{ matrix.cache_key }}
       - name: Install the Linux portal ABI
         if: runner.os == 'Linux'
@@ -54,6 +59,13 @@ jobs:
           FEATURES: ${{ matrix.features }}
         run: |
           cargo build --locked --release --target "$TARGET" -p rds-cli -p rds-agent --bins --features "$FEATURES"
+      - name: Check native desktop adapters
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          rustup component add clippy
+          cargo clippy --locked -p rds-agent -p rds-desktop -p rds-cli --all-targets --features "$FEATURES" -- -D warnings
+          cargo test --locked -p rds-desktop -p rds-agent --lib --bins --features "$FEATURES"
       - name: Check native entrypoints and package exact bytes
         env:
           TARGET: ${{ matrix.target }}
@@ -64,6 +76,13 @@ jobs:
           "target/$TARGET/release/nddev-remote" --help > /dev/null
           python3 scripts/package-desktop-runtime.py --binary-dir "target/$TARGET/release" \
             --target "$TARGET" --features "$FEATURES" --out "$RUNNER_TEMP/desktop-runtime"
+      - name: Package macOS applications
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 scripts/package-macos-apps.py --binary-dir "target/$TARGET/release" \
+            --build-info "$RUNNER_TEMP/desktop-runtime/build-info.json" --out "$RUNNER_TEMP/desktop-runtime"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-${{ matrix.target }}

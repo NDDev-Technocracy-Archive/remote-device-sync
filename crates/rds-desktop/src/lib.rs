@@ -28,6 +28,10 @@ mod control_observation;
 mod control_read;
 mod decode_work;
 mod delivery_rate;
+#[cfg(target_os = "linux")]
+mod environment;
+#[cfg(target_os = "linux")]
+pub use environment::wayland_session;
 pub mod input;
 pub mod mailbox;
 mod media_repair;
@@ -36,10 +40,12 @@ mod order;
 mod portal;
 mod receipts;
 pub mod render;
-#[cfg(any(all(target_os = "linux", feature = "x11"), test))]
+#[cfg(any(feature = "x11", test))]
 mod scaling;
 mod session;
 mod source;
+#[cfg(all(target_os = "macos", feature = "host"))]
+pub use capture::macos::{MacDesktop, MacPermissions};
 #[cfg(all(target_os = "linux", feature = "portal"))]
 pub use portal::WaylandDesktop;
 pub use source::DesktopSource;

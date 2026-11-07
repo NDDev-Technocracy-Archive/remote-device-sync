@@ -2,7 +2,7 @@
 use super::{Options, Resolution, native, read_grant};
 use anyhow::Context;
 use rds_client::local::Client;
-use rds_core::local::{Command, Reply};
+use rds_core::local::Reply;
 use rds_desktop::render::workspace::{DeviceView, TabId, TabSpec, VideoSize, WorkspaceModel};
 use rds_desktop::render::{Viewer, WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
 use serde::{Deserialize, Serialize};
@@ -220,17 +220,7 @@ async fn inspect(
     else {
         anyhow::bail!("unexpected connection response");
     };
-    let Reply::Info { info, .. } = client
-        .request(Command::Info {
-            session: Some(session),
-        })
-        .await?
-    else {
-        anyhow::bail!("unexpected display inventory response");
-    };
-    let caps = info
-        .desktop
-        .context("This computer has no available desktop displays")?;
+    let caps = super::wait_for_displays(client, session).await?;
     let authenticated = client
         .snapshot()
         .await?
