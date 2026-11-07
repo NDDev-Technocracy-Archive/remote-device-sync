@@ -1,6 +1,7 @@
 //! A prepared consented desktop, owned by the local agent for its lifetime.
 
-use super::{capture, input, producer, session, state};
+use super::{capture, input, session, state};
+use crate::capture::producer;
 use crate::{DesktopError, DesktopSource, FrameProducer, InputSink};
 use rds_core::{Codec, DesktopCaps, DisplayInfo};
 use std::collections::BTreeMap;

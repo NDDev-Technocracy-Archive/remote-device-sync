@@ -54,6 +54,13 @@ jobs:
           FEATURES: ${{ matrix.features }}
         run: |
           cargo build --locked --release --target "$TARGET" -p rds-cli -p rds-agent --bins --features "$FEATURES"
+      - name: Check native desktop adapters
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          rustup component add clippy
+          cargo clippy --locked -p rds-agent -p rds-desktop -p rds-cli --all-targets --features "$FEATURES" -- -D warnings
+          cargo test --locked -p rds-desktop -p rds-agent --lib --bins --features "$FEATURES"
       - name: Check native entrypoints and package exact bytes
         env:
           TARGET: ${{ matrix.target }}

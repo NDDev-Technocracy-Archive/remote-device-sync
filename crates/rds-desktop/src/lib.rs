@@ -36,10 +36,12 @@ mod order;
 mod portal;
 mod receipts;
 pub mod render;
-#[cfg(any(all(target_os = "linux", feature = "x11"), test))]
+#[cfg(any(feature = "x11", test))]
 mod scaling;
 mod session;
 mod source;
+#[cfg(all(target_os = "macos", feature = "host"))]
+pub use capture::macos::MacDesktop;
 #[cfg(all(target_os = "linux", feature = "portal"))]
 pub use portal::WaylandDesktop;
 pub use source::DesktopSource;

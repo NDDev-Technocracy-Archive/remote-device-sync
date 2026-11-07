@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 default = []
-desktop = ["dep:rds-desktop", "rds-desktop/x11"]
+desktop = ["dep:rds-desktop", "rds-desktop/host"]
 portal = ["desktop", "rds-desktop/portal"]
 ## Owned transport backend for e2e and `--backend noq` selection (WS1).
 transport-noq = ["rds-net/transport-noq"]

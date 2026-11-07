@@ -1,10 +1,11 @@
 //! Local screen consent has its own lifetime, independent of outgoing sessions.
 
+#[cfg(all(target_os = "linux", feature = "portal"))]
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use rds_desktop::{DesktopError, DesktopSource, FrameProducer, InputSink, WaylandDesktop};
+use rds_desktop::{DesktopError, DesktopSource, FrameProducer, InputSink};
 use tokio::sync::watch;
 
 #[derive(Default)]
@@ -76,33 +77,81 @@ pub(super) struct Host {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+trait Owner: DesktopSource {
+    fn stopped(&self) -> impl Future<Output = Result<(), DesktopError>> + Send;
+    fn close(&self) -> impl Future<Output = Result<(), DesktopError>> + Send;
+}
+
+#[cfg(all(target_os = "linux", feature = "portal"))]
+impl Owner for rds_desktop::WaylandDesktop {
+    fn stopped(&self) -> impl Future<Output = Result<(), DesktopError>> + Send {
+        Self::stopped(self)
+    }
+    async fn close(&self) -> Result<(), DesktopError> {
+        Self::close(self).await;
+        Ok(())
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+impl Owner for rds_desktop::MacDesktop {
+    fn stopped(&self) -> impl Future<Output = Result<(), DesktopError>> + Send {
+        Self::stopped(self)
+    }
+    fn close(&self) -> impl Future<Output = Result<(), DesktopError>> + Send {
+        Self::close(self)
+    }
+}
+
 impl Host {
+    #[cfg(all(target_os = "linux", feature = "portal"))]
     pub fn wayland(path: PathBuf, refresh: bool) -> Self {
+        Self::start("Wayland", move |stop| async move {
+            if refresh {
+                rds_desktop::WaylandDesktop::request_permission(&path, cancelled(stop)).await
+            } else {
+                rds_desktop::WaylandDesktop::open_with_cancel(&path, cancelled(stop)).await
+            }
+        })
+    }
+
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    pub fn macos() -> Self {
+        Self::start("macOS", |stop| {
+            rds_desktop::MacDesktop::open_with_cancel(cancelled(stop))
+        })
+    }
+
+    fn start<B, F>(
+        backend: &'static str,
+        prepare: impl FnOnce(watch::Receiver<bool>) -> F + Send + 'static,
+    ) -> Self
+    where
+        B: Owner,
+        F: Future<Output = Result<B, DesktopError>> + Send + 'static,
+    {
         let source = Arc::new(Slot::default());
         let current = source.clone();
         let (stop, stopping) = watch::channel(false);
         let task = tokio::spawn(async move {
-            let opening = if refresh {
-                WaylandDesktop::request_permission(&path, cancelled(stopping.clone())).await
-            } else {
-                WaylandDesktop::open_with_cancel(&path, cancelled(stopping.clone())).await
-            };
-            match opening {
-                Ok(backend) => {
-                    let backend = Arc::new(backend);
-                    current.set(Some(backend.clone()));
-                    tracing::info!("Wayland screen hosting ready");
+            match prepare(stopping.clone()).await {
+                Ok(owner) => {
+                    let owner = Arc::new(owner);
+                    current.set(Some(owner.clone()));
+                    tracing::info!(backend, "screen hosting ready");
                     tokio::select! {
                         _ = cancelled(stopping.clone()) => {},
-                        result = backend.stopped() => {
-                            tracing::warn!(?result, "Wayland screen hosting stopped; local sessions remain available");
+                        result = owner.stopped() => {
+                            tracing::warn!(backend, ?result, "screen hosting stopped; local sessions remain available");
                         },
                     }
                     current.set(None);
-                    backend.close().await;
+                    if let Err(error) = owner.close().await {
+                        tracing::warn!(backend, %error, "native screen cleanup failed");
+                    }
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "Wayland screen hosting unavailable; local sessions remain available");
+                    tracing::warn!(backend, %error, "screen hosting unavailable; local sessions remain available");
                 }
             }
             // Revocation is final for this local preparation. Never open a new

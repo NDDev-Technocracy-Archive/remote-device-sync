@@ -14,7 +14,9 @@ pub mod uinput;
 #[cfg(target_os = "linux")]
 pub mod wlr;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, all(target_os = "macos", feature = "host")))]
+mod apple_keys;
+#[cfg(all(target_os = "macos", feature = "host"))]
 pub mod macos;
 
 use crate::{DesktopError, InputSink};

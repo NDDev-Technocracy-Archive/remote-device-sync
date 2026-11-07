@@ -1,8 +1,8 @@
 //! Owned PipeWire I/O on one bounded native worker, with newest shared pixels.
 
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use pipewire as pw;
@@ -10,6 +10,10 @@ use pw::{properties::properties, spa};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{DesktopError, RawFrame};
+
+fn failure() -> DesktopError {
+    DesktopError::Capture("PipeWire monitor unavailable".into())
+}
 
 const MAX_PIXELS_BYTES: usize = 128 * 1024 * 1024;
 const MAX_RETAINED_BYTES: u32 = 256 * 1024 * 1024;
@@ -48,91 +52,7 @@ impl CopyCadence {
     }
 }
 
-pub(super) struct Image {
-    pub frame: RawFrame,
-    /// Local PipeWire ingress, not a claim about compositor capture time.
-    pub received: Instant,
-    pub generation: u64,
-}
-
-#[derive(Default)]
-struct State {
-    extent: Option<(u32, u32)>,
-    image: Option<Arc<Image>>,
-    failed: bool,
-    generation: u64,
-}
-
-pub(super) struct Slot {
-    pub index: u32,
-    state: Mutex<State>,
-    changed: Condvar,
-    readers: AtomicUsize,
-}
-
-impl Slot {
-    #[cfg(test)]
-    pub(super) fn fixture(index: u32, extent: (u32, u32)) -> Arc<Self> {
-        Arc::new(Self {
-            index,
-            state: Mutex::new(State {
-                extent: Some(extent),
-                ..Default::default()
-            }),
-            changed: Condvar::new(),
-            readers: AtomicUsize::new(0),
-        })
-    }
-    pub fn subscribe(self: &Arc<Self>) -> Subscription {
-        self.readers.fetch_add(1, Ordering::AcqRel);
-        Subscription(self.clone())
-    }
-    pub fn extent(&self) -> Result<Option<(u32, u32)>, DesktopError> {
-        let state = self.state.lock().map_err(|_| failure())?;
-        if state.failed {
-            return Err(failure());
-        }
-        Ok(state.extent)
-    }
-
-    pub fn image(&self, timeout: Duration) -> Result<Arc<Image>, DesktopError> {
-        let deadline = Instant::now() + timeout;
-        let mut state = self.state.lock().map_err(|_| failure())?;
-        while state.image.is_none() && !state.failed {
-            let wait = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(failure)?;
-            state = self
-                .changed
-                .wait_timeout(state, wait)
-                .map_err(|_| failure())?
-                .0;
-        }
-        if state.failed {
-            return Err(failure());
-        }
-        state.image.clone().ok_or_else(failure)
-    }
-
-    fn fail(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.failed = true;
-            state.image = None;
-        }
-        self.changed.notify_all();
-    }
-}
-
-pub(super) struct Subscription(pub Arc<Slot>);
-impl Drop for Subscription {
-    fn drop(&mut self) {
-        self.0.readers.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-fn failure() -> DesktopError {
-    DesktopError::Capture("PipeWire monitor unavailable".into())
-}
+pub(super) use crate::capture::latest::{Image, Slot};
 
 pub(super) struct Group {
     pub slots: Vec<Arc<Slot>>,
@@ -165,14 +85,7 @@ impl Group {
             .map_err(|_| failure())?;
         let slots: Vec<_> = sources
             .iter()
-            .map(|(index, _)| {
-                Arc::new(Slot {
-                    index: *index,
-                    state: Mutex::new(State::default()),
-                    changed: Condvar::new(),
-                    readers: AtomicUsize::new(0),
-                })
-            })
+            .map(|(index, _)| Slot::new(*index, None))
             .collect();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
@@ -463,7 +376,7 @@ fn run(
                     data.slot.fail();
                     return;
                 };
-                let Ok(mut frame) = super::frame::copy_bgra(
+                let Ok(mut frame) = crate::capture::frame::copy_bgra(
                     memory,
                     offset,
                     size,

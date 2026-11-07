@@ -4,7 +4,6 @@
 mod capture;
 #[cfg(all(target_os = "linux", feature = "portal"))]
 mod clipboard;
-mod frame;
 mod geometry;
 #[cfg(all(target_os = "linux", feature = "portal"))]
 mod input;
@@ -15,8 +14,6 @@ mod state;
 
 #[cfg(all(target_os = "linux", feature = "portal"))]
 mod backend;
-#[cfg(all(target_os = "linux", feature = "portal"))]
-mod producer;
 #[cfg(all(target_os = "linux", feature = "portal"))]
 pub use backend::WaylandDesktop;
 

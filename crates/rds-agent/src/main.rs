@@ -9,7 +9,10 @@ use rds_net::{
     default_key_path,
 };
 
-#[cfg(all(target_os = "linux", feature = "portal"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "portal"),
+    all(target_os = "macos", feature = "desktop")
+))]
 mod desktop_host;
 
 #[derive(Parser)]
@@ -18,6 +21,9 @@ mod desktop_host;
     about = "RDS agent: serve SSH and desktop sessions to allowed peers"
 )]
 struct Cli {
+    /// Request Screen Recording and Accessibility locally on macOS, then exit.
+    #[arg(long)]
+    request_desktop_permission: bool,
     /// Prepare a consented Wayland desktop using this private token state file.
     /// Requires Linux and the portal feature; may show a local permission dialog.
     #[arg(long)]
@@ -181,6 +187,9 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    if cli.request_desktop_permission {
+        return request_desktop_permission();
+    }
     #[cfg(not(all(target_os = "linux", feature = "portal")))]
     if cli.wayland_state.is_some() {
         anyhow::bail!("--wayland-state requires a Linux build with the portal feature");
@@ -396,6 +405,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         .wayland_state
         .as_ref()
         .map(|path| desktop_host::Host::wayland(path.clone(), cli.wayland_refresh_permission));
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    let desktop_host = policy
+        .effective_services()
+        .contains(&rds_core::ServiceKind::Desktop)
+        .then(desktop_host::Host::macos);
     let endpoint = bind_endpoint(config).await?;
     // Binding starts local service. iroh's online() waits indefinitely for a
     // relay, including when relays are disabled or unreachable. Reachability
@@ -451,7 +465,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             resolved.max_rss_mb.map(std::num::NonZeroU64::get),
         ),
     );
-    #[cfg(all(target_os = "linux", feature = "portal"))]
+    #[cfg(any(
+        all(target_os = "linux", feature = "portal"),
+        all(target_os = "macos", feature = "desktop")
+    ))]
     let agent = match &desktop_host {
         Some(host) => agent.with_desktop_source(host.source()),
         None => agent,
@@ -497,7 +514,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // abrupt socket death (and iroh does not log an ungraceful drop).
     let ((), admin_result, control_result) =
         tokio::join!(agent.endpoint.close(), admin.close(), control.close());
-    #[cfg(all(target_os = "linux", feature = "portal"))]
+    #[cfg(any(
+        all(target_os = "linux", feature = "portal"),
+        all(target_os = "macos", feature = "desktop")
+    ))]
     if let Some(host) = desktop_host {
         host.close().await?;
     }
@@ -509,6 +529,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Err(error.context(format!("local manager shutdown also failed: {control}")))
         }
     }
+}
+
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+fn request_desktop_permission() -> anyhow::Result<()> {
+    rds_desktop::MacDesktop::request_permission()?;
+    println!("Screen Recording and Accessibility granted; start the local agent to share screens");
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "macos", feature = "desktop")))]
+fn request_desktop_permission() -> anyhow::Result<()> {
+    anyhow::bail!("--request-desktop-permission requires a macOS desktop build")
 }
 
 /// SIGINT on every platform, SIGTERM on unix (systemd stop).

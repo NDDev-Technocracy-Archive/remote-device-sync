@@ -8,7 +8,8 @@ nothing in the design blocks it.
 The capture/codec/input preference tables below include planned backends.
 Currently usable implementations are Linux X11 capture/XTEST input and the
 OpenH264 software codec. The native wgpu viewer is implemented for Linux and macOS;
-macOS capture/input and hardware codecs remain stubs. The optional consented
+ScreenCaptureKit/CGEvent hosting is implemented behind the `host` feature and a prepared
+local consent owner; native acceptance is recorded separately. Hardware codecs remain stubs. The optional consented
 Wayland portal backend is implemented behind separate native qualification; see
 [the portal contract](wayland-portal.md).
 Build support is distinct from serving capability and native acceptance; see
@@ -116,3 +117,33 @@ isolated screens. Ordinary tests explicitly ignore those cases instead of
 silently passing without DISPLAY or injecting into an ambient developer seat.
 See [the X11 contract and reproduction command](x11-input.md). This fixture does
 not qualify a composited desktop, RandR monitor changes, Wayland or macOS.
+
+## macOS host boundary
+
+The `host` bundle reuses the existing software H.264 floor, with thin generated
+Apple bindings from the same objc2 family as the viewer. No Swift helper, extra
+async runtime or NDS service is introduced. `MacDesktop` prepares native capture
+on a bounded owner worker after checking existing Screen Recording and
+Accessibility permissions. `rds-agent --request-desktop-permission` is an explicit
+local setup action; serving requests cannot request permission.
+
+ScreenCaptureKit owns three native buffers per display. The prepared source
+retains only the newest tightly packed BGRA image, with aggregate pixel and byte
+budgets. Inactive screens retain an initial image without continuously copying
+frames. Suspended/blank capture clears retained pixels. The same software
+producer, cadence, scaling and encoding implementation serves Wayland and macOS.
+
+Mac input uses evdev physical keys mapped to Apple hardware codes, per-display
+pixel-to-logical-point geometry and shared key/button holds across bounded
+control leases. Disconnect releases only that lease's holds. Display changes and
+permission withdrawal seal existing hosting before native cleanup; a different
+monitor cannot inherit an old lease. Keyboard focus remains the local console
+seat's focus, as with the Wayland portal. Relative pointer locking, login-screen
+control and native audio are outside this backend's current contract.
+
+Native streams stop on their owner worker, detach outputs and drain their serial
+callback queues before explicit close returns. A running native call retains
+its worker permit until it returns. Pending/withdrawn hosting does not close the
+resident endpoint or its outgoing session manager. Compile and deterministic
+checks do not replace native screen, owned-application input, restart or latency
+qualification on each supported device.
