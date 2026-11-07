@@ -45,7 +45,7 @@ mod scaling;
 mod session;
 mod source;
 #[cfg(all(target_os = "macos", feature = "host"))]
-pub use capture::macos::MacDesktop;
+pub use capture::macos::{MacDesktop, MacPermissions};
 #[cfg(all(target_os = "linux", feature = "portal"))]
 pub use portal::WaylandDesktop;
 pub use source::DesktopSource;

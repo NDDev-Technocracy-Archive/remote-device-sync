@@ -24,6 +24,9 @@ struct Cli {
     /// Request Screen Recording and Accessibility locally on macOS, then exit.
     #[arg(long)]
     request_desktop_permission: bool,
+    /// Print read-only local macOS permission status, then exit.
+    #[arg(long, conflicts_with = "request_desktop_permission")]
+    desktop_permission_status: bool,
     /// Prepare a consented Wayland desktop using this private token state file.
     /// Requires Linux and the portal feature; may show a local permission dialog.
     #[arg(long)]
@@ -187,6 +190,9 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    if cli.desktop_permission_status {
+        return desktop_permission_status();
+    }
     if cli.request_desktop_permission {
         return request_desktop_permission();
     }
@@ -566,6 +572,24 @@ fn selected_wayland_state(
     explicit.or_else(|| {
         (enabled && wayland).then(|| key.with_extension("wayland").join("permission.json"))
     })
+}
+
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+fn desktop_permission_status() -> anyhow::Result<()> {
+    let status = rds_desktop::MacDesktop::permission_status();
+    println!(
+        "{}",
+        serde_json::json!({
+            "screen_recording": status.screen_recording,
+            "accessibility": status.accessibility,
+        })
+    );
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "macos", feature = "desktop")))]
+fn desktop_permission_status() -> anyhow::Result<()> {
+    anyhow::bail!("--desktop-permission-status requires a macOS desktop build")
 }
 
 /// SIGINT on every platform, SIGTERM on unix (systemd stop).

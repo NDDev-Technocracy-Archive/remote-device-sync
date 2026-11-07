@@ -9,6 +9,42 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore, oneshot};
 
+/// Read-only local OS grants. Inspecting these never opens a consent prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MacPermissions {
+    pub screen_recording: bool,
+    pub accessibility: bool,
+}
+
+impl MacPermissions {
+    fn ready(self) -> bool {
+        self.screen_recording && self.accessibility
+    }
+}
+
+async fn wait_for_permission(
+    mut status: impl FnMut() -> MacPermissions,
+    cancelled: impl Future<Output = ()>,
+) -> Result<(), DesktopError> {
+    tokio::pin!(cancelled);
+    let mut previous = None;
+    loop {
+        let current = status();
+        if current.ready() {
+            return Ok(());
+        }
+        if previous != Some(current) {
+            tracing::info!(?current, "waiting for local macOS screen permissions");
+            previous = Some(current);
+        }
+        tokio::select! {
+            biased;
+            _ = &mut cancelled => return Err(sck_native::error()),
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+        }
+    }
+}
+
 /// ScreenCaptureKit capture and CGEvent input. Opening never requests OS
 /// permissions: the local application must obtain them explicitly beforehand.
 pub struct MacDesktop {
@@ -21,6 +57,13 @@ pub struct MacDesktop {
 }
 
 impl MacDesktop {
+    pub fn permission_status() -> MacPermissions {
+        MacPermissions {
+            screen_recording: objc2_core_graphics::CGPreflightScreenCaptureAccess(),
+            accessibility: crate::input::macos::available(),
+        }
+    }
+
     /// Explicit local setup only. Remote requests never invoke these OS prompts.
     pub fn request_permission() -> Result<(), DesktopError> {
         use objc2_core_graphics::{CGRequestPostEventAccess, CGRequestScreenCaptureAccess};
@@ -29,13 +72,20 @@ impl MacDesktop {
         if screen && input {
             Ok(())
         } else {
-            Err(sck_native::error())
+            Err(DesktopError::Capture(format!(
+                "local macOS grants: Screen Recording={screen}, Accessibility={input}; enable the missing grant in Privacy & Security"
+            )))
         }
     }
 
     pub async fn open_with_cancel(
         cancelled: impl Future<Output = ()>,
     ) -> Result<Self, DesktopError> {
+        tokio::pin!(cancelled);
+        // A resident manager can start before the user completes OS setup.
+        // Observe later local grants without repeating either permission API
+        // or allocating a native worker while access is missing.
+        wait_for_permission(Self::permission_status, &mut cancelled).await?;
         static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let permit = WORKERS
             .get_or_init(|| Arc::new(Semaphore::new(4)))
@@ -56,7 +106,6 @@ impl MacDesktop {
             let _exit = Exit(stopping.clone());
             sck_native::run(&stopping, ready)
         });
-        tokio::pin!(cancelled);
         let prepared = tokio::select! {
             biased;
             _ = &mut cancelled => None,
@@ -155,5 +204,41 @@ impl DesktopSource for MacDesktop {
             return Err(sck_native::error());
         }
         self.input.sink(g)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_local_grant_resumes_preparation_without_a_new_request() {
+        let granted = Arc::new(AtomicBool::new(false));
+        let observed = granted.clone();
+        let pending = tokio::spawn(wait_for_permission(
+            move || MacPermissions {
+                screen_recording: true,
+                accessibility: observed.load(Ordering::Acquire),
+            },
+            std::future::pending(),
+        ));
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        granted.store(true, Ordering::Release);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        pending.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_permission_keeps_preparation_cancelable() {
+        wait_for_permission(
+            || MacPermissions {
+                screen_recording: false,
+                accessibility: true,
+            },
+            std::future::ready(()),
+        )
+        .await
+        .unwrap_err();
     }
 }

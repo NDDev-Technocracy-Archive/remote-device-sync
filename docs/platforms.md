@@ -126,6 +126,10 @@ async runtime or NDS service is introduced. `MacDesktop` prepares native capture
 on a bounded owner worker after checking existing Screen Recording and
 Accessibility permissions. `rds-agent --request-desktop-permission` is an explicit
 local setup action; serving requests cannot request permission.
+`--desktop-permission-status` reports both grants without requesting them or
+opening an endpoint. If the resident agent starts before the user finishes OS
+setup, its local capture owner waits for the grants without repeating prompts;
+the outgoing manager remains usable and capture preparation resumes when ready.
 
 ScreenCaptureKit owns three native buffers per display. The prepared source
 retains only the newest tightly packed BGRA image, with aggregate pixel and byte
