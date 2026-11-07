@@ -1,5 +1,9 @@
 //! Physical evdev keys to Apple's hardware virtual key codes. The controlled
 //! Mac resolves text through its own selected keyboard layout.
+pub(crate) fn modifier(code: u32) -> bool {
+    matches!(code, 29 | 42 | 54 | 56 | 58 | 97 | 100 | 125 | 126 | 464)
+}
+
 pub(crate) fn key(code: u32) -> Option<u16> {
     Some(match code {
         1 => 53,
@@ -123,6 +127,9 @@ mod tests {
     use super::*;
     #[test]
     fn physical_shortcuts_keep_sides_and_extended_navigation() {
+        assert!(modifier(42));
+        assert!(modifier(58));
+        assert!(!modifier(30));
         assert_eq!((key(30), key(46), key(47)), (Some(0), Some(8), Some(9)));
         assert_eq!(
             (key(125), key(126), key(29), key(97)),

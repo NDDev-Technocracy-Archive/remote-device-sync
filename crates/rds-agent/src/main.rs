@@ -516,6 +516,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         _ = &mut shutdown => Ok(()),
     };
     drop(announce);
+    #[cfg(any(
+        all(target_os = "linux", feature = "portal"),
+        all(target_os = "macos", feature = "desktop")
+    ))]
+    if let Some(host) = &desktop_host {
+        host.request_stop();
+    }
     // Close the endpoint so peers get CONNECTION_CLOSE instead of an
     // abrupt socket death (and iroh does not log an ungraceful drop).
     let ((), admin_result, control_result) =

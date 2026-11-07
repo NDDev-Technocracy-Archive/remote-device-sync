@@ -116,10 +116,7 @@ impl Group {
     pub async fn close(&mut self) -> Result<(), DesktopError> {
         self.stop();
         if let Some(task) = self.task.take() {
-            tokio::time::timeout(Duration::from_secs(5), task)
-                .await
-                .map_err(|_| failure())?
-                .map_err(|_| failure())??;
+            crate::source::drain_native(task, "PipeWire").await?;
         }
         Ok(())
     }

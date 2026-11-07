@@ -416,7 +416,7 @@ pub(crate) fn run(
         if !crate::input::macos::available() {
             return Err(error());
         }
-        let input = crate::input::macos::Group::new(stop.clone());
+        let input = crate::input::macos::Group::new(stop.clone())?;
         struct InputClose(Arc<crate::input::macos::Group>);
         impl Drop for InputClose {
             fn drop(&mut self) {

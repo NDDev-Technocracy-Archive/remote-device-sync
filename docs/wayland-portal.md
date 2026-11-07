@@ -165,3 +165,9 @@ restore the newly granted token, and no remote request may trigger a new dialog.
 The preparation diagnostic records only the clipboard-ready boolean, never
 permission tokens or selection contents. GNOME's behavior is visible in its
 [restore path](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/remotedesktop.c).
+
+Native shutdown retains the actual PipeWire/EIS join handles past a slow-shutdown
+diagnostic. After the same diagnostic boundary, the owner closes the portal to
+revoke native peers and continues joining them. The finished signal and state
+lock are released only after those workers return; a timeout cannot impersonate
+completed native cleanup.

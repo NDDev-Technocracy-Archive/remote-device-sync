@@ -174,10 +174,7 @@ impl Group {
         self.stop();
         let task = self.task.lock().map_err(|_| error())?.take();
         if let Some(task) = task {
-            tokio::time::timeout(Duration::from_secs(5), task)
-                .await
-                .map_err(|_| error())?
-                .map_err(|_| error())??;
+            crate::source::drain_native(task, "EIS").await?;
         }
         Ok(())
     }

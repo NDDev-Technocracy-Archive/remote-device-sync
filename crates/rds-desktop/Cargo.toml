@@ -9,7 +9,7 @@ repository.workspace = true
 [features]
 default = []
 x11 = ["dep:x11rb", "dep:openh264", "dep:openh264-sys2", "dep:memmap2", "dep:rustix"]
-host = ["x11", "dep:objc2", "dep:objc2-foundation", "dep:objc2-core-foundation", "dep:objc2-core-graphics", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-screen-capture-kit", "dep:block2", "dep:dispatch2"]
+host = ["x11", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core-foundation", "dep:objc2-core-graphics", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-screen-capture-kit", "dep:block2", "dep:dispatch2"]
 portal = ["x11", "dep:ashpd", "dep:pipewire", "dep:reis", "dep:futures-util", "dep:serde_json"]
 viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:wayland-backend", "dep:wayland-client", "dep:wayland-protocols"]
 
@@ -53,7 +53,7 @@ serde_json = { workspace = true, optional = true }
 # lifetime. Explicit superclass features are required by the 0.3 bindings.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", optional = true }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"], optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSControl", "NSEvent", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"], optional = true }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo", "NSArray", "NSDictionary", "NSValue", "NSError"], optional = true }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"], optional = true }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventTypes", "CGEventSource", "CGRemoteOperation", "CGWindow", "libc"], optional = true }

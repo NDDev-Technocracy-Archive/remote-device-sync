@@ -74,7 +74,7 @@ async fn cancelled(mut stop: watch::Receiver<bool>) {
 pub(super) struct Host {
     source: Arc<Slot>,
     stop: watch::Sender<bool>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<tokio::task::JoinHandle<Result<(), DesktopError>>>,
 }
 
 trait Owner: DesktopSource {
@@ -134,7 +134,7 @@ impl Host {
         let current = source.clone();
         let (stop, stopping) = watch::channel(false);
         let task = tokio::spawn(async move {
-            match prepare(stopping.clone()).await {
+            let closed = match prepare(stopping.clone()).await {
                 Ok(owner) => {
                     let owner = Arc::new(owner);
                     current.set(Some(owner.clone()));
@@ -146,17 +146,21 @@ impl Host {
                         },
                     }
                     current.set(None);
-                    if let Err(error) = owner.close().await {
+                    let closed = owner.close().await;
+                    if let Err(error) = &closed {
                         tracing::warn!(backend, %error, "native screen cleanup failed");
                     }
+                    closed
                 }
                 Err(error) => {
                     tracing::warn!(backend, %error, "screen hosting unavailable; local sessions remain available");
+                    Ok(())
                 }
-            }
+            };
             // Revocation is final for this local preparation. Never open a new
             // consent dialog because a remote peer asks for another screen.
             cancelled(stopping).await;
+            closed
         });
         Self {
             source,
@@ -169,10 +173,15 @@ impl Host {
         self.source.clone()
     }
 
-    pub async fn close(mut self) -> Result<(), tokio::task::JoinError> {
+    pub fn request_stop(&self) {
+        self.source.set(None);
         self.stop.send_replace(true);
+    }
+
+    pub async fn close(mut self) -> anyhow::Result<()> {
+        self.request_stop();
         if let Some(task) = self.task.take() {
-            task.await?;
+            task.await??;
         }
         Ok(())
     }

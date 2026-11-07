@@ -59,6 +59,10 @@ impl Holds {
         let key = apple_keys::key(code).ok_or_else(error)?;
         let source = CGEventSource::new(CGEventSourceStateID::Private).ok_or_else(error)?;
         let event = CGEvent::new_keyboard_event(Some(&source), key, pressed).ok_or_else(error)?;
+        CGEventSource::set_local_events_suppression_interval(Some(&source), 0.0);
+        if apple_keys::modifier(code) {
+            CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
+        }
         CGEvent::set_flags(Some(&event), self.flags());
         CGEvent::set_integer_value_field(
             Some(&event),
@@ -78,6 +82,7 @@ impl Holds {
         let source = CGEventSource::new(CGEventSourceStateID::Private).ok_or_else(error)?;
         let event = CGEvent::new_mouse_event(Some(&source), kind, point, CGMouseButton(button))
             .ok_or_else(error)?;
+        CGEventSource::set_local_events_suppression_interval(Some(&source), 0.0);
         CGEvent::set_flags(Some(&event), self.flags());
         CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventClickState, clicks);
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
@@ -89,14 +94,24 @@ pub(crate) struct Group {
     stopped: Arc<AtomicBool>,
     holds: Mutex<Holds>,
     leases: Arc<Semaphore>,
+    double_click: Duration,
 }
 impl Group {
-    pub fn new(stopped: Arc<AtomicBool>) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(stopped: Arc<AtomicBool>) -> Result<Arc<Self>, DesktopError> {
+        let double_click =
+            Duration::try_from_secs_f64(objc2_app_kit::NSEvent::doubleClickInterval())
+                .map_err(|_| error())?;
+        let holds = Holds {
+            caps: CGEventSource::flags_state(CGEventSourceStateID::CombinedSessionState)
+                .contains(CGEventFlags::MaskAlphaShift),
+            ..Default::default()
+        };
+        Ok(Arc::new(Self {
             stopped,
-            holds: Mutex::new(Holds::default()),
+            holds: Mutex::new(holds),
             leases: Arc::new(Semaphore::new(64)),
-        })
+            double_click,
+        }))
     }
     pub fn sink(self: &Arc<Self>, geometry: Geometry) -> Result<Box<dyn InputSink>, DesktopError> {
         if self.stopped.load(Ordering::Acquire) {
@@ -155,7 +170,11 @@ impl Sink {
         apple_keys::key(code).ok_or_else(error)?;
         if down {
             if self.keys.contains(&code) {
-                return holds.key(code, true, true);
+                return if apple_keys::modifier(code) {
+                    Ok(())
+                } else {
+                    holds.key(code, true, true)
+                };
             }
             let count = holds.keys.entry(code).or_default();
             *count += 1;
@@ -199,7 +218,7 @@ impl Sink {
                     .click
                     .filter(|(time, old, _, b)| {
                         *b == button
-                            && time.elapsed() < Duration::from_millis(500)
+                            && time.elapsed() < self.group.double_click
                             && (old.x - point.x).abs() <= 4.0
                             && (old.y - point.y).abs() <= 4.0
                     })
@@ -293,6 +312,7 @@ impl InputSink for Sink {
                     0,
                 )
                 .ok_or_else(error)?;
+                CGEventSource::set_local_events_suppression_interval(Some(&source), 0.0);
                 CGEvent::set_flags(Some(&scroll), holds.flags());
                 CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&scroll));
                 self.scroll.0 -= f64::from(x);
