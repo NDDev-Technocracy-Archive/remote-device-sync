@@ -76,6 +76,13 @@ jobs:
           "target/$TARGET/release/nddev-remote" --help > /dev/null
           python3 scripts/package-desktop-runtime.py --binary-dir "target/$TARGET/release" \
             --target "$TARGET" --features "$FEATURES" --out "$RUNNER_TEMP/desktop-runtime"
+      - name: Package macOS applications
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 scripts/package-macos-apps.py --binary-dir "target/$TARGET/release" \
+            --build-info "$RUNNER_TEMP/desktop-runtime/build-info.json" --out "$RUNNER_TEMP/desktop-runtime"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-${{ matrix.target }}

@@ -25,6 +25,23 @@ artifact retention alone is not a permanent deployment store.
 An entrypoint smoke check and desktop-enabled build do not enroll an endpoint,
 restore screen permissions or qualify actual media/input. Native host/client
 acceptance is required before replacing an active device's runtime. macOS viewing
-is distinct from macOS capture/input: the planned native serving backends remain
-unimplemented. No key, consent state or private device configuration belongs in
+is distinct from macOS capture/input: the prepared host backend requires its
+own native permission and screen/input qualification. No key, consent state or private device configuration belongs in
 these generic packages.
+
+The macOS artifact also includes a separate application archive and its own
+checksum/receipt. It contains `NDDev Remote.app` (viewer) and `NDDev Remote Host.app`
+(agent), with stable bundle identities from `packaging/macos.json`. The bundle
+builder verifies the input binary hashes, rejects non-system unbundled libraries,
+signs each app ad hoc on public native CI, verifies signatures and checks entrypoints.
+The separate application archive receives the same main-only provenance contract.
+
+Ad hoc packages are engineering inputs, not notarized distribution. The native
+bundle tool can use an existing local signing certificate selected explicitly by
+digest; private signing material never enters public CI. Its receipt retains the
+original runtime metadata and the final signed file hashes. Local certificate
+signing is a separate transformation; it does not pretend that changed signature
+bytes are the original CI archive. Retain both receipts in the accepting device's
+runtime inventory. The host application's explicit local permission action is
+`Contents/MacOS/rds-agent --request-desktop-permission`. OS consent belongs to that
+installed application/device and is not included in a package.

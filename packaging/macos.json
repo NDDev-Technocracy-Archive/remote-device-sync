@@ -1,0 +1,17 @@
+{
+  "minimum_os": "13.0",
+  "applications": [
+    {
+      "name": "NDDev Remote",
+      "identifier": "ai.nddev.remote",
+      "executable": "nddev-remote",
+      "background": false
+    },
+    {
+      "name": "NDDev Remote Host",
+      "identifier": "ai.nddev.remote.host",
+      "executable": "rds-agent",
+      "background": true
+    }
+  ]
+}
