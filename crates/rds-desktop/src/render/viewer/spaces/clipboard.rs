@@ -122,10 +122,10 @@ impl Screens {
             return;
         }
         if copy.published_generation.is_some() && copy.published_generation == generation {
-            if app.paste_text(event_loop, true) {
-                for kind in
-                    super::super::super::input::deferred_paste_chord(&app.session.keys, paste.shift)
-                {
+            let chord =
+                super::super::super::input::deferred_paste_chord(&app.session.keys, paste.shift);
+            if app.paste_text(true, chord.len()) {
+                for kind in chord {
                     app.input(event_loop, kind);
                 }
             }
