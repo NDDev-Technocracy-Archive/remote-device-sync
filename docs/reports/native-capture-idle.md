@@ -49,3 +49,16 @@ also passed (Linux 121, macOS 120). Adding the ignored sample was followed by
 Linux all-target denied Clippy and the explicit native executions above. The
 shared SDK's unavailable CMake prevents the unrelated full-workspace macOS audio
 lane; its evidence remains in controller issue 166 without an SDK bypass.
+
+The first PR CI execution found a fixture error: its all-ignored native suite
+uses a different Xvfb extent, whereas the new sample required 640 × 480 during
+admission. The sample now takes its extent from the actual first encoded frame
+and requires every subsequent frame to retain it. The paired measurements above
+remain tied to their original frozen 640 × 480 fixtures and source hashes;
+arbitrary-size CI executions are separate checks, not replacement measurements.
+After correction, the complete six-test ignored native suite passed on an owned
+1280 × 720 Xvfb server; the explicit 640 × 480 sample also passed. Both produced
+20 nonempty frames with unchanged extents and cadence. Source snapshot SHA-256:
+`b78e3a6a34c77ab7c924c67c5528e282f55db15914fa2e12b499111393bba751`;
+test executable: `17aef3d828b2a9f1fd2dbe79a960202f1934ad341fde10cd913dc128287be3ad`.
+Denied all-target Linux Clippy passed after this fixture correction.

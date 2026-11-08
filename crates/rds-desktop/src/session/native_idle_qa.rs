@@ -28,23 +28,24 @@ fn counters() -> (u64, u64, u64) {
 }
 
 #[test]
-#[ignore = "requires an owned static 640x480 Xvfb display; explicit 20-second native resource sample"]
+#[ignore = "requires an owned static Xvfb display; explicit 20-second native resource sample"]
 fn native_static_capture_resource_sample() {
     assert!(
         !crate::wayland_session(),
         "the fixture must own a real X11 test server"
     );
-    let mut producer =
-        x11::X11Producer::new(0, Duration::from_millis(33), Some(0), Some((640, 480))).unwrap();
+    let mut producer = x11::X11Producer::new(0, Duration::from_millis(33), Some(0), None).unwrap();
     let controls = ProducerControls::new(4_000_000);
     let clock = SessionClock::default();
-    assert!(producer.produce(0, &controls, &clock).is_some());
+    let first = producer.produce(0, &controls, &clock).unwrap();
+    let extent = (first.header.width, first.header.height);
+    drop(first);
     let before = counters();
     let started = Instant::now();
     let mut encoded = 0;
     for seq in 1..=20 {
         let frame = producer.produce(seq, &controls, &clock).unwrap();
-        assert_eq!((frame.header.width, frame.header.height), (640, 480));
+        assert_eq!((frame.header.width, frame.header.height), extent);
         encoded += usize::from(!frame.payload.is_empty());
     }
     let elapsed = started.elapsed().as_millis();
@@ -54,7 +55,9 @@ fn native_static_capture_resource_sample() {
         "native unchanged-picture cadence changed: {elapsed} ms"
     );
     println!(
-        "native_idle_sample elapsed_ms={elapsed} calls=20 encoded={encoded} thread_cpu_ticks={} voluntary_switches={} involuntary_switches={}",
+        "native_idle_sample extent={}x{} elapsed_ms={elapsed} calls=20 encoded={encoded} thread_cpu_ticks={} voluntary_switches={} involuntary_switches={}",
+        extent.0,
+        extent.1,
         after.0 - before.0,
         after.1 - before.1,
         after.2 - before.2
