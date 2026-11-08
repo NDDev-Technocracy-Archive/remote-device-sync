@@ -29,6 +29,12 @@ struct Args {
     report: PathBuf,
     #[arg(long, default_value_t = 180)]
     duration: u64,
+    /// Explicit short private fixture root; must not already exist.
+    #[arg(long)]
+    control_directory: Option<PathBuf>,
+    /// Serve synthetic peers for independently launched native viewers; no GUI.
+    #[arg(long)]
+    serve_only: bool,
     #[arg(long)]
     noq: bool,
 }
@@ -309,7 +315,12 @@ async fn main() -> anyhow::Result<()> {
         "duration must be 10..=600 seconds"
     );
     let backend = if args.noq {
-        Backend::Noq
+        #[cfg(feature = "transport-noq")]
+        {
+            Backend::Noq
+        }
+        #[cfg(not(feature = "transport-noq"))]
+        anyhow::bail!("--noq requires the transport-noq feature");
     } else {
         Backend::Iroh
     };
@@ -323,10 +334,11 @@ async fn main() -> anyhow::Result<()> {
     ];
     // The macOS per-user temporary path can already consume most of sun_path.
     // Canonical /tmp keeps this private fixture's IPC names below that bound.
-    let root = std::path::Path::new("/tmp").canonicalize()?.join(format!(
+    let generated = std::path::Path::new("/tmp").canonicalize()?.join(format!(
         "rds-workspace-managed-{:032x}",
         rand::random::<u128>()
     ));
+    let root = args.control_directory.unwrap_or(generated);
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let mut manager = Server::start(Some(Prepared::bind(&root).await?), local.clone(), None);
     let client = Client::new(&root);
@@ -377,15 +389,31 @@ async fn main() -> anyhow::Result<()> {
         diagnostics_dir: Some(root.clone()),
         diagnostic_visual_probe: None,
         diagnostic_health: None,
+        diagnostics: Default::default(),
+        diagnostic_started: None,
+        live_diagnostics: None,
     };
-    let result = rds_cli::desktop::workspace::run(
-        client.clone(),
-        config,
-        root.join("workspace.json"),
-        options,
-        false,
-    )
-    .await;
+    let result = if args.serve_only {
+        for device in &config.devices {
+            client
+                .request(rds_core::local::Command::Connect {
+                    target: device.target.clone(),
+                    grant: None,
+                })
+                .await?;
+        }
+        tokio::time::sleep(Duration::from_secs(args.duration)).await;
+        Ok(())
+    } else {
+        rds_cli::desktop::workspace::run(
+            client.clone(),
+            config,
+            root.join("workspace.json"),
+            options,
+            false,
+        )
+        .await
+    };
     let identity_retained = client.snapshot().await?.endpoint == local.id().to_string();
     manager.close().await?;
     local.close().await;
@@ -394,7 +422,7 @@ async fn main() -> anyhow::Result<()> {
     for task in tasks {
         tokio::time::timeout(Duration::from_secs(3), task).await??;
     }
-    let report = serde_json::json!({"backend":format!("{backend:?}"),"identity_retained":identity_retained,
+    let report = serde_json::json!({"backend":format!("{backend:?}"),"serve_only":args.serve_only,"identity_retained":identity_retained,
         "result":result.as_ref().err().map(ToString::to_string),"displays":&*stats.lock().unwrap()});
     let file = std::fs::OpenOptions::new()
         .create_new(true)
@@ -407,12 +435,26 @@ async fn main() -> anyhow::Result<()> {
         identity_retained,
         "workspace replaced the local endpoint identity"
     );
-    anyhow::ensure!(
-        stats.lock().unwrap().iter().all(|s| s.opened > 0
-            && s.frames > 0
-            && s.opened == s.closed
-            && s.held_keys.is_empty()),
-        "not every synthetic display opened, produced and closed cleanly"
-    );
+    let stats = stats.lock().unwrap();
+    if args.serve_only {
+        anyhow::ensure!(
+            stats.iter().any(|s| s.opened > 0),
+            "no external viewer opened a synthetic display"
+        );
+        anyhow::ensure!(
+            stats.iter().all(|s| s.opened == s.closed
+                && (s.opened == 0 || s.frames > 0)
+                && s.held_keys.is_empty()),
+            "external viewer left a synthetic display open or input held"
+        );
+    } else {
+        anyhow::ensure!(
+            stats.iter().all(|s| s.opened > 0
+                && s.frames > 0
+                && s.opened == s.closed
+                && s.held_keys.is_empty()),
+            "not every synthetic display opened, produced and closed cleanly"
+        );
+    }
     Ok(())
 }

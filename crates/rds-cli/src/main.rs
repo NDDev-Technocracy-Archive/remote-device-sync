@@ -86,6 +86,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read a viewer's in-memory metadata through its same-UID local socket.
+    #[cfg(feature = "desktop")]
+    DesktopStatus {
+        /// PID of a viewer owned by this user, using the normal runtime directory.
+        #[arg(
+            long,
+            required_unless_present = "directory",
+            conflicts_with = "directory"
+        )]
+        viewer: Option<std::num::NonZeroU32>,
+        /// An explicit private viewer runtime directory.
+        #[arg(long, required_unless_present = "viewer")]
+        directory: Option<std::path::PathBuf>,
+    },
     /// Manage connections through the local agent; no key loading or UDP bind.
     Session(managed::Options),
     /// Create a new private admin scrape credential without endpoint initialization.
@@ -216,6 +230,17 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    #[cfg(feature = "desktop")]
+    if let Command::DesktopStatus { directory, viewer } = &cli.command {
+        let directory = match (directory, viewer) {
+            (Some(directory), _) => directory.clone(),
+            (_, Some(viewer)) => desktop::live::directory(viewer.get())?,
+            _ => unreachable!("Clap requires an observation target"),
+        };
+        let snapshot = desktop::live::read(&directory).await?;
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        return Ok(());
+    }
     if matches!(cli.command, Command::Session(_)) {
         validate_managed(&cli)?;
         anyhow::ensure!(
@@ -310,6 +335,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let endpoint = bind_endpoint(config).await?;
     let result = async {
         match cli.command {
+            #[cfg(feature = "desktop")]
+            Command::DesktopStatus { .. } => {
+                unreachable!("viewer status handled before endpoint initialization")
+            }
             Command::Session(_) => {
                 unreachable!("local session handled before endpoint initialization")
             }

@@ -1,5 +1,9 @@
 # Roadmap
 
+The [native clipboard and resource quality plan](quality-plan.md) defines the
+current text/image/file clipboard, low-write diagnostics and hardware-media
+increment. Its native acceptance remains open under issue210.
+
 Current execution order is in the [2026-10-09 stability plan](stability-plan-20261009.md).
 Reopened acceptance gates remain in the [2026-09-24 remediation plan](remediation-plan.md), backed by the
 [implementation/session audit](reports/rds-audit-20260924.md).

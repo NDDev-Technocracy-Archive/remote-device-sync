@@ -104,13 +104,25 @@ pub struct Options {
     /// Private directory for live diagnostic snapshots.
     #[arg(long)]
     pub diagnostics_dir: Option<PathBuf>,
+    #[command(flatten)]
+    pub diagnostics: observation::Policy,
     /// Controlled-marker descriptor for causal input-to-submit diagnostics.
     #[arg(long, conflicts_with = "headless")]
     pub diagnostic_visual_probe: Option<PathBuf>,
     /// Internal, non-owning telemetry observation for the native flight recorder.
     #[arg(skip)]
     pub diagnostic_health: Option<rds_observe::HealthObserver>,
+    #[cfg(feature = "desktop")]
+    #[arg(skip)]
+    pub live_diagnostics: Option<live::Handle>,
+    #[arg(skip)]
+    pub diagnostic_started: Option<std::time::Instant>,
 }
+
+pub mod observation;
+
+#[cfg(feature = "desktop")]
+pub mod live;
 
 /// Shared bounded credential loading for CLI and native application clients.
 pub async fn read_grant(
@@ -285,7 +297,8 @@ mod native {
         }
         Ok(())
     }
-    pub(super) async fn run(source: Source, options: Options) -> anyhow::Result<()> {
+    pub(super) async fn run(source: Source, mut options: Options) -> anyhow::Result<()> {
+        options.diagnostics.validate()?;
         if options.headless {
             let duration = options.duration;
             return tokio::select! {
@@ -293,6 +306,7 @@ mod native {
                 _ = async { match duration { Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds.get())).await, None => std::future::pending().await } } => Ok(()),
             };
         }
+        let observation = live::Run::start(&mut options).await?;
         let (viewer, handle, mut input) = Viewer::new(options.display)?;
         let device = match &source {
             Source::Managed { peer, .. } => rds_net::parse_target(peer)
@@ -309,12 +323,9 @@ mod native {
         let worker_options = options.clone();
         let diagnostic_stop = stop.clone();
         let diagnostic_view = handle.clone();
-        let diagnostic_dir = options.diagnostics_dir.clone();
-        let diagnostic_health = options.diagnostic_health.clone();
         workers.spawn(observe(
             diagnostic_view,
-            diagnostic_dir,
-            diagnostic_health,
+            options.clone(),
             diagnostic_stop,
             None,
         ));
@@ -357,6 +368,9 @@ mod native {
         {
             workers.shutdown().await;
         }
+        if let Some(observation) = observation {
+            observation.close().await;
+        }
         let report = handle.report();
         if let Some(path) = options.report {
             use std::io::Write;
@@ -378,52 +392,62 @@ mod native {
 
     pub(super) async fn observe(
         diagnostic_view: ViewerHandle,
-        diagnostic_dir: Option<PathBuf>,
-        diagnostic_health: Option<rds_observe::HealthObserver>,
+        options: Options,
         diagnostic_stop: CancellationToken,
         scope: Option<(u64, u64)>,
     ) -> anyhow::Result<()> {
-        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        options.diagnostics.validate()?;
+        let policy = options.diagnostics;
+        let started = options.diagnostic_started.unwrap_or_else(Instant::now);
+        let mut tick = tokio::time::interval(Duration::from_millis(policy.sample_interval_ms));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut recorder = diagnostics::Recorder::default();
         let mut storage = match scope {
             Some((tab, revision)) => {
-                diagnostic_storage::Storage::scoped(diagnostic_dir, tab, revision)
+                diagnostic_storage::Storage::scoped(options.diagnostics_dir, tab, revision)
             }
-            None => diagnostic_storage::Storage::new(diagnostic_dir),
+            None => diagnostic_storage::Storage::new(options.diagnostics_dir),
         };
+        let live = options
+            .live_diagnostics
+            .as_ref()
+            .map(|live| live.register(scope.into()))
+            .transpose()?;
+        storage.retain(policy.retained_incidents);
+        let storage = diagnostic_storage::Writer::start(storage);
+        let mut writing_snapshot = false;
         loop {
             tokio::select! {
                 _ = diagnostic_stop.cancelled() => break,
                 _ = tick.tick() => {
                     diagnostic_view.heartbeat_ui();
                     let snapshot = diagnostic_view.snapshot();
-                    let health = diagnostic_health.as_ref().and_then(rds_observe::HealthObserver::snapshot);
-                    let (value, incident) = recorder.observe_with_health(&snapshot, health, &storage.health());
-                    let json = serde_json::to_string(&value).ok();
-                    if let Some(json) = &json {
-                        tracing::info!(snapshot=%json, "viewer health");
+                    storage.live_query_available(options.live_diagnostics.as_ref().is_some_and(live::Handle::available));
+                    let health = options.diagnostic_health.as_ref().and_then(rds_observe::HealthObserver::snapshot);
+                    let (mut value, incident) = recorder.observe_with_health(&snapshot, health, &storage.health());
+                    let writes = policy.writes_snapshot(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+                    value["observation"] = serde_json::json!({"policy":policy,"snapshot_window_active":writes});
+                    let json = serde_json::to_vec(&value).ok();
+                    if let (Some(live),Some(bytes)) = (&live,&json) {
+                        storage.live_query_result(live.publish(bytes));
                     }
-                    storage.persist(json.map(String::into_bytes), incident, snapshot.elapsed_ms).await;
+                    if writing_snapshot && !writes { storage.expire_snapshot(snapshot.elapsed_ms); }
+                    writing_snapshot = writes;
+                    storage.submit(json.filter(|_|writes), incident, snapshot.elapsed_ms);
                 },
             }
         }
-        storage
-            .persist(
-                None,
-                recorder.finish(true),
-                diagnostic_view.snapshot().elapsed_ms,
-            )
-            .await;
-        let remaining = storage.health().incident_queue_pending;
+        storage.submit(
+            None,
+            recorder.finish(true),
+            diagnostic_view.snapshot().elapsed_ms,
+        );
+        let remaining = storage.finish().await.incident_queue_pending;
         if remaining > 0 {
             tracing::warn!(
                 remaining,
                 "viewer shutdown retains unsaved incident windows in memory only"
             );
-        }
-        if scope.is_some() {
-            storage.remove_snapshot().await;
         }
         Ok(())
     }
