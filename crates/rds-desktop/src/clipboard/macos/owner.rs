@@ -40,6 +40,7 @@ struct Job {
     running: Running,
     _core: Arc<Core>,
     _body: Option<OwnedSemaphorePermit>,
+    _operation_original: Option<NativeLifetime>,
 }
 enum Command {
     Current(oneshot::Sender<Result<Snapshot, Error>>),
@@ -225,10 +226,10 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     )?;
     let expected = text.encoded().clone();
     let published = provider
-        .publish(before.generation, Publication::Text(text))
+        .publish(before.generation, Publication::Text(text), Arc::new(()))
         .await?;
     let Value::Text(read) = provider
-        .read(published.generation, Format::TextUtf8)
+        .read(published.generation, Format::TextUtf8, Arc::new(()))
         .await?
     else {
         return Err(Error::Unsupported);
@@ -242,7 +243,7 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     }
     if !matches!(
         provider
-            .publish(before.generation, Publication::Text(read))
+            .publish(before.generation, Publication::Text(read), Arc::new(()))
             .await,
         Err(Error::Changed)
     ) || provider.current().await?.generation != published.generation
@@ -263,10 +264,14 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     let image = super::super::image::Png::new(bytes::Bytes::from(encoded), &policy.limits)?;
     let expected = image.encoded().clone();
     let published = provider
-        .publish(published.generation, Publication::Image(image))
+        .publish(
+            published.generation,
+            Publication::Image(image),
+            Arc::new(()),
+        )
         .await?;
     let Value::Image(read) = provider
-        .read(published.generation, Format::ImagePng)
+        .read(published.generation, Format::ImagePng, Arc::new(()))
         .await?
     else {
         return Err(Error::Unsupported);
@@ -324,14 +329,14 @@ impl Drop for Lease {
 impl Lease {
     async fn call<T: Send>(
         &self,
-        body: bool,
+        original: Option<NativeLifetime>,
         command: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Command + Send,
     ) -> Result<T, Error> {
         if !self.group.available() {
             return Err(Error::Unavailable);
         }
         let running = self.owner.begin().ok_or(Error::Changed)?;
-        let body = if body {
+        let body = if original.is_some() {
             Some(
                 self.group
                     .0
@@ -352,6 +357,7 @@ impl Lease {
                 running,
                 _core: self.group.0.clone(),
                 _body: body,
+                _operation_original: original,
             }))
             .map_err(|_| Error::Unavailable)?;
         let value = tokio::time::timeout(
@@ -390,16 +396,21 @@ impl Provider for Lease {
         }
     }
     fn current(&self) -> Operation<'_, Snapshot> {
-        Box::pin(self.call(false, Command::Current))
+        Box::pin(self.call(None, Command::Current))
     }
-    fn read(&self, generation: u64, format: Format) -> Operation<'_, Value> {
+    fn read(
+        &self,
+        generation: u64,
+        format: Format,
+        original: NativeLifetime,
+    ) -> Operation<'_, Value> {
         Box::pin(async move {
             let authority: Option<NativeLifetime> = if format == Format::Files {
                 Some(Arc::new(self.owner.begin().ok_or(Error::Changed)?))
             } else {
                 None
             };
-            self.call(true, move |reply| Command::Read {
+            self.call(Some(original), move |reply| Command::Read {
                 generation,
                 format,
                 authority,
@@ -408,8 +419,13 @@ impl Provider for Lease {
             .await
         })
     }
-    fn publish(&self, generation: u64, value: Publication) -> Operation<'_, Snapshot> {
-        Box::pin(self.call(true, move |reply| Command::Publish {
+    fn publish(
+        &self,
+        generation: u64,
+        value: Publication,
+        original: NativeLifetime,
+    ) -> Operation<'_, Snapshot> {
+        Box::pin(self.call(Some(original), move |reply| Command::Publish {
             generation,
             value,
             reply,
@@ -470,7 +486,16 @@ impl ClipboardBackend for Legacy {
             )
             .map_err(desktop_error)?;
             self.provider
-                .publish(current.generation, Publication::Text(text))
+                .publish(
+                    current.generation,
+                    Publication::Text(text),
+                    Arc::new(
+                        self.provider
+                            .owner
+                            .begin()
+                            .ok_or_else(|| desktop_error(Error::Changed))?,
+                    ),
+                )
                 .await
                 .map_err(desktop_error)?;
             Ok(())
@@ -498,7 +523,11 @@ impl ClipboardBackend for Legacy {
                 }
                 match self
                     .provider
-                    .read(snapshot.generation, Format::TextUtf8)
+                    .read(
+                        snapshot.generation,
+                        Format::TextUtf8,
+                        Arc::new(self.provider.owner.begin()?),
+                    )
                     .await
                 {
                     Ok(Value::Text(text)) => return Some(text.as_str().to_owned()),
