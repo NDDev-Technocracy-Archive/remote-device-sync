@@ -5,6 +5,7 @@ use winit::{dpi::PhysicalSize, window::Window};
 use crate::{DesktopError, RawFrame};
 
 use super::input::Viewport;
+use super::observation::{DrawObservation, DrawUpdate, Phase, RendererInfo};
 use super::workspace::chrome::UiFrame;
 
 const SHADER: &str = r#"
@@ -48,6 +49,7 @@ impl DrawOutcome {
 }
 
 pub(super) struct Gpu {
+    info: RendererInfo,
     instance: wgpu::Instance,
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -137,7 +139,15 @@ impl Gpu {
         });
         tracing::info!(backend = ?adapter.get_info().backend, present_mode = ?config.present_mode,
             "native desktop renderer ready");
+        let info = RendererInfo {
+            backend: format!("{:?}", adapter.get_info().backend),
+            device_type: format!("{:?}", adapter.get_info().device_type),
+            present_mode: format!("{:?}", config.present_mode),
+            surface_format: format!("{:?}", config.format),
+            desired_maximum_frame_latency: config.desired_maximum_frame_latency,
+        };
         Ok(Self {
+            info,
             instance,
             window,
             surface,
@@ -245,6 +255,9 @@ impl Gpu {
     pub(super) fn uploads(&self) -> u64 {
         self.uploads
     }
+    pub(super) fn info(&self) -> &RendererInfo {
+        &self.info
+    }
 
     pub(super) fn clear_picture(&mut self) {
         self.picture = None;
@@ -258,12 +271,16 @@ impl Gpu {
         &mut self,
         frame: Option<&RawFrame>,
         mut ui: Option<&mut UiFrame>,
+        mut observe: impl FnMut(DrawUpdate),
     ) -> Result<DrawOutcome, DesktopError> {
+        let mut observation = DrawObservation::new(&mut observe);
+        observation.enter(Phase::Configuration);
         // A suboptimal surface remains usable for this frame, but its backing
         // must be refreshed before acquiring another image (e.g. a DPI move).
         if self.reconfigure {
             self.resize(self.window.inner_size());
         }
+        observation.enter(Phase::Acquisition);
         let surface = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -271,6 +288,7 @@ impl Gpu {
                 frame
             }
             wgpu::CurrentSurfaceTexture::Lost => {
+                observation.enter(Phase::Configuration);
                 self.surface = self
                     .instance
                     .create_surface(self.window.clone())
@@ -280,6 +298,7 @@ impl Gpu {
                 return Ok(DrawOutcome::Reconfigured);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
+                observation.enter(Phase::Configuration);
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
                 return Ok(DrawOutcome::Reconfigured);
@@ -294,8 +313,10 @@ impl Gpu {
         // while an occluded/unavailable surface cannot submit: one retained
         // CPU frame must not become an unbounded queue of GPU upload buffers.
         if let Some(frame) = frame {
+            observation.enter(Phase::Upload);
             self.upload(frame)?;
         }
+        observation.enter(Phase::Commands);
         let view = surface.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let screen = ui.as_ref().map(|ui| egui_wgpu::ScreenDescriptor {
@@ -392,14 +413,18 @@ impl Gpu {
             renderer.render(&mut pass.forget_lifetime(), &ui.primitives, screen);
         }
         commands.push(encoder.finish());
+        observation.enter(Phase::Submission);
         self.queue.submit(commands);
+        observation.enter(Phase::Cleanup);
         if let (Some(renderer), Some(ui)) = (&mut self.chrome, ui.as_mut()) {
             for id in ui.textures.free.drain() {
                 renderer.free_texture(&id);
             }
         }
         self.window.pre_present_notify();
+        observation.enter(Phase::Presentation);
         self.queue.present(surface);
+        observation.enter(Phase::Cleanup);
         if self.reconfigure {
             self.window.request_redraw();
         }
