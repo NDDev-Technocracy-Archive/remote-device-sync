@@ -11,6 +11,7 @@ import unittest
 
 import desktop_release as desktop
 import test_release as fixture
+import design_system
 
 
 def encoded(value):
@@ -34,6 +35,7 @@ class DesktopPromotion(unittest.TestCase):
             directory.mkdir()
             binaries = {name: ('synthetic '+target+' '+name).encode() for name in desktop.BINARIES}
             info = dict(schema_version=1, source=self.commit, version=fixture.VERSION, target=target,
+                        design_system=design_system.verify(Path.cwd()),
                         features=desktop.FEATURES[target],
                         rustc='rustc 1.98.1 (fixture)\nhost: '+target+'\nrelease: 1.98.1',
                         binaries={name: hashlib.sha256(value).hexdigest() for name,value in binaries.items()},

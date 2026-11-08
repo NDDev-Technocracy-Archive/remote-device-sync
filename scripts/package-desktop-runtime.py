@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import tarfile
+import design_system
 
 
 def command(*args):
@@ -60,6 +61,7 @@ def main():
             raise SystemExit('invalid package notice: ' + name)
         payload[name] = path.read_bytes()
     manifest = {
+        'design_system': design_system.verify(root),
         'schema_version': 1,
         'source': source,
         'version': Path('VERSION').read_text().strip(),

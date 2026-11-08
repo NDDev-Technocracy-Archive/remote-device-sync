@@ -65,10 +65,16 @@ off leaves the remote computer's own paste shortcut available without reading
 the local clipboard. Linux native viewer clipboard publication remains unavailable;
 X11 server-side selection support does not imply that viewer capability.
 
-**Save workspace** writes bounded version-1 `viewer-workspace.json` preferences
+**Appearance** selects one of the four released OpenNetwork themes for this
+workspace and its display windows. Changing it repaints the controls without
+reconnecting; **Save workspace** persists the selection. The unchanged package,
+fonts and released source pin are described in [the design binding](design-system.md).
+
+**Save workspace** writes bounded version-2 `viewer-workspace.json` preferences
 beside the default agent configuration. The file contains device references,
 tab order and per-display profiles, with optional paths to existing grant files;
-it contains no endpoint private key or embedded grant. The writer creates a
+it contains no endpoint private key or embedded grant. Version 1 still loads with
+the previous dark default and is upgraded only on explicit Save. The writer creates a
 private temporary file, syncs it, replaces the preference file and syncs its
 directory. A directory-sync failure after replacement reports an uncertain save.
 Unknown versions/fields, invalid references, oversized input and unsafe aliases

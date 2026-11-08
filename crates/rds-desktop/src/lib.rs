@@ -36,6 +36,8 @@ pub mod input;
 pub mod mailbox;
 mod media_repair;
 mod order;
+mod producer_signal;
+pub use producer_signal::ProducerSignal;
 #[cfg(any(test, all(target_os = "linux", feature = "portal")))]
 mod portal;
 mod receipts;

@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/iroh", "vendor/noq", "vendor/noq-proto"]
+exclude = ["vendor/iroh", "vendor/noq", "vendor/noq-proto", "vendor/nddev-opennetwork-design-tokens"]
 resolver = "3"
 members = [
     "crates/rds-agent",
@@ -40,6 +40,7 @@ repository = "https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote"
 #   rds-server    → rds-relay, rds-discovery
 
 [workspace.dependencies]
+nddev-opennetwork-design-tokens = { path = "vendor/nddev-opennetwork-design-tokens" }
 anyhow = "1"
 blake3 = "1"
 image = { version = "0.25.10", default-features = false, features = ["png", "tiff"] }

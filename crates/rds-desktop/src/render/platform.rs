@@ -228,7 +228,10 @@ pub fn choose_resolution() -> Option<u32> {
     let response = {
         let alert = NSAlert::new(main);
         app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
-        alert.setMessageText(&NSString::from_str("RDS — Video quality"));
+        alert.setMessageText(&NSString::from_str(&format!(
+            "{} — Video quality",
+            super::APPLICATION_NAME
+        )));
         alert.setInformativeText(&NSString::from_str("Full HD is the default. Choose 720p for a slower connection, or Original for the remote screen's native resolution."));
         for title in ["Full HD · 1080p", "HD · 720p", "Original", "Cancel"] {
             alert.addButtonWithTitle(&NSString::from_str(title));

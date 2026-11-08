@@ -371,7 +371,8 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect();
     let config = WorkspaceConfig {
-        schema_version: 1,
+        schema_version: 2,
+        appearance: Default::default(),
         presentation: Default::default(),
         devices,
         tabs,

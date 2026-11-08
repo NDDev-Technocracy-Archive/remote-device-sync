@@ -1,6 +1,6 @@
 //! Session-local repair epochs and ownership of the independent-picture gate.
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 
 const ACTIVE: u64 = 1;
@@ -92,7 +92,7 @@ impl MediaRepair {
     pub(crate) fn key(
         self: &Arc<Self>,
         generation: u64,
-        idr: Arc<AtomicBool>,
+        idr: Arc<crate::ProducerSignal>,
     ) -> Option<KeyPermit> {
         self.state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -123,7 +123,7 @@ impl MediaRepair {
 pub(crate) struct KeyPermit {
     repair: Arc<MediaRepair>,
     generation: u64,
-    idr: Arc<AtomicBool>,
+    idr: Arc<crate::ProducerSignal>,
     pub(crate) confirmed: bool,
 }
 
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn old_key_cannot_install_or_release_the_replacement_gate() {
         let (repair, _) = MediaRepair::new();
-        let idr = Arc::new(AtomicBool::new(false));
+        let idr = crate::ProducerSignal::new(false, Arc::default());
         let mut old = repair.key(0, idr.clone()).unwrap();
         assert_eq!(repair.request(), Request::Accepted);
         let epoch = repair.generation();
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn canceled_fresh_key_releases_credit_but_keeps_repair_active() {
         let (repair, _) = MediaRepair::new();
-        let idr = Arc::new(AtomicBool::new(false));
+        let idr = crate::ProducerSignal::new(false, Arc::default());
         assert_eq!(repair.request(), Request::Accepted);
         drop(repair.key(repair.generation(), idr.clone()).unwrap());
         assert!(!repair.key_pending());
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn repeated_requests_preserve_an_active_recovery_picture() {
         let (repair, _) = MediaRepair::new();
-        let idr = Arc::new(AtomicBool::new(false));
+        let idr = crate::ProducerSignal::new(false, Arc::default());
         assert_eq!(repair.request(), Request::Accepted);
         let epoch = repair.generation();
         let mut key = repair.key(epoch, idr.clone()).unwrap();

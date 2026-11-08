@@ -110,7 +110,8 @@ mod tests {
     }
     fn config() -> WorkspaceConfig {
         WorkspaceConfig {
-            schema_version: 1,
+            schema_version: 2,
+            appearance: Default::default(),
             presentation: Default::default(),
             devices: vec![DeviceConfig {
                 key: "alpha".into(),
@@ -137,9 +138,12 @@ mod tests {
         save(&path, &config()).unwrap();
         let mut old = std::fs::File::open(&path).unwrap();
         let mut updated = config();
+        updated.appearance =
+            rds_desktop::render::workspace::Appearance::parse("light-contrast").unwrap();
         updated.tabs[0].profile.max_fps = 60;
         updated.presentation = super::super::Presentation::Spaces;
         save(&path, &updated).unwrap();
+        assert_eq!(load(&path).unwrap().unwrap().appearance, updated.appearance);
         assert_eq!(load(&path).unwrap().unwrap().tabs[0].profile.max_fps, 60);
         assert!(load(&path).unwrap().unwrap().presentation == super::super::Presentation::Spaces);
         let mut bytes = vec![];
@@ -160,6 +164,34 @@ mod tests {
             std::fs::read(dir.0.join("viewer.json")).unwrap(),
             b"legacy profile"
         );
+    }
+
+    #[test]
+    fn reading_a_version_one_workspace_preserves_its_bytes_and_explicit_save_upgrades_it() {
+        let dir = Temp::new();
+        let path = dir.0.join("workspace.json");
+        let mut old = serde_json::to_value(config()).unwrap();
+        old["schema_version"] = 1.into();
+        old.as_object_mut().unwrap().remove("appearance");
+        let bytes = serde_json::to_vec(&old).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut loaded = load(&path).unwrap().unwrap();
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.appearance.id(), "dark");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let tabs = loaded.tabs.clone();
+        loaded.schema_version = 2;
+        loaded.appearance =
+            rds_desktop::render::workspace::Appearance::parse("dark-contrast").unwrap();
+        save(&path, &loaded).unwrap();
+        let restored = load(&path).unwrap().unwrap();
+        assert_eq!(restored.schema_version, 2);
+        assert_eq!(restored.appearance.id(), "dark-contrast");
+        assert_eq!(restored.tabs, tabs);
+        let mut invalid = serde_json::to_value(restored).unwrap();
+        invalid["appearance"] = "unknown-theme".into();
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(load(&path).is_err());
     }
 
     #[test]

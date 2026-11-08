@@ -11,9 +11,10 @@ default = []
 x11 = ["dep:x11rb", "dep:openh264", "dep:openh264-sys2", "dep:memmap2", "dep:rustix"]
 host = ["x11", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core-foundation", "dep:objc2-core-graphics", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-screen-capture-kit", "dep:block2", "dep:dispatch2"]
 portal = ["x11", "dep:ashpd", "dep:pipewire", "dep:reis", "dep:futures-util"]
-viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:wayland-backend", "dep:wayland-client", "dep:wayland-protocols"]
+viewer = ["nddev-opennetwork-design-tokens/fonts", "dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:wayland-backend", "dep:wayland-client", "dep:wayland-protocols"]
 
 [dependencies]
+nddev-opennetwork-design-tokens.workspace = true
 blake3.workspace = true
 image.workspace = true
 png.workspace = true

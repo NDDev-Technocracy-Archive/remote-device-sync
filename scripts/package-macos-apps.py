@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import io
 import json
+import design_system
 from pathlib import Path
 import platform
 import plistlib
@@ -55,6 +56,8 @@ def main():
                 raise SystemExit('runtime depends on an unbundled library: ' + dependency)
     root = Path(__file__).resolve().parent.parent
     settings = json.loads((root / 'packaging/macos.json').read_text())
+    if base.get('design_system') != design_system.verify(root):
+        raise SystemExit('native design-system pin differs from the selected source')
     notices = json.loads((root / 'packaging/notices.json').read_text())
     if base.get('notices') != {name: digest(root / path) for name, path in notices.items()}:
         raise SystemExit('native package notices differ from the selected source')
