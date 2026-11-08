@@ -184,7 +184,6 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
         && !cli.options.headless
         && !cli.list_displays
         && cli.options.report.is_none()
-        && cli.options.diagnostic_visual_probe.is_none()
     {
         use rds_cli::desktop::workspace::{DeviceConfig, Presentation, WorkspaceConfig};
         use rds_desktop::render::workspace::{TabProfile, TabSpec, VideoSize};

@@ -172,6 +172,11 @@ counter once per left-button press; no unrelated actor may drive that target
 during qualification. The descriptor is an explicit diagnostic, not a normal
 desktop setting or remote protocol extension.
 
+Workspace tabs and spaces initialize the same descriptor for each opened view.
+Selecting a probe preserves the saved workspace and its per-tab input policy;
+`--report` or `--separate-windows` still selects independent single-view runs.
+Live snapshots honor an explicit `--diagnostics-dir` in both presentations.
+
 Only unmodified native left presses inside that rectangle begin a sample, after a matching
 marker has already been presented. The exact pending BGRA frame must reach
 `DrawOutcome::Presented` with the expected marker/counter before completing it.
