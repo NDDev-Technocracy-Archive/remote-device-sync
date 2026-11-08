@@ -38,6 +38,25 @@ pub enum ViewerInput {
     InputStalled,
 }
 
+/// The caller validates the UTF-8 value's protocol bound before admission.
+/// Constructing this iterator allocates no payload chunks.
+fn clipboard_text(id: u64, text: &str) -> impl ExactSizeIterator<Item = DesktopControl> + '_ {
+    let count = text
+        .len()
+        .div_ceil(crate::clipboard::SEND_CHUNK_BYTES)
+        .max(1);
+    (0..count).map(move |index| {
+        let offset = index * crate::clipboard::SEND_CHUNK_BYTES;
+        let end = (offset + crate::clipboard::SEND_CHUNK_BYTES).min(text.len());
+        DesktopControl::ClipboardChunk {
+            id,
+            offset: offset as u32,
+            total: text.len() as u32,
+            data: text.as_bytes()[offset..end].to_vec(),
+        }
+    })
+}
+
 struct InputState {
     queue: Mutex<VecDeque<ViewerInput>>,
     pointer_in_flight: Mutex<VecDeque<(u64, tokio::time::Instant)>>,
@@ -149,6 +168,35 @@ impl InputReceiver {
     }
 }
 impl InputSender {
+    /// The UI owns the sole producer. Admit a complete clipboard message and
+    /// leave room for its immediately following input chord before allocating
+    /// any chunks. A refusal changes neither input order nor sequence state.
+    fn clipboard(
+        &self,
+        controls: impl ExactSizeIterator<Item = DesktopControl>,
+        following_input: usize,
+    ) -> Result<(), ()> {
+        let mut queue = self
+            .0
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if controls.len().saturating_add(following_input)
+            > INPUT_QUEUE_CAPACITY.saturating_sub(queue.len())
+            || queue
+                .iter()
+                .any(|message| matches!(message, ViewerInput::Close))
+        {
+            return Err(());
+        }
+        queue.extend(controls.map(ViewerInput::Control));
+        self.0
+            .max_depth
+            .fetch_max(queue.len() as u64, Ordering::Relaxed);
+        drop(queue);
+        self.0.ready.notify_one();
+        Ok(())
+    }
     fn send(&self, message: ViewerInput) -> Result<(), ()> {
         let mut queue = self
             .0
@@ -890,12 +938,12 @@ struct SessionView {
     pointer_point: Option<(f64, f64)>,
 }
 impl SessionView {
-    fn clipboard_work(&mut self) -> Result<bool, DesktopError> {
+    fn clipboard_work(&mut self) -> bool {
         if !lock(&self.handle.state).clipboard.needs_work() {
-            return Ok(false);
+            return false;
         }
         let Ok(generation) = super::platform::clipboard_generation() else {
-            return Ok(false);
+            return false;
         };
         let text = lock(&self.handle.state).clipboard.publish(generation);
         let mut published = false;
@@ -912,18 +960,22 @@ impl SessionView {
         // Publication changes native ownership; observe it before the next request.
         let Ok(generation) = super::platform::clipboard_generation() else {
             lock(&self.handle.state).clipboard.publication_failed();
-            return Ok(published);
+            return published;
         };
         if published {
             lock(&self.handle.state).clipboard.published(generation);
         }
         let request = lock(&self.handle.state).clipboard.request(generation);
         if let Some(control) = request {
-            self.input
-                .send(ViewerInput::Control(control))
-                .map_err(|_| DesktopError::Input("clipboard request queue full".into()))?;
+            let DesktopControl::ClipboardRequest { id, .. } = control else {
+                unreachable!("clipboard arbiter returns only requests");
+            };
+            if self.input.clipboard(std::iter::once(control), 0).is_err() {
+                lock(&self.handle.state).clipboard.failed(id);
+                self.handle.notice("Clipboard is busy; try copying again");
+            }
         }
-        Ok(published)
+        published
     }
     fn new(display: u32, proxy: EventLoopProxy<()>) -> (Self, ViewerHandle, InputReceiver) {
         let input_state = Arc::new(InputState {
@@ -1082,15 +1134,29 @@ impl App {
         if self.workspace_clipboard_work(event_loop) {
             return;
         }
-        if let Err(error) = self.session.clipboard_work() {
-            self.fail_input(event_loop, error);
-        }
+        self.session.clipboard_work();
     }
-    fn paste_text(&mut self, event_loop: &ActiveEventLoop, command_paste: bool) -> bool {
+    fn paste_text(&mut self, command_paste: bool, following_input: usize) -> bool {
         match super::platform::paste_text() {
             Ok(Some(text)) => {
+                if text.len() > crate::clipboard::MAX_TEXT_BYTES {
+                    self.session
+                        .handle
+                        .notice("Copied text exceeds the clipboard limit");
+                    return false;
+                }
                 let id = rand::random();
                 let total = text.len() as u32;
+                let admitted = self
+                    .session
+                    .input
+                    .clipboard(clipboard_text(id, &text), following_input);
+                if admitted.is_err() {
+                    self.session
+                        .handle
+                        .notice("Clipboard is busy; try pasting again");
+                    return false;
+                }
                 lock(&self.session.handle.state).clipboard_latency.sent(
                     id,
                     total,
@@ -1102,44 +1168,6 @@ impl App {
                     command_paste,
                     "explicit local clipboard text queued"
                 );
-                let chunks = text.as_bytes().chunks(crate::clipboard::SEND_CHUNK_BYTES);
-                for (index, chunk) in chunks.enumerate() {
-                    if self
-                        .session
-                        .input
-                        .send(ViewerInput::Control(DesktopControl::ClipboardChunk {
-                            id,
-                            offset: (index * crate::clipboard::SEND_CHUNK_BYTES) as u32,
-                            total,
-                            data: chunk.to_vec(),
-                        }))
-                        .is_err()
-                    {
-                        self.fail_input(
-                            event_loop,
-                            DesktopError::Input("clipboard input queue full".into()),
-                        );
-                        return false;
-                    }
-                }
-                if total == 0
-                    && self
-                        .session
-                        .input
-                        .send(ViewerInput::Control(DesktopControl::ClipboardChunk {
-                            id,
-                            offset: 0,
-                            total,
-                            data: vec![],
-                        }))
-                        .is_err()
-                {
-                    self.fail_input(
-                        event_loop,
-                        DesktopError::Input("clipboard input queue full".into()),
-                    );
-                    return false;
-                }
             }
             Ok(None) if command_paste => {
                 tracing::info!("explicit local clipboard paste has no text");
@@ -1655,7 +1683,14 @@ impl ApplicationHandler<()> for App {
                                 return;
                             }
                             if self.workspace_clipboard_enabled()
-                                && !self.paste_text(event_loop, command_paste)
+                                && !self.paste_text(
+                                    command_paste,
+                                    if command_paste {
+                                        super::input::command_paste_chord(&self.session.keys).len()
+                                    } else {
+                                        1
+                                    },
+                                )
                             {
                                 return;
                             }
@@ -1879,6 +1914,122 @@ mod tests {
             kind,
         }))
     }
+    fn clipboard_queue() -> (InputSender, InputReceiver) {
+        let state = Arc::new(InputState {
+            queue: Mutex::new(VecDeque::new()),
+            pointer_in_flight: Mutex::new(VecDeque::new()),
+            ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
+        });
+        (InputSender(state.clone()), InputReceiver(state))
+    }
+
+    #[test]
+    fn clipboard_backpressure_does_not_allocate_a_partial_message_or_stop_input() {
+        let (sender, receiver) = clipboard_queue();
+        for sequence in 0..(INPUT_QUEUE_CAPACITY - 1) {
+            sender
+                .send(event(sequence as u64, InputKind::KeyDown { code: 30 }))
+                .unwrap();
+        }
+        let allocated = std::cell::Cell::new(0);
+        let controls = (0..2).map(|_| {
+            allocated.set(allocated.get() + 1);
+            DesktopControl::ClipboardChunk {
+                id: 19,
+                offset: 0,
+                total: 0,
+                data: vec![],
+            }
+        });
+        assert!(sender.clipboard(controls, 0).is_err());
+        assert_eq!(allocated.get(), 0);
+        for sequence in 0..(INPUT_QUEUE_CAPACITY - 1) {
+            let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.try_recv()
+            else {
+                panic!("clipboard refusal changed existing input");
+            };
+            assert_eq!(input.seq, sequence as u64);
+        }
+        assert!(receiver.try_recv().is_none());
+        sender
+            .send(event(2000, InputKind::KeyUp { code: 30 }))
+            .unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Some(ViewerInput::Control(DesktopControl::Input(_)))
+        ));
+        assert_eq!(sender.0.input_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn complete_clipboard_admission_preserves_utf8_empty_values_and_the_following_chord() {
+        for text in [String::new(), "Привет 🖥️\n".repeat(12000)] {
+            let (sender, receiver) = clipboard_queue();
+            let chunks = clipboard_text(19, &text).len();
+            let preceding = INPUT_QUEUE_CAPACITY - chunks - 1;
+            for sequence in 0..preceding {
+                sender
+                    .send(event(sequence as u64, InputKind::KeyDown { code: 30 }))
+                    .unwrap();
+            }
+            assert!(sender.clipboard(clipboard_text(19, &text), 2).is_err());
+            assert!(matches!(
+                receiver.try_recv(),
+                Some(ViewerInput::Control(DesktopControl::Input(_)))
+            ));
+            sender.clipboard(clipboard_text(19, &text), 2).unwrap();
+            sender
+                .send(event(2000, InputKind::KeyDown { code: 47 }))
+                .unwrap();
+            sender
+                .send(event(2001, InputKind::KeyUp { code: 47 }))
+                .unwrap();
+            for _ in 1..preceding {
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Some(ViewerInput::Control(DesktopControl::Input(_)))
+                ));
+            }
+            let mut assembly = crate::clipboard::Assembly::default();
+            let mut received = None;
+            for _ in 0..chunks {
+                let Some(ViewerInput::Control(DesktopControl::ClipboardChunk {
+                    id,
+                    offset,
+                    total,
+                    data,
+                })) = receiver.try_recv()
+                else {
+                    panic!("missing admitted clipboard chunk");
+                };
+                if let Some(value) = assembly.push(id, offset, total, data).unwrap() {
+                    assert!(received.replace(value).is_none());
+                }
+            }
+            assert_eq!(received.as_deref(), Some(text.as_str()));
+            for sequence in [2000, 2001] {
+                let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.try_recv()
+                else {
+                    panic!("paste displaced its native input chord");
+                };
+                assert_eq!(input.seq, sequence);
+            }
+            assert!(receiver.try_recv().is_none());
+        }
+    }
+
+    #[test]
+    fn clipboard_admission_cannot_reopen_an_ended_input_owner() {
+        let (sender, receiver) = clipboard_queue();
+        sender.send(ViewerInput::Close).unwrap();
+        assert!(sender.clipboard(clipboard_text(19, "late"), 0).is_err());
+        assert!(matches!(receiver.try_recv(), Some(ViewerInput::Close)));
+        assert!(receiver.try_recv().is_none());
+    }
+
     #[test]
     fn input_latency_matches_sequences_and_keeps_bounded_local_clock_history() {
         let mut latency = InputLatency::default();

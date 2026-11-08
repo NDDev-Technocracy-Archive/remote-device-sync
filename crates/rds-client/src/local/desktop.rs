@@ -275,7 +275,7 @@ impl ManagedControl {
         let seq = self
             .state
             .input_seq
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| s.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |s| s.checked_add(1))
             .map_err(|_| io::Error::other("input sequence exhausted"))?;
         self.control(DesktopControl::Input(InputEvent {
             seq,
@@ -292,7 +292,7 @@ impl ManagedControl {
         let seq = self
             .state
             .heartbeat_seq
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| s.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |s| s.checked_add(1))
             .map_err(|_| io::Error::other("heartbeat sequence exhausted"))?;
         self.control(DesktopControl::Heartbeat {
             seq,

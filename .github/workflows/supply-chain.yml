@@ -24,8 +24,7 @@ jobs:
         persist-credentials: false
     - name: Select the Rust toolchain
       run: |
-        rustup toolchain install 1.98.1 --profile minimal
-        echo RUSTUP_TOOLCHAIN=1.98.1 >> "$GITHUB_ENV"
+        rustup show active-toolchain
     - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
       with:
         capability: rust

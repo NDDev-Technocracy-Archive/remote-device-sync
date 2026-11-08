@@ -792,7 +792,7 @@ pub async fn serve_desktop_with(
                         std::thread::sleep(Duration::from_millis(1));
                     }
                     if capture_admission
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                             (count < MAX_PENDING_FRAME_ACKS as u64).then_some(count + 1)
                         })
                         .is_ok()

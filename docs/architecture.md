@@ -867,7 +867,7 @@ network packet, atomic delivery or cancellation-safe writes.
 EndpointSettings/EndpointConfig PathPreference is lowered in the owning backend.
 Iroh latency mode ranks existing candidate RTTs without transport tiers and uses
 5ms switching stickiness. A bounded1s optional actor refresh makes the decision
-respond to changing RTT while topology is unchanged. The exact published Iroh1.3
+respond to changing RTT while topology is unchanged. The exact published Iroh 1.4.1
 source carries this narrow default-None hook under vendor/iroh, excluded from
 the RDS workspace; provenance and licenses are retained. Existing/default and
 explicitly pinned selectors keep their original callback behavior. Noq already

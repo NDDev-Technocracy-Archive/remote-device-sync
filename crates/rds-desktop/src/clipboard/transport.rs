@@ -125,7 +125,7 @@ impl Streams {
             .map_err(|_| self.admission_error())?;
         let sequence = self
             .next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Error::Closed)?;
         let request = Request {
             id: TransferId {
@@ -162,17 +162,10 @@ impl Streams {
         }
     }
 
-    fn admit_response(
-        &self,
-        request: &Request,
-        bytes: u64,
-    ) -> Result<(TransferHeader, OwnedSemaphorePermit), Error> {
-        let header = TransferHeader {
-            id: request.id,
-            kind: request.kind,
-            bytes,
-        };
-        header.validate(request, &self.limits)?;
+    /// Reserve before reading a native representation. The response's
+    /// original owner accompanies each actual native operation.
+    pub fn response(&self, request: &Request) -> Result<Response<'_>, Error> {
+        request.validate(&self.limits)?;
         if request.id.desktop != self.desktop {
             return Err(rds_core::clipboard::Error::Identity.into());
         }
@@ -181,7 +174,14 @@ impl Streams {
             .clone()
             .try_acquire_owned()
             .map_err(|_| self.admission_error())?;
-        Ok((header, permit))
+        Ok(Response {
+            owner: self,
+            request: request.clone(),
+            lease: Arc::new(Lease {
+                _permit: permit,
+                _original: self.original.clone(),
+            }),
+        })
     }
 
     async fn open(&self, id: TransferId) -> Result<Sending, Error> {
@@ -196,34 +196,62 @@ impl Streams {
         Ok(sending)
     }
 
-    /// The desktop owner has already admitted this exact peer request once.
-    /// Native reads and representation validation precede sending the bytes.
-    pub async fn send_bytes(&self, request: &Request, bytes: Bytes) -> Result<Receipt, Error> {
-        if matches!(request.kind, PayloadKind::File(_)) {
+    pub async fn send_file(
+        &self,
+        request: &Request,
+        source: &dyn native::Files,
+    ) -> Result<Receipt, Error> {
+        self.response(request)?.send_file(source).await
+    }
+}
+impl Drop for Streams {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// One admitted response. It is consumed by the single outgoing body and
+/// stays alive through native read cancellation and actual I/O drain.
+pub struct Response<'a> {
+    owner: &'a Streams,
+    request: Request,
+    lease: NativeLifetime,
+}
+impl Response<'_> {
+    pub fn original(&self) -> NativeLifetime {
+        self.lease.clone()
+    }
+    fn header(&self, bytes: u64) -> Result<TransferHeader, Error> {
+        let header = TransferHeader {
+            id: self.request.id,
+            kind: self.request.kind,
+            bytes,
+        };
+        header.validate(&self.request, &self.owner.limits)?;
+        Ok(header)
+    }
+    pub async fn send_bytes(self, bytes: Bytes) -> Result<Receipt, Error> {
+        if matches!(self.request.kind, PayloadKind::File(_)) {
             return Err(rds_core::clipboard::Error::Identity.into());
         }
-        let (header, _permit) = self.admit_response(request, bytes.len() as u64)?;
+        let header = self.header(bytes.len() as u64)?;
         tokio::select! {
             biased;
-            _ = self.stop.cancelled() => Err(Error::Closed),
+            _ = self.owner.stop.cancelled() => Err(Error::Closed),
             result = async {
-                let mut sending = self.open(request.id).await?;
-                let receipt = stream::send(&mut bytes.as_ref(), &mut sending.stream, &header, &self.limits).await?;
+                let mut sending = self.owner.open(self.request.id).await?;
+                let receipt = stream::send(&mut bytes.as_ref(), &mut sending.stream, &header, &self.owner.limits).await?;
                 sending.finish()?;
                 Ok(receipt)
             } => result,
         }
     }
 
-    pub async fn send_file(
-        &self,
-        request: &Request,
-        source: &dyn native::Files,
-    ) -> Result<Receipt, Error> {
-        let PayloadKind::File(file) = request.kind else {
+    pub async fn send_file(self, source: &dyn native::Files) -> Result<Receipt, Error> {
+        let PayloadKind::File(file) = self.request.kind else {
             return Err(rds_core::clipboard::Error::Identity.into());
         };
-        source.selection().validate(&self.limits)?;
+        source.selection().validate(&self.owner.limits)?;
         let bytes = source
             .selection()
             .entries
@@ -233,30 +261,21 @@ impl Streams {
             .bytes;
         // Reserve before opening the native reader. Each actual source syscall
         // owns the reservation, even if its async sender has been canceled.
-        let (header, permit) = self.admit_response(request, bytes)?;
-        let lease = Arc::new(Lease {
-            _permit: permit,
-            _original: self.original.clone(),
-        });
+        let header = self.header(bytes)?;
         tokio::select! {
             biased;
-            _ = self.stop.cancelled() => Err(Error::Closed),
+            _ = self.owner.stop.cancelled() => Err(Error::Closed),
             result = async {
-                let source = source.open(file, lease).await?;
+                let source = source.open(file, self.original()).await?;
                 if source.bytes != header.bytes {
                     return Err(rds_core::clipboard::Error::Identity.into());
                 }
-                let mut sending = self.open(request.id).await?;
-                let receipt = stream::send_file(source, &mut sending.stream, &header, &self.limits).await?;
+                let mut sending = self.owner.open(self.request.id).await?;
+                let receipt = stream::send_file(source, &mut sending.stream, &header, &self.owner.limits).await?;
                 sending.finish()?;
                 Ok(receipt)
             } => result,
         }
-    }
-}
-impl Drop for Streams {
-    fn drop(&mut self) {
-        self.close();
     }
 }
 
@@ -272,6 +291,20 @@ pub struct Incoming {
     stop: CancellationToken,
     scope: CancellationToken,
     lease: NativeLifetime,
+}
+
+/// Verified representation bytes keep their receiving admission through
+/// parsing and publication. Native publication retains `original()` through
+/// its actual syscall, even when its waiting future is canceled.
+pub struct Received {
+    pub bytes: Bytes,
+    pub receipt: Receipt,
+    lease: NativeLifetime,
+}
+impl Received {
+    pub fn original(&self) -> NativeLifetime {
+        self.lease.clone()
+    }
 }
 impl Incoming {
     pub fn request(&self) -> &Request {
@@ -303,7 +336,7 @@ impl Incoming {
         })
     }
 
-    pub async fn bytes(mut self) -> Result<(Bytes, Receipt), Error> {
+    pub async fn bytes(mut self) -> Result<Received, Error> {
         if matches!(self.request.kind, PayloadKind::File(_)) {
             return Err(rds_core::clipboard::Error::Identity.into());
         }
@@ -312,7 +345,11 @@ impl Incoming {
         drop(self.inbox);
         let mut bytes = Vec::new();
         let receipt = stream::receive(&mut wire, &mut bytes, &self.request, &self.limits).await?;
-        Ok((Bytes::from(bytes), receipt))
+        Ok(Received {
+            bytes: Bytes::from(bytes),
+            receipt,
+            lease: self.lease,
+        })
     }
 
     /// A downstream native destination or remote peer consumes this reader.

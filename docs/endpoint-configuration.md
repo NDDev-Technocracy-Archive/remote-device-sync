@@ -216,7 +216,7 @@ Transport bounds and max_multipath_paths1 remain authoritative; no OS/VPN route,
 identity, authority, congestion-controller or wire setting changes. Defaults
 retain backend policy, and old strict binaries reject the new explicit field.
 
-Published Iroh1.3 invokes its selector on topology changes only. The exact
+Published Iroh 1.4.1 invokes its selector on topology changes only. The exact
 published source is temporarily retained under vendor/iroh with an opt-in
 refresh hook: default selectors remain topology-only; intervals are bounded to
 250ms..60s, and periodic refresh does not reapply an unchanged selection. See

@@ -202,8 +202,20 @@ pub trait Provider: Send + Sync {
     fn close(&self) -> super::ClipboardFuture<'_, ()>;
     fn capabilities(&self) -> Capabilities;
     fn current(&self) -> Operation<'_, Snapshot>;
-    fn read(&self, generation: u64, format: Format) -> Operation<'_, Value>;
-    fn publish(&self, expected_generation: u64, value: Publication) -> Operation<'_, Snapshot>;
+    /// The actual native call retains this operation's original owner. A
+    /// canceled waiter cannot release its transport/native admission early.
+    fn read(
+        &self,
+        generation: u64,
+        format: Format,
+        original: super::NativeLifetime,
+    ) -> Operation<'_, Value>;
+    fn publish(
+        &self,
+        expected_generation: u64,
+        value: Publication,
+        original: super::NativeLifetime,
+    ) -> Operation<'_, Snapshot>;
     fn changed(&self, after_generation: u64) -> Operation<'_, Snapshot>;
 }
 
