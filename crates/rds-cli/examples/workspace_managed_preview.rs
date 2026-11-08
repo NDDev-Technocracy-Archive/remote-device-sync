@@ -309,7 +309,12 @@ async fn main() -> anyhow::Result<()> {
         "duration must be 10..=600 seconds"
     );
     let backend = if args.noq {
-        Backend::Noq
+        #[cfg(feature = "transport-noq")]
+        {
+            Backend::Noq
+        }
+        #[cfg(not(feature = "transport-noq"))]
+        anyhow::bail!("--noq requires the transport-noq feature");
     } else {
         Backend::Iroh
     };
@@ -377,6 +382,9 @@ async fn main() -> anyhow::Result<()> {
         diagnostics_dir: Some(root.clone()),
         diagnostic_visual_probe: None,
         diagnostic_health: None,
+        diagnostics: Default::default(),
+        diagnostic_started: None,
+        live_diagnostics: None,
     };
     let result = rds_cli::desktop::workspace::run(
         client.clone(),

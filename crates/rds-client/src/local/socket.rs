@@ -63,7 +63,7 @@ fn socket_meta(path: &Path) -> Result<std::fs::Metadata, Error> {
     Ok(m)
 }
 
-pub(super) fn authenticate(stream: &UnixStream) -> Result<(), Error> {
+pub fn authenticate(stream: &UnixStream) -> Result<(), Error> {
     if stream.peer_cred()?.uid() != rustix::process::geteuid().as_raw() {
         return Err(Error::PeerIdentity);
     }
@@ -71,7 +71,7 @@ pub(super) fn authenticate(stream: &UnixStream) -> Result<(), Error> {
 }
 
 /// Dedicated directory ownership serializes servers and stale-socket recovery.
-pub(super) struct SocketOwner {
+pub struct SocketOwner {
     directory: File,
     path: PathBuf,
     inode: Option<(u64, u64)>,
@@ -129,7 +129,7 @@ impl Drop for SocketOwner {
     }
 }
 
-pub(super) async fn connect(path: &Path) -> Result<UnixStream, Error> {
+pub async fn connect(path: &Path) -> Result<UnixStream, Error> {
     let checked = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let _directory = directory(&checked, false)?;

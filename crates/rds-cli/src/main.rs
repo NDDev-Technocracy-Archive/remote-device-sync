@@ -86,6 +86,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read a viewer's in-memory metadata through its same-UID local socket.
+    #[cfg(feature = "desktop")]
+    DesktopStatus {
+        /// The viewer's private live-<pid> directory inside its diagnostics directory.
+        #[arg(long)]
+        directory: std::path::PathBuf,
+    },
     /// Manage connections through the local agent; no key loading or UDP bind.
     Session(managed::Options),
     /// Create a new private admin scrape credential without endpoint initialization.
@@ -216,6 +223,12 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    #[cfg(feature = "desktop")]
+    if let Command::DesktopStatus { directory } = &cli.command {
+        let snapshot = desktop::live::read(directory).await?;
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        return Ok(());
+    }
     if matches!(cli.command, Command::Session(_)) {
         validate_managed(&cli)?;
         anyhow::ensure!(
@@ -310,6 +323,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let endpoint = bind_endpoint(config).await?;
     let result = async {
         match cli.command {
+            #[cfg(feature = "desktop")]
+            Command::DesktopStatus { .. } => {
+                unreachable!("viewer status handled before endpoint initialization")
+            }
             Command::Session(_) => {
                 unreachable!("local session handled before endpoint initialization")
             }

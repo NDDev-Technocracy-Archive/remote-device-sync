@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-08
+
+**Engineering preview.** Ordinary native viewers retain live health and fault
+history in bounded memory instead of writing and logging a full snapshot every
+two seconds. `rds desktop-status --directory <diagnostics>/live-<pid>` reads the
+current scoped observations through a private same-UID Unix socket, without
+loading endpoint keys or opening a remote session. Completed fault windows keep
+bounded disk retention. Sampling continues independently of file writes, with
+explicit admission-loss and pending-I/O observations.
+
+`--diagnostic-snapshot-seconds` selects an expiring live-file capture window.
+Cadence and incident retention share one validated policy across CLI, native
+startup and workspace tabs. Expiry cannot be rearmed by opening a later tab;
+cleanup checks the exact published inode. A failed private log file no longer
+prevents the native application from opening. Native clipboard and hardware
+media work remain open under issue210.
+
 ## [0.1.3] - 2026-11-08
 
 **Engineering preview.** The standalone viewer now honors an explicitly selected

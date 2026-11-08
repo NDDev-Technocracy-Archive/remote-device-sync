@@ -212,7 +212,7 @@ impl Write for ViewerLog {
 
 /// Publish a small live snapshot atomically. Never truncate an existing inode
 /// (including a hard link) or follow a caller-provided symlink.
-pub fn viewer_snapshot(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn viewer_snapshot(path: &Path, bytes: &[u8]) -> io::Result<(u64, u64)> {
     if bytes.len() > 65536 {
         return Err(io::Error::other("viewer snapshot exceeds 64 KiB"));
     }
@@ -236,7 +236,7 @@ fn publish_private(
     path: &Path,
     replace: bool,
     write: impl FnOnce(&mut PrivateLog) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<(u64, u64)> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?
@@ -268,14 +268,18 @@ fn publish_private(
     write(&mut file)?;
     file.flush()?;
     if replace {
-        std::fs::rename(&pending.path, path)
+        std::fs::rename(&pending.path, path)?;
     } else {
-        std::fs::hard_link(&pending.path, path)
+        std::fs::hard_link(&pending.path, path)?;
     }
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 /// Keep ten completed fault windows independently of ordinary log rotation.
-pub fn viewer_incident(directory: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn viewer_incident(directory: &Path, bytes: &[u8], retained: usize) -> io::Result<()> {
+    if !(1..=crate::desktop::observation::MAX_RETAINED_INCIDENTS).contains(&retained) {
+        return Err(io::Error::other("invalid viewer incident retention"));
+    }
     if bytes.len() > 256 * 1024 {
         return Err(io::Error::other("viewer incident exceeds 256 KiB"));
     }
@@ -310,7 +314,7 @@ pub fn viewer_incident(directory: &Path, bytes: &[u8]) -> io::Result<()> {
         }
     }
     owned.sort_by_key(|item| item.0);
-    let remove = owned.len().saturating_sub(10);
+    let remove = owned.len().saturating_sub(retained);
     for (_, path, dev, ino) in owned.into_iter().take(remove) {
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.is_file() && meta.dev() == dev && meta.ino() == ino && meta.nlink() == 1 {
@@ -365,7 +369,7 @@ mod tests {
         let alias = root.join("incident-0-1.json");
         symlink(&sentinel, &alias).unwrap();
         for _ in 0..12 {
-            viewer_incident(&root, b"{}").unwrap();
+            viewer_incident(&root, b"{}", 10).unwrap();
         }
         assert_eq!(
             std::fs::read_dir(&root)
@@ -379,7 +383,7 @@ mod tests {
             10
         );
         assert_eq!(std::fs::read(&alias).unwrap(), b"retain");
-        assert!(viewer_incident(&root, &vec![0; 256 * 1024 + 1]).is_err());
+        assert!(viewer_incident(&root, &vec![0; 256 * 1024 + 1], 10).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
