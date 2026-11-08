@@ -35,6 +35,8 @@ pub enum Error {
     Contract(#[from] rds_core::clipboard::Error),
     #[error(transparent)]
     Body(#[from] stream::Error),
+    #[error(transparent)]
+    Native(#[from] native::Error),
     #[error("clipboard body budget is occupied")]
     Busy,
     #[error("clipboard body owner is closed")]
@@ -47,6 +49,7 @@ impl Error {
         match self {
             Self::Contract(error) => native::Error::Contract(error),
             Self::Body(error) => error.into_native(),
+            Self::Native(error) => error,
             Self::Closed => native::Error::Changed,
             Self::Busy => native::Error::Unavailable,
             Self::Transport(error) => native::Error::Io(error),
@@ -215,16 +218,34 @@ impl Streams {
     pub async fn send_file(
         &self,
         request: &Request,
-        source: native::FileRead,
+        source: &dyn native::Files,
     ) -> Result<Receipt, Error> {
-        if !matches!(request.kind, PayloadKind::File(_)) {
+        let PayloadKind::File(file) = request.kind else {
             return Err(rds_core::clipboard::Error::Identity.into());
-        }
-        let (header, _permit) = self.admit_response(request, source.bytes)?;
+        };
+        source.selection().validate(&self.limits)?;
+        let bytes = source
+            .selection()
+            .entries
+            .iter()
+            .find(|entry| entry.id == file)
+            .ok_or(native::Error::File(rds_sync::selection::Error::Unknown))?
+            .bytes;
+        // Reserve before opening the native reader. Each actual source syscall
+        // owns the reservation, even if its async sender has been canceled.
+        let (header, permit) = self.admit_response(request, bytes)?;
+        let lease = Arc::new(Lease {
+            _permit: permit,
+            _original: self.original.clone(),
+        });
         tokio::select! {
             biased;
             _ = self.stop.cancelled() => Err(Error::Closed),
             result = async {
+                let source = source.open(file, lease).await?;
+                if source.bytes != header.bytes {
+                    return Err(rds_core::clipboard::Error::Identity.into());
+                }
                 let mut sending = self.open(request.id).await?;
                 let receipt = stream::send_file(source, &mut sending.stream, &header, &self.limits).await?;
                 sending.finish()?;
@@ -250,11 +271,16 @@ pub struct Incoming {
     limits: Limits,
     stop: CancellationToken,
     scope: CancellationToken,
-    lease: Arc<Lease>,
+    lease: NativeLifetime,
 }
 impl Incoming {
     pub fn request(&self) -> &Request {
         &self.request
+    }
+
+    pub(crate) fn retaining(mut self, original: NativeLifetime) -> Self {
+        self.lease = Arc::new((self.lease, original));
+        self
     }
 
     async fn accept(&mut self) -> Result<Receiving, Error> {

@@ -2,6 +2,54 @@ use super::*;
 use rds_core::clipboard::Format;
 use tokio::io::AsyncReadExt;
 
+struct Generated {
+    selection: rds_core::clipboard::FileSelection,
+    limits: Limits,
+    byte: u8,
+}
+impl Generated {
+    fn new(byte: u8) -> Self {
+        Self {
+            selection: rds_core::clipboard::FileSelection {
+                entries: vec![rds_core::clipboard::FileEntry {
+                    id: [7; 16],
+                    name: "generated.bin".into(),
+                    bytes: 64 * 1024 * 1024,
+                }],
+            },
+            limits: Limits::default(),
+            byte,
+        }
+    }
+}
+impl native::Files for Generated {
+    fn selection(&self) -> &rds_core::clipboard::FileSelection {
+        &self.selection
+    }
+    fn limits(&self) -> &Limits {
+        &self.limits
+    }
+    fn open(
+        &self,
+        file: [u8; 16],
+        original: NativeLifetime,
+    ) -> native::Operation<'_, native::FileRead> {
+        Box::pin(async move {
+            assert_eq!(file, [7; 16]);
+            Ok(native::FileRead {
+                bytes: self.selection.entries[0].bytes,
+                reader: Box::pin(
+                    tokio::io::repeat(self.byte).take(self.selection.entries[0].bytes),
+                ),
+                complete: Box::pin(async move {
+                    drop(original);
+                    Ok(())
+                }),
+            })
+        })
+    }
+}
+
 struct Pair {
     left: Connection,
     right: Connection,
@@ -125,7 +173,6 @@ async fn symmetric_budgets_and_exact_routes_keep_canceled_bodies_out_of_new_requ
 
 #[tokio::test]
 async fn real_selected_file_crosses_quic_without_a_staging_file() {
-    use native::Files;
     let root = std::env::temp_dir().join(format!(
         "rds-clipboard-quic-{:032x}",
         rand::random::<u128>()
@@ -149,8 +196,7 @@ async fn real_selected_file_crosses_quic_without_a_staging_file() {
             )
             .unwrap();
         let request = incoming.request().clone();
-        let source = selected.open(file).await.unwrap();
-        let (sent, received) = tokio::join!(right.send_file(&request, source), async {
+        let (sent, received) = tokio::join!(right.send_file(&request, &selected), async {
             let mut received = incoming.file().await.unwrap();
             let mut bytes = Vec::new();
             received.reader.read_to_end(&mut bytes).await.unwrap();
@@ -187,14 +233,14 @@ async fn remote_native_promise_writes_only_its_selected_file_and_receipts_verifi
         let (metadata, mut requests) = tokio::sync::mpsc::channel(4);
         let scope = CancellationToken::new();
         let remote = native::RemoteFiles::new(5, selected.manifest().clone(), Arc::new(left), metadata, scope.clone()).unwrap();
-        assert!(matches!(remote.open([0;16]).await, Err(native::Error::File(_))));
+        assert!(matches!(remote.open([0;16], Arc::new(())).await, Err(native::Error::File(_))));
         assert!(requests.try_recv().is_err());
         let destination = std::fs::OpenOptions::new().write(true).create_new(true).open(root.join("pasted")).unwrap();
         let (sent, received) = tokio::join!(
             async {
                 let Control::Request(request) = requests.recv().await.unwrap() else { panic!("missing request") };
                 assert_eq!(request.kind, PayloadKind::File(file));
-                let receipt = right.send_file(&request, selected.open(file).await.unwrap()).await.unwrap();
+                let receipt = right.send_file(&request, &selected).await.unwrap();
                 assert!(matches!(requests.recv().await.unwrap(), Control::Receipt(verified) if verified==receipt && !verified.published));
                 receipt
             },
@@ -204,7 +250,7 @@ async fn remote_native_promise_writes_only_its_selected_file_and_receipts_verifi
         assert_eq!(received.bytes, sent.bytes);
         assert_eq!(received.digest, sent.digest);
         scope.cancel();
-        assert!(matches!(remote.open(file).await, Err(native::Error::Changed)));
+        assert!(matches!(remote.open(file, Arc::new(())).await, Err(native::Error::Changed)));
         assert!(requests.try_recv().is_err());
     }).await.unwrap();
     assert_eq!(std::fs::read(root.join("pasted")).unwrap(), bytes);
@@ -213,7 +259,111 @@ async fn remote_native_promise_writes_only_its_selected_file_and_receipts_verifi
 }
 
 #[tokio::test]
-async fn withdrawing_a_remote_file_offer_stops_an_existing_reader_and_cancels_its_request() {
+async fn outgoing_reservation_survives_cancellation_of_its_actual_native_open() {
+    struct Gate {
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    struct NativeOpening {
+        selected: rds_sync::selection::Selection,
+        gate: std::sync::Mutex<Option<Gate>>,
+    }
+    impl native::Files for NativeOpening {
+        fn selection(&self) -> &rds_core::clipboard::FileSelection {
+            self.selected.manifest()
+        }
+        fn limits(&self) -> &Limits {
+            self.selected.limits()
+        }
+        fn open(
+            &self,
+            file: [u8; 16],
+            original: NativeLifetime,
+        ) -> native::Operation<'_, native::FileRead> {
+            Box::pin(async move {
+                let file = self.selected.file(&file)?;
+                let gate = self.gate.lock().unwrap().take().unwrap();
+                tokio::task::spawn_blocking(move || {
+                    let owners = (file, original);
+                    let held = owners;
+                    held.0.verify()?;
+                    gate.entered.send(()).unwrap();
+                    gate.release
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                    assert_eq!(held.0.read_chunk(0, 8, &Limits::default())?, b"selected");
+                    Ok::<_, native::Error>(())
+                })
+                .await
+                .map_err(|_| native::Error::Unavailable)??;
+                Err(native::Error::Changed)
+            })
+        }
+    }
+    let root =
+        std::env::temp_dir().join(format!("rds-native-body-{:032x}", rand::random::<u128>()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("selected"), b"selected").unwrap();
+    let selected =
+        rds_sync::selection::Selection::from_paths([root.join("selected")], &Limits::default())
+            .unwrap();
+    let file = selected.manifest().entries[0].id;
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let source = NativeOpening {
+        selected,
+        gate: std::sync::Mutex::new(Some(Gate {
+            entered,
+            release: held,
+        })),
+    };
+    let pair = Pair::new().await;
+    let (left, _) = pair.owners();
+    let right = Arc::new(
+        Streams::new(
+            pair.right.clone(),
+            [19; 16],
+            Limits {
+                parallel_transfers: 1,
+                ..Limits::default()
+            },
+            Arc::new(()),
+        )
+        .unwrap(),
+    );
+    let incoming = left
+        .request(
+            1,
+            PayloadKind::File(file),
+            Some(8),
+            CancellationToken::new(),
+        )
+        .unwrap();
+    let request = incoming.request().clone();
+    let sender = right.clone();
+    let sending = tokio::spawn(async move { sender.send_file(&request, &source).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    sending.abort();
+    assert!(sending.await.unwrap_err().is_cancelled());
+    assert!(
+        right.outgoing.try_acquire().is_err(),
+        "canceled sender released a running native body"
+    );
+    release.send(()).unwrap();
+    let _drained =
+        tokio::time::timeout(std::time::Duration::from_secs(2), right.outgoing.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+    drop(incoming);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn revoking_a_remote_file_scope_stops_an_existing_reader_and_cancels_its_request() {
     use native::Files;
     use rds_core::clipboard::{Control, FileEntry, FileSelection};
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -236,7 +386,7 @@ async fn withdrawing_a_remote_file_offer_stops_an_existing_reader_and_cancels_it
             scope.clone(),
         )
         .unwrap();
-        let open = remote.open([7; 16]);
+        let open = remote.open([7; 16], Arc::new(()));
         let mut sending = None;
         let sender = right.clone();
         let (read, request) = tokio::join!(open, async {
@@ -245,16 +395,7 @@ async fn withdrawing_a_remote_file_offer_stops_an_existing_reader_and_cancels_it
             };
             let sending_request = request.clone();
             sending = Some(tokio::spawn(async move {
-                sender
-                    .send_file(
-                        &sending_request,
-                        native::FileRead {
-                            bytes: 64 * 1024 * 1024,
-                            reader: Box::pin(tokio::io::repeat(8).take(64 * 1024 * 1024)),
-                            complete: Box::pin(async { Ok(()) }),
-                        },
-                    )
-                    .await
+                sender.send_file(&sending_request, &Generated::new(8)).await
             }));
             request
         });
@@ -309,18 +450,8 @@ async fn blocked_bulk(backend: rds_net::Backend) {
             .unwrap();
         let request = incoming.request().clone();
         let sender = right.clone();
-        let sending = tokio::spawn(async move {
-            sender
-                .send_file(
-                    &request,
-                    native::FileRead {
-                        bytes: 64 * 1024 * 1024,
-                        reader: Box::pin(tokio::io::repeat(7).take(64 * 1024 * 1024)),
-                        complete: Box::pin(async { Ok(()) }),
-                    },
-                )
-                .await
-        });
+        let sending =
+            tokio::spawn(async move { sender.send_file(&request, &Generated::new(7)).await });
         let mut body = incoming.file().await.unwrap();
         // The receiver holds the file capability without consuming its body.
         // Reliable control and media still progress on this same connection.

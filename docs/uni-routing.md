@@ -29,7 +29,8 @@ Remote file readers and their integrity proofs both retain the original body
 permit and desktop owner. Native workers have their own retained I/O ownership.
 Each request also carries its original offer/paste cancellation scope. Invalidating
 that scope interrupts header/body reads as well as refusing new admission. Direct
-destination writes retain the body reservation through actual native I/O, even
+source reads and destination writes retain the body reservation through actual
+native I/O, even
 when their async waiter is canceled. This extends the same ownership into native
 file promises without a staged file or a separate receive pump.
 

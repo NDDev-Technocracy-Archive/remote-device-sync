@@ -18,8 +18,9 @@ use super::{Destination, Error, FileRead, FileReceipt, Files, Operation};
 use crate::clipboard::transport::{self, Incoming, Streams};
 
 /// A selected source capability, not OS publication or arbitrary file access.
-/// The desktop binds it to an admitted offer and cancels `scope` on withdrawal,
-/// replacement or revocation. Its names never become remote filesystem paths.
+/// The desktop binds it to an admitted selection/paste scope. Revocation seals
+/// that capability; merely changing the clipboard must not revoke a file copy
+/// already admitted to its original native destination. Names are never paths.
 pub struct RemoteFiles {
     offer: u64,
     selection: FileSelection,
@@ -51,7 +52,11 @@ impl RemoteFiles {
         })
     }
 
-    fn request(&self, file: [u8; 16]) -> Result<(Incoming, Arc<Pending>), Error> {
+    fn request(
+        &self,
+        file: [u8; 16],
+        original: crate::clipboard::NativeLifetime,
+    ) -> Result<(Incoming, Arc<Pending>), Error> {
         if self.scope.is_cancelled() {
             return Err(Error::Changed);
         }
@@ -69,7 +74,8 @@ impl RemoteFiles {
                 Some(entry.bytes),
                 self.scope.clone(),
             )
-            .map_err(transport::Error::into_native)?;
+            .map_err(transport::Error::into_native)?
+            .retaining(original);
         let request = incoming.request().clone();
         // Claiming the route preceded metadata admission. A saturated/closed
         // queue cannot create unbounded waiting request jobs or read any body.
@@ -93,9 +99,13 @@ impl Files for RemoteFiles {
         self.streams.limits()
     }
 
-    fn open(&self, file: [u8; 16]) -> Operation<'_, FileRead> {
+    fn open(
+        &self,
+        file: [u8; 16],
+        original: crate::clipboard::NativeLifetime,
+    ) -> Operation<'_, FileRead> {
         Box::pin(async move {
-            let (incoming, pending) = self.request(file)?;
+            let (incoming, pending) = self.request(file, original)?;
             let FileRead {
                 bytes,
                 reader,
@@ -123,7 +133,7 @@ impl Files for RemoteFiles {
 
     fn write(&self, file: [u8; 16], destination: Destination) -> Operation<'_, FileReceipt> {
         Box::pin(async move {
-            let (incoming, pending) = self.request(file)?;
+            let (incoming, pending) = self.request(file, destination.lifetime())?;
             // Share the transport verifier and positional native destination
             // writer: no staging, second body hash, or queued file-copy buffer.
             let receipt = incoming

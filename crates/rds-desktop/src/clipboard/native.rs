@@ -136,7 +136,10 @@ impl std::fmt::Debug for FileReceipt {
 pub trait Files: Send + Sync {
     fn selection(&self) -> &FileSelection;
     fn limits(&self) -> &Limits;
-    fn open(&self, file: [u8; 16]) -> Operation<'_, FileRead>;
+    /// Bind this read's original paste/forwarding owner before any native I/O.
+    /// Native adapters keep it, including budget reservations, in actual
+    /// blocking operations after an async waiter has been canceled.
+    fn open(&self, file: [u8; 16], original: super::NativeLifetime) -> Operation<'_, FileRead>;
     fn write(&self, file: [u8; 16], destination: Destination) -> Operation<'_, FileReceipt> {
         Box::pin(write_file(self, file, destination))
     }
@@ -178,18 +181,25 @@ impl Files for rds_sync::selection::Selection {
     fn limits(&self) -> &Limits {
         self.limits()
     }
-    fn open(&self, file: [u8; 16]) -> Operation<'_, FileRead> {
+    fn open(&self, file: [u8; 16], original: super::NativeLifetime) -> Operation<'_, FileRead> {
         Box::pin(async move {
             let selected = self.file(&file)?;
             let bytes = selected.bytes();
-            let reader = selected.clone().reader(self.limits().clone()).await?;
+            let reader = selected
+                .clone()
+                .reader(self.limits().clone(), original.clone())
+                .await?;
             Ok(FileRead {
                 bytes,
                 reader: Box::pin(reader),
                 complete: Box::pin(async move {
-                    tokio::task::spawn_blocking(move || selected.verify())
-                        .await
-                        .map_err(|_| Error::Unavailable)??;
+                    let owners = (selected, original);
+                    tokio::task::spawn_blocking(move || {
+                        let held = owners;
+                        held.0.verify()
+                    })
+                    .await
+                    .map_err(|_| Error::Unavailable)??;
                     Ok(())
                 }),
             })
@@ -212,7 +222,7 @@ async fn write_file<F: Files + ?Sized>(
         .ok_or(rds_sync::selection::Error::Unknown)?
         .bytes;
     destination.validate_empty().await?;
-    let mut read = source.open(file).await?;
+    let mut read = source.open(file, destination.lifetime()).await?;
     if read.bytes != expected {
         return Err(rds_sync::selection::Error::Changed.into());
     }

@@ -33,6 +33,9 @@ impl Destination {
         self.retained = Some(Arc::new((self.retained.take(), context)));
         self
     }
+    pub(super) fn lifetime(&self) -> NativeLifetime {
+        Arc::new((self.owner.clone(), self.retained.clone()))
+    }
     pub(crate) async fn validate_empty(&self) -> Result<(), Error> {
         self.run(|file| {
             let metadata = file.metadata()?;

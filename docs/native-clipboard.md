@@ -75,6 +75,11 @@ steps. The legacy text mode remains admitted during the coordinated upgrade.
 The requested-body transport now uses the existing connection's tagged router,
 one isolated uni stream per request and independent bounded directional budgets.
 It claims before request metadata is sent and resets canceled partial sends.
+Outgoing selected-file admission reserves a body slot before native open, and
+passes that original reservation into every actual source syscall and final
+version check. Native readers retain it after their async sender is canceled.
+A forwarding source adds that owner to its upstream reader/proof; it never
+replaces the upstream or native paste authority.
 It neither opens an OS provider nor authorizes clipboard access by itself.
 Real loopback tests cover simultaneous requests, a late canceled response,
 selected-file integrity without a staging file, and progressing control/media
@@ -86,9 +91,11 @@ body owner and metadata queue. Its request carries only an opaque selected ID
 and the manifest's exact length. Native file promises write straight into the
 receiving application's destination through the shared verifier; forwarding
 instead exposes the same bounded reader/proof with no staging. A verified body
-receipt does not claim OS publication. Offer withdrawal/revocation seals new
-requests and interrupts existing reads. Both reader and proof retain cancellation
-ownership until released; incomplete work sends a bounded cancellation notice.
+receipt does not claim OS publication. Explicit selection/paste-scope revocation
+seals new requests and interrupts existing reads. Merely changing the clipboard
+must not cancel a copy already admitted to its original destination. Both reader
+and proof retain cancellation ownership until released; incomplete work sends a
+bounded cancellation notice.
 This capability does not publish a clipboard, admit an unnegotiated peer, open a
 sync root or provide the still-required native promise/URI adapters.
 

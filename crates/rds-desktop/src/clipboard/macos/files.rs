@@ -138,7 +138,7 @@ pub(super) async fn probe() -> Result<u32, Error> {
         return Err(Error::Publication);
     }
     let id = files.selection().entries[0].id;
-    let mut read = files.open(id).await?;
+    let mut read = files.open(id, Arc::new(())).await?;
     drop(files);
     // Moving/replacing the pathname must neither change the selected object
     // nor discard the native scope while its opened reader still runs.

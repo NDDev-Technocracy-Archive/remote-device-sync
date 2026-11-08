@@ -235,10 +235,13 @@ impl SelectedFile {
         Ok(bytes)
     }
 
-    pub async fn reader(self: Arc<Self>, limits: Limits) -> Result<Reader, Error> {
+    pub async fn reader(
+        self: Arc<Self>,
+        limits: Limits,
+        original: Arc<dyn Send + Sync>,
+    ) -> Result<Reader, Error> {
         limits.validate()?;
-        let checking = self.clone();
-        tokio::task::spawn_blocking(move || checking.verify())
+        native(self.clone(), original.clone(), |file| file.verify())
             .await
             .map_err(|_| io::Error::other("selected-file native check ended"))??;
         Ok(Reader {
@@ -246,6 +249,7 @@ impl SelectedFile {
             limits,
             offset: 0,
             state: ReadState::Idle,
+            original,
         })
     }
 }
@@ -264,6 +268,7 @@ pub struct Reader {
     limits: Limits,
     offset: u64,
     state: ReadState,
+    original: Arc<dyn Send + Sync>,
 }
 
 impl AsyncRead for Reader {
@@ -279,13 +284,14 @@ impl AsyncRead for Reader {
         loop {
             match &mut self.state {
                 ReadState::Idle => {
-                    let file = self.file.clone();
                     let limits = self.limits.clone();
                     let length = buffer.remaining().min(limits.chunk_bytes as usize);
                     let offset = self.offset;
-                    self.state = ReadState::Reading(tokio::task::spawn_blocking(move || {
-                        file.read_chunk(offset, length, &limits)
-                    }));
+                    self.state = ReadState::Reading(native(
+                        self.file.clone(),
+                        self.original.clone(),
+                        move |file| file.read_chunk(offset, length, &limits),
+                    ));
                 }
                 ReadState::Reading(task) => match Pin::new(task).poll(cx) {
                     Poll::Pending => return Poll::Pending,
@@ -318,6 +324,20 @@ impl AsyncRead for Reader {
     }
 }
 
+fn native<T: Send + 'static>(
+    file: Arc<SelectedFile>,
+    original: Arc<dyn Send + Sync>,
+    operation: impl FnOnce(&SelectedFile) -> Result<T, Error> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<T, Error>> {
+    let owners = (file, original);
+    tokio::task::spawn_blocking(move || {
+        // Capture the whole pair, not just its file field: every actual
+        // syscall retains the original read/paste and body reservation.
+        let held = owners;
+        operation(&held.0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +354,43 @@ mod tests {
             std::env::temp_dir().join(format!("rds-selected-{:032x}", rand::random::<u128>()));
         std::fs::create_dir(&path).unwrap();
         Root(path)
+    }
+
+    #[tokio::test]
+    async fn canceled_native_read_retains_its_file_and_body_reservation_until_return() {
+        let root = root();
+        let path = root.0.join("source");
+        std::fs::write(&path, b"selected").unwrap();
+        let selection = Selection::from_paths([path], &Limits::default()).unwrap();
+        let file = selection.file(&selection.manifest().entries[0].id).unwrap();
+        let budget = Arc::new(tokio::sync::Semaphore::new(1));
+        let original = Arc::new(budget.clone().acquire_owned().await.unwrap());
+        let retained = Arc::downgrade(&original);
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let (finished, drained) = tokio::sync::oneshot::channel();
+        let task = native(file, original, move |file| {
+            file.verify()?;
+            entered.send(()).unwrap();
+            held.recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            assert_eq!(file.read_chunk(0, 8, &Limits::default())?, b"selected");
+            finished.send(()).unwrap();
+            Ok(())
+        });
+        ready.await.unwrap();
+        task.abort();
+        drop(task);
+        drop(selection);
+        assert!(retained.upgrade().is_some());
+        assert!(budget.try_acquire().is_err());
+        release.send(()).unwrap();
+        drained.await.unwrap();
+        let _drained = tokio::time::timeout(std::time::Duration::from_secs(2), budget.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(retained.upgrade().is_none());
     }
 
     #[test]
@@ -381,8 +438,11 @@ mod tests {
         .unwrap();
         let file = selection.file(&selection.manifest().entries[0].id).unwrap();
         let (mut first, mut second) = (
-            file.clone().reader(limits.clone()).await.unwrap(),
-            file.reader(limits).await.unwrap(),
+            file.clone()
+                .reader(limits.clone(), Arc::new(()))
+                .await
+                .unwrap(),
+            file.reader(limits, Arc::new(())).await.unwrap(),
         );
         drop(selection);
         assert!(
