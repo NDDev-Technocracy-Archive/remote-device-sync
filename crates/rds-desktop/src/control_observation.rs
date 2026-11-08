@@ -56,7 +56,7 @@ impl Drop for ObservationWorker {
 impl ControlObservation {
     pub fn new(observer: WeakPathObserver) -> Result<Self, DesktopError> {
         let instance = NEXT_INSTANCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| DesktopError::Capture("desktop observation IDs exhausted".into()))?;
         Ok(Self {
             instance,

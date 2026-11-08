@@ -163,7 +163,7 @@ impl Group {
             .map_err(|_| error())?;
         let lease = self
             .next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| error())?;
         Ok(Box::new(Sink {
             sender: self.sender.clone(),

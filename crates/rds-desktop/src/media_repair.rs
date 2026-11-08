@@ -53,7 +53,7 @@ impl MediaRepair {
     pub(crate) fn request(&self) -> Request {
         match self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 if state & ACTIVE != 0 {
                     return None;
                 }
@@ -95,7 +95,7 @@ impl MediaRepair {
         idr: Arc<crate::ProducerSignal>,
     ) -> Option<KeyPermit> {
         self.state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (state & !FLAGS == generation && state & KEY_PENDING == 0)
                     .then_some(state | KEY_PENDING)
             })
@@ -111,7 +111,7 @@ impl MediaRepair {
     fn release_key(&self, generation: u64, confirmed: bool) {
         let _ = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 if state & !FLAGS != generation {
                     return None;
                 }

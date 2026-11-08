@@ -1177,6 +1177,9 @@ impl State {
                     | Some(Err(PathError::MaxPathIdReached)) => {
                         self.scheduled_open_path =
                             Some(Instant::now() + Duration::from_millis(333));
+                        // The number of distinct candidate 4-tuples for a remote is
+                        // small (single digits), so `contains` is a short linear scan
+                        // and bounds the queue to that set.
                         if !self.pending_open_paths.contains(open_4tuple) {
                             self.pending_open_paths.push_back(open_4tuple.clone());
                         }
