@@ -599,7 +599,6 @@ mod request_tests {
             .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
             .name("org.freedesktop.portal.Desktop")
-            .unwrap()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 EarlyResponsePortal {
@@ -719,7 +718,6 @@ mod request_tests {
             .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
             .name("org.freedesktop.portal.Desktop")
-            .unwrap()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 EarlyResponsePortal {
@@ -802,7 +800,6 @@ mod request_tests {
                 .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
             .name("org.freedesktop.portal.Desktop")
-            .unwrap()
             .serve_at(path.clone(), Request(calls.clone()))
             .unwrap()
             .build()
