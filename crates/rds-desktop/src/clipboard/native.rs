@@ -9,6 +9,8 @@ use rds_core::clipboard::{Capabilities, FileSelection, Format, Limits, Represent
 use super::image::Png;
 mod destination;
 pub use destination::Destination;
+mod remote;
+pub use remote::RemoteFiles;
 
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 

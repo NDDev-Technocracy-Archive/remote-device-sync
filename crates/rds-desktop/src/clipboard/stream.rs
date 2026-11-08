@@ -19,6 +19,16 @@ pub enum Error {
     #[error("clipboard body integrity mismatch")]
     Integrity,
 }
+impl Error {
+    pub(crate) fn into_native(self) -> super::native::Error {
+        match self {
+            Self::Io(error) => super::native::Error::Io(error),
+            Self::Length | Self::Integrity => super::native::Error::Integrity,
+            Self::Contract(error) => super::native::Error::Contract(error),
+            Self::Source(error) => error,
+        }
+    }
+}
 
 /// Copy from an already selected, bounded native reader. The caller's single
 /// owner keeps that reader and the authenticated session alive until completion

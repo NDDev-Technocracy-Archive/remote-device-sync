@@ -23,7 +23,7 @@ use tokio::{
     io::{AsyncRead, ReadBuf},
     sync::{OwnedSemaphorePermit, Semaphore},
 };
-use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+use tokio_util::sync::CancellationToken;
 
 use super::{NativeLifetime, native, stream};
 #[cfg(test)]
@@ -41,6 +41,17 @@ pub enum Error {
     Closed,
     #[error("clipboard body transport failed: {0}")]
     Transport(#[from] io::Error),
+}
+impl Error {
+    pub(crate) fn into_native(self) -> native::Error {
+        match self {
+            Self::Contract(error) => native::Error::Contract(error),
+            Self::Body(error) => error.into_native(),
+            Self::Closed => native::Error::Changed,
+            Self::Busy => native::Error::Unavailable,
+            Self::Transport(error) => native::Error::Io(error),
+        }
+    }
 }
 
 /// One negotiated desktop's bulk owner. Each direction has its own budget:
@@ -87,6 +98,9 @@ impl Streams {
         self.incoming.close();
         self.outgoing.close();
     }
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
 
     /// The caller validates the selected offer before this admission, then
     /// sends `incoming.request()` over the desktop metadata control stream.
@@ -96,7 +110,11 @@ impl Streams {
         offer: u64,
         kind: PayloadKind,
         bytes: Option<u64>,
+        scope: CancellationToken,
     ) -> Result<Incoming, Error> {
+        if scope.is_cancelled() {
+            return Err(Error::Closed);
+        }
         let permit = self
             .incoming
             .clone()
@@ -125,6 +143,7 @@ impl Streams {
             request,
             limits: self.limits.clone(),
             stop: self.stop.clone(),
+            scope,
             lease: Arc::new(Lease {
                 _permit: permit,
                 _original: self.original.clone(),
@@ -230,6 +249,7 @@ pub struct Incoming {
     request: Request,
     limits: Limits,
     stop: CancellationToken,
+    scope: CancellationToken,
     lease: Arc<Lease>,
 }
 impl Incoming {
@@ -241,11 +261,18 @@ impl Incoming {
         let stream = tokio::select! {
             biased;
             _ = self.stop.cancelled() => return Err(Error::Closed),
+            _ = self.scope.cancelled() => return Err(Error::Closed),
             stream = self.inbox.recv() => stream.ok_or(Error::Closed)?,
         };
         Ok(Receiving {
             stream,
-            stopped: Box::pin(self.stop.clone().cancelled_owned()),
+            stopped: Box::pin({
+                let stop = self.stop.clone();
+                let scope = self.scope.clone();
+                async move {
+                    tokio::select! { _ = stop.cancelled() => {}, _ = scope.cancelled() => {} }
+                }
+            }),
             _original: self.lease.clone(),
         })
     }
@@ -272,11 +299,21 @@ impl Incoming {
         drop(self.inbox);
         Ok(stream::receive_reader(wire, &self.request, &self.limits, self.lease).await?)
     }
+
+    pub async fn write(mut self, destination: native::Destination) -> Result<Receipt, Error> {
+        if !matches!(self.request.kind, PayloadKind::File(_)) {
+            return Err(rds_core::clipboard::Error::Identity.into());
+        }
+        let mut wire = self.accept().await?;
+        drop(self.inbox);
+        let destination = destination.retaining(self.lease);
+        Ok(stream::receive_file(&mut wire, destination, &self.request, &self.limits).await?)
+    }
 }
 
 struct Receiving {
     stream: RecvStream,
-    stopped: Pin<Box<WaitForCancellationFutureOwned>>,
+    stopped: Pin<Box<dyn Future<Output = ()> + Send>>,
     _original: NativeLifetime,
 }
 impl AsyncRead for Receiving {

@@ -51,18 +51,38 @@ async fn symmetric_budgets_and_exact_routes_keep_canceled_bodies_out_of_new_requ
         let pair = Pair::new().await;
         let (left, right) = pair.owners();
         let old = left
-            .request(1, PayloadKind::Representation(Format::TextUtf8), None)
+            .request(
+                1,
+                PayloadKind::Representation(Format::TextUtf8),
+                None,
+                CancellationToken::new(),
+            )
             .unwrap();
         let old_request = old.request().clone();
         let next = left
-            .request(2, PayloadKind::Representation(Format::TextUtf8), None)
+            .request(
+                2,
+                PayloadKind::Representation(Format::TextUtf8),
+                None,
+                CancellationToken::new(),
+            )
             .unwrap();
         assert!(matches!(
-            left.request(3, PayloadKind::Representation(Format::TextUtf8), None),
+            left.request(
+                3,
+                PayloadKind::Representation(Format::TextUtf8),
+                None,
+                CancellationToken::new()
+            ),
             Err(Error::Busy)
         ));
         let reverse = right
-            .request(1, PayloadKind::Representation(Format::ImagePng), Some(4))
+            .request(
+                1,
+                PayloadKind::Representation(Format::ImagePng),
+                Some(4),
+                CancellationToken::new(),
+            )
             .unwrap();
         let next_request = next.request().clone();
         let reverse_request = reverse.request().clone();
@@ -90,7 +110,12 @@ async fn symmetric_budgets_and_exact_routes_keep_canceled_bodies_out_of_new_requ
         assert_eq!(pair.right.uni_routing_stats().routes, 0);
         left.close();
         assert!(matches!(
-            left.request(4, PayloadKind::Representation(Format::TextUtf8), None),
+            left.request(
+                4,
+                PayloadKind::Representation(Format::TextUtf8),
+                None,
+                CancellationToken::new()
+            ),
             Err(Error::Closed)
         ));
     })
@@ -116,7 +141,12 @@ async fn real_selected_file_crosses_quic_without_a_staging_file() {
         let pair = Pair::new().await;
         let (left, right) = pair.owners();
         let incoming = left
-            .request(1, PayloadKind::File(file), Some(value.len() as u64))
+            .request(
+                1,
+                PayloadKind::File(file),
+                Some(value.len() as u64),
+                CancellationToken::new(),
+            )
             .unwrap();
         let request = incoming.request().clone();
         let source = selected.open(file).await.unwrap();
@@ -134,6 +164,114 @@ async fn real_selected_file_crosses_quic_without_a_staging_file() {
     .unwrap();
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn remote_native_promise_writes_only_its_selected_file_and_receipts_verified_bytes() {
+    use native::Files;
+    use rds_core::clipboard::Control;
+    let root = std::env::temp_dir().join(format!(
+        "rds-remote-promise-{:032x}",
+        rand::random::<u128>()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let bytes = "remote file ✓\n".repeat(30_000).into_bytes();
+    std::fs::write(root.join("selected"), &bytes).unwrap();
+    let selected =
+        rds_sync::selection::Selection::from_paths([root.join("selected")], &Limits::default())
+            .unwrap();
+    let file = selected.manifest().entries[0].id;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let pair = Pair::backend(rds_net::Backend::Noq).await;
+        let (left, right) = pair.owners();
+        let (metadata, mut requests) = tokio::sync::mpsc::channel(4);
+        let scope = CancellationToken::new();
+        let remote = native::RemoteFiles::new(5, selected.manifest().clone(), Arc::new(left), metadata, scope.clone()).unwrap();
+        assert!(matches!(remote.open([0;16]).await, Err(native::Error::File(_))));
+        assert!(requests.try_recv().is_err());
+        let destination = std::fs::OpenOptions::new().write(true).create_new(true).open(root.join("pasted")).unwrap();
+        let (sent, received) = tokio::join!(
+            async {
+                let Control::Request(request) = requests.recv().await.unwrap() else { panic!("missing request") };
+                assert_eq!(request.kind, PayloadKind::File(file));
+                let receipt = right.send_file(&request, selected.open(file).await.unwrap()).await.unwrap();
+                assert!(matches!(requests.recv().await.unwrap(), Control::Receipt(verified) if verified==receipt && !verified.published));
+                receipt
+            },
+            remote.write(file, native::Destination::new(destination, Arc::new(()))),
+        );
+        let received = received.unwrap();
+        assert_eq!(received.bytes, sent.bytes);
+        assert_eq!(received.digest, sent.digest);
+        scope.cancel();
+        assert!(matches!(remote.open(file).await, Err(native::Error::Changed)));
+        assert!(requests.try_recv().is_err());
+    }).await.unwrap();
+    assert_eq!(std::fs::read(root.join("pasted")).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn withdrawing_a_remote_file_offer_stops_an_existing_reader_and_cancels_its_request() {
+    use native::Files;
+    use rds_core::clipboard::{Control, FileEntry, FileSelection};
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let pair = Pair::new().await;
+        let (left, right) = pair.owners();
+        let right = Arc::new(right);
+        let (metadata, mut requests) = tokio::sync::mpsc::channel(4);
+        let scope = CancellationToken::new();
+        let remote = native::RemoteFiles::new(
+            6,
+            FileSelection {
+                entries: vec![FileEntry {
+                    id: [7; 16],
+                    name: "selected.bin".into(),
+                    bytes: 64 * 1024 * 1024,
+                }],
+            },
+            Arc::new(left),
+            metadata,
+            scope.clone(),
+        )
+        .unwrap();
+        let open = remote.open([7; 16]);
+        let mut sending = None;
+        let sender = right.clone();
+        let (read, request) = tokio::join!(open, async {
+            let Control::Request(request) = requests.recv().await.unwrap() else {
+                panic!("missing request")
+            };
+            let sending_request = request.clone();
+            sending = Some(tokio::spawn(async move {
+                sender
+                    .send_file(
+                        &sending_request,
+                        native::FileRead {
+                            bytes: 64 * 1024 * 1024,
+                            reader: Box::pin(tokio::io::repeat(8).take(64 * 1024 * 1024)),
+                            complete: Box::pin(async { Ok(()) }),
+                        },
+                    )
+                    .await
+            }));
+            request
+        });
+        let mut read = read.unwrap();
+        scope.cancel();
+        assert_eq!(
+            read.reader.read(&mut [0; 1]).await.unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        drop(read.reader);
+        assert!(read.complete.await.is_err());
+        assert!(matches!(requests.recv().await.unwrap(), Control::Cancel {id} if id==request.id));
+        right.close();
+        assert!(sending.unwrap().await.unwrap().is_err());
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -162,7 +300,12 @@ async fn blocked_bulk(backend: rds_net::Backend) {
             .unwrap(),
         );
         let incoming = left
-            .request(1, PayloadKind::File([7; 16]), Some(64 * 1024 * 1024))
+            .request(
+                1,
+                PayloadKind::File([7; 16]),
+                Some(64 * 1024 * 1024),
+                CancellationToken::new(),
+            )
             .unwrap();
         let request = incoming.request().clone();
         let sender = right.clone();
