@@ -38,7 +38,7 @@ strict native signature verification passed on each device. No general clipboard
 contents or OS grants were read/replaced by the probe. The native framework
 reported an unsuccessful sandbox-extension consume for the unscoped local test
 URL; ordinary process file access succeeded. This does not qualify sandboxed
-file access. The SDK's known missing LLVM strip library (controller #166) left
+file access. The development SDK's missing LLVM strip library left
 these optimized probe binaries unstripped; no SDK override was used.
 
 This increment completes admission/configuration for native selected descriptors.
