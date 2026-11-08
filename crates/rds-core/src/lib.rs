@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod clipboard;
 /// Owned endpoint identity and addressing types (ed25519 keys,
 /// relay/direct transport addresses) shared by both backends.
 pub mod endpoint;

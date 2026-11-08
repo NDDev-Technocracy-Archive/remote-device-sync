@@ -1,0 +1,122 @@
+# Native clipboard
+
+Execution: [#212](https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote/issues/212).
+The existing DesktopV5 text wire is unchanged. The new native representation,
+file authority and streaming core are building blocks; they do not advertise
+image/file support or qualify an OS adapter by themselves.
+
+`rds-core::clipboard` owns directional capabilities, typed limits, offers,
+session/offer/request identities, exact selected-file manifests and metadata
+messages. A peer can reduce admitted limits, never raise the local budget.
+An unknown native body size remains unknown until its bounded stream header.
+File sizes and opaque file IDs must match the previously admitted selection.
+Source paths never cross the wire; debug output omits names, bodies and digests.
+
+`rds-desktop::clipboard::stream` transfers one bounded body and BLAKE3 trailer
+through generic asynchronous I/O. It rejects mismatched requests before writing
+the destination and rejects truncation, corruption and trailing data. The
+caller owns authorization, cancellation/deadlines, concurrency, transport
+priority and the unpublished native destination. A verified receipt is distinct
+from native publication and from application consumption.
+`receive_file` uses that same framing/integrity path with the owned native file
+destination. It accepts only a selected-file request, validates the complete
+header before filesystem work, refuses a nonempty/nonregular destination and
+moves one reusable body chunk into each positional native write. The bounded
+duplex/native-file case passed on Linux and macOS without a staging copy.
+`receive_reader` retains a remote selected file as a bounded reader and a
+completion proof. Native destinations and remote-to-remote forwarding consume
+that capability directly, without a local file, pump task or second chunk
+queue. The generic receiver and remote reader share one incremental
+length/trailer/EOF verifier. A corrupted upstream proof prevents a successful
+downstream trailer even after all body bytes were forwarded. Linux/macOS cases
+verify both the actual destination bytes and this failed-completion behavior.
+
+`rds-sync::selection` owns the selected-file capability, independently of sync
+roots and the chunk cache. Native adapters select absolute local paths or open
+descriptors. Only regular files are admitted; leaf symlinks, devices and FIFOs
+are refused without a blocking open. Reads use the held descriptor and explicit
+offsets, with one bounded native operation per reader. Replacing the original
+path cannot redirect that authority. Modification during the selected copy is
+reported as a failed source. No content pre-read, chunk-cache write or second
+full receiver copy is required by this core.
+
+The desktop crate consumes this narrow file capability from `rds-sync` rather
+than introducing a second filesystem-transfer implementation. Sync's configured
+root authorization and resumable journal remain independent; a clipboard offer
+does not grant either of those scopes.
+
+`rds-desktop::clipboard::native` separates a native read from publication.
+Text and PNG bodies are validated immutable objects. Static PNG is checked
+through complete row decoding and its end marker, sharing the encoded bytes;
+native TIFF conversion validates dimensions and bounds allocations before
+creating pixels. The `image` and `png` packages already present in the lock are
+declared directly for these operations, with only PNG/TIFF codecs enabled.
+
+File publication uses a pinned manifest and an owned destination supplied by
+the native paste operation. Native promise adapters may write directly there;
+URI-based adapters must explicitly own and bound any staging. The current local
+file source writes one destination and drains queued native writes before its
+completion. Closing/switching/revoking a session must retain its native owners
+until in-flight operations drain; no network receipt substitutes for that.
+The native `Destination` binds its opened file to the original transfer/paste
+authority before filesystem work. Each positional write moves the one bounded
+chunk into a blocking owner, and returns that same buffer after completion.
+Canceling its waiter retains the descriptor and original caller through the
+running syscall. No queued Tokio file write or second write-buffer copy can
+outlive that purpose; the caller still owns unpublished-destination cleanup.
+
+Native adapters, negotiated transport/manager channels, gesture ownership and
+actual text/image/file pastes across the OS matrix remain the next acceptance
+steps. The legacy text mode remains admitted during the coordinated upgrade.
+
+## Native ownership
+
+The serving session owns one sealed admission/drain lifetime. Capture, input
+and clipboard keep that original caller context until their real native work
+and OS objects are released. Normal serving completion drains these owners;
+canceling the Rust future still leaves the running native guard in place.
+Managed admission pins the original grant and service reservations through
+that cleanup. These guards grant no new permission. A timed-out input call ends
+its owning session rather than probing a replacement OS sink while the admitted
+backend is still executing.
+
+The macOS adapter shares one sleeping AppKit owner per process, a bounded queue
+and body permits. A watching lease polls only native generation metadata; text
+and image data are read on request. Each queued operation retains its original
+scope through native completion, even when its receiver times out. No watcher
+means the native owner sleeps on its queue. Consented Mac hosting uses this
+owner for the existing text mode. The current viewer wrappers still require
+migration to its asynchronous contract before native clipboard mode is offered.
+The prepared `DesktopSource` exposes an in-memory native-provider lease factory:
+the caller supplies its original admitted clipboard context before jobs begin.
+It does not open OS consent or fall back to an unrelated backend. Provider close
+seals new work and drains the retained native operations; offered file handles
+must be released before awaiting that boundary.
+File sources are read as native NSURL objects, with their resource scopes and
+original caller held by every selected descriptor and reader. Foundation's
+filesystem representation is bounded across the whole selection; a serialized
+string URL never substitutes for the native object. Unscoped local URLs still
+require ordinary process filesystem access. Successful resource-scope starts
+are balanced after descriptor cleanup. Native file publication/paste promises
+remain unsupported, so macOS source and receiver capabilities differ.
+
+`native_clipboard` runs against private named pasteboards. The first seven
+AppKit cases passed on physical Apple Silicon hosts using the exact PR probe
+artifact. The queued owner adds five cases, and the native file case reads an
+explicit NSURL selection after its pathname has been moved/replaced. Its held
+descriptor supplies the original bytes while the caller authority survives
+through completion. These probes do
+not read the general clipboard, change OS grants or establish cross-device paste
+acceptance. PR probe bytes are bound to their source tree and artifact digest;
+release provenance is emitted only for successful main producers.
+
+Native API references: [NSPasteboard object reading](https://developer.apple.com/documentation/appkit/nspasteboard)
+and [NSURL resource scope](https://developer.apple.com/documentation/foundation/nsurl/startaccessingsecurityscopedresource()).
+These APIs do not establish sandboxed or receiving-application acceptance by
+themselves; those remain separate native platform cases.
+
+Wayland consent-state ownership explicitly unlocks its file on teardown. A
+transient descriptor inherited by a concurrent spawn before CLOEXEC must not
+prolong the ended owner's lock or make immediate preparation fail. A regression
+holds that same open file description while the original owner ends and verifies
+that the retained consent state can be reopened without a delay or retry.

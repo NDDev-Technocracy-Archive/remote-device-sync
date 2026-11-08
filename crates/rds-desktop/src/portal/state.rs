@@ -32,6 +32,17 @@ pub(super) struct Store {
     previous: Option<Vec<u8>>,
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        // flock follows the open file description. An unrelated concurrent
+        // spawn may inherit it briefly before CLOEXEC runs, so closing only
+        // this FD does not necessarily end this owner's lock lifetime.
+        if let Err(error) = rustix::fs::flock(&self._lock, FlockOperation::Unlock) {
+            tracing::warn!(%error, "Wayland permission lock release failed");
+        }
+    }
+}
+
 fn error() -> DesktopError {
     DesktopError::Capture("unsafe, busy or invalid Wayland permission state".into())
 }
@@ -263,6 +274,21 @@ mod tests {
             std::fs::metadata(dir.state()).unwrap().permissions().mode() & 0o7777,
             0o600
         );
+    }
+    #[test]
+    fn ending_the_store_releases_its_lock_despite_a_transient_inherited_descriptor() {
+        let dir = Directory::new();
+        let mut state = Store::open(&dir.state()).unwrap();
+        state.save("retained-fixture-token".into()).unwrap();
+        // A concurrent process spawn can inherit this open file description
+        // until exec closes CLOEXEC descriptors. Duplication models that
+        // native lifetime without a fork inside the multithreaded test runner.
+        let inherited = state._lock.try_clone().unwrap();
+        assert!(Store::open(&dir.state()).is_err());
+        drop(state);
+        let reopened = Store::open(&dir.state()).unwrap();
+        assert_eq!(reopened.token(), Some("retained-fixture-token"));
+        drop(inherited);
     }
     #[test]
     fn state_aliases_and_unexpected_changes_are_never_overwritten() {

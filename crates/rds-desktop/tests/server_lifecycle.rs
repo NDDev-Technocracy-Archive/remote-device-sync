@@ -12,6 +12,22 @@ use rds_desktop::{
 use rds_net::{Backend, EndpointConfig};
 use rds_net::{read_frame, write_frame};
 
+struct NativeContext {
+    source_dropped: Arc<AtomicBool>,
+    released: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl Drop for NativeContext {
+    fn drop(&mut self) {
+        assert!(
+            self.source_dropped.load(Ordering::Acquire),
+            "original native authority released before capture cleanup"
+        );
+        if let Some(released) = self.released.take() {
+            let _ = released.send(());
+        }
+    }
+}
+
 struct Source {
     inner: SyntheticProducer,
     stopped: Arc<AtomicBool>,
@@ -60,6 +76,11 @@ async fn cancelled_serving_session_releases_capture_without_closing_connection()
         let (a, b) = (a.unwrap(), b.unwrap());
         let stopped = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicBool::new(false));
+        let (released_context, context_done) = tokio::sync::oneshot::channel();
+        let native_lifetime = Arc::new(NativeContext {
+            source_dropped: dropped.clone(),
+            released: Some(released_context),
+        });
         let source = Source {
             inner: SyntheticProducer::new(60, 16, 16, 256),
             stopped: stopped.clone(),
@@ -97,6 +118,7 @@ async fn cancelled_serving_session_releases_capture_without_closing_connection()
                     view_only: true,
                     producer: Some(Box::new(source)),
                     frame_route,
+                    native_lifetime: Some(native_lifetime),
                     ..Default::default()
                 },
             )
@@ -135,5 +157,9 @@ async fn cancelled_serving_session_releases_capture_without_closing_connection()
             released.is_ok(),
             "capture survived cancellation on {backend:?}"
         );
+        tokio::time::timeout(Duration::from_secs(2), context_done)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

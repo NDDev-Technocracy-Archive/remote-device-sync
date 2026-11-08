@@ -61,6 +61,13 @@ impl DesktopSource for Slot {
     ) -> Result<Box<dyn rds_desktop::clipboard::ClipboardBackend>, DesktopError> {
         self.get()?.clipboard(display, watching)
     }
+    fn native_clipboard(
+        &self,
+        display: u32,
+        original: rds_desktop::clipboard::NativeLifetime,
+    ) -> Result<Arc<dyn rds_desktop::clipboard::native::Provider>, DesktopError> {
+        self.get()?.native_clipboard(display, original)
+    }
 }
 
 async fn cancelled(mut stop: watch::Receiver<bool>) {
