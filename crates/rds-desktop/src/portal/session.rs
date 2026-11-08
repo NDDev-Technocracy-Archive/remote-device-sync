@@ -233,7 +233,20 @@ pub(super) async fn open(
                 .await
                 .is_ok()
                 {
-                    Some(proxy)
+                    match super::clipboard::Group::prepare(
+                        proxy,
+                        session.clone(),
+                        crate::clipboard::native::Policy::shipped()
+                            .map_err(|_| error("clipboard policy"))?,
+                    )
+                    .await
+                    {
+                        Ok(group) => Some(Arc::new(group)),
+                        Err(_) => {
+                            tracing::warn!("Wayland clipboard signal subscription unavailable");
+                            None
+                        }
+                    }
                 } else {
                     None
                 }
@@ -291,8 +304,8 @@ pub(super) async fn open(
         .await?;
         let clipboard = if selected.is_clipboard_enabled() {
             match clipboard {
-                Some(proxy) => match super::clipboard::Group::start(proxy, session.clone()).await {
-                    Ok(group) => Some(Arc::new(group)),
+                Some(group) => match group.activate().await {
+                    Ok(()) => Some(group),
                     Err(_) => {
                         tracing::warn!("Wayland clipboard signal subscription unavailable");
                         None

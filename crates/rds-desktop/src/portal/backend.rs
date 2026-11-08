@@ -347,6 +347,17 @@ impl DesktopSource for WaylandDesktop {
         self.slot(display)?;
         self.clipboard.as_ref().ok_or_else(error)?.worker(watching)
     }
+    fn native_clipboard(
+        &self,
+        display: u32,
+        original: crate::clipboard::NativeLifetime,
+    ) -> Result<Arc<dyn crate::clipboard::native::Provider>, DesktopError> {
+        self.slot(display)?;
+        if self.closed.borrow().is_some() {
+            return Err(error());
+        }
+        self.clipboard.as_ref().ok_or_else(error)?.native(original)
+    }
 }
 
 #[cfg(test)]

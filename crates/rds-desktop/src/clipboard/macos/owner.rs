@@ -13,9 +13,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use super::Board;
 use crate::clipboard::{
     ClipboardBackend, ClipboardFuture, NativeLifetime,
-    native::{Error, Operation, Policy, Provider, Publication, Snapshot, Text, Value},
+    native::{Error, Operation, Policy, Provider, Publication, Snapshot, Value},
     ownership::{Owner, Running},
 };
+
+#[cfg(feature = "viewer")]
+use crate::clipboard::native::Text;
 
 static POOL: OnceLock<Mutex<Weak<Core>>> = OnceLock::new();
 static NATIVE_OWNER: Semaphore = Semaphore::const_new(1);
@@ -78,7 +81,9 @@ impl Group {
     }
     fn spawn(
         policy: Policy,
-        board: fn(Arc<rds_sync::selection::DescriptorBudget>) -> Result<Board, Error>,
+        board: impl FnOnce(Arc<rds_sync::selection::DescriptorBudget>) -> Result<Board, Error>
+        + Send
+        + 'static,
     ) -> Result<Self, Error> {
         policy.validate()?;
         let files = policy.selection_budget()?;
@@ -200,22 +205,114 @@ impl Group {
             .borrow()
             .as_ref()
             .map(|snapshot| snapshot.generation);
-        Ok(Box::new(Legacy {
-            provider: self.provider(),
-            seen,
+        let provider = self.provider();
+        let owner = provider.owner.clone();
+        Ok(Box::new(crate::clipboard::native::Legacy::new(
+            Arc::new(provider),
+            owner,
             watching,
-        }))
+            seen,
+        )))
     }
 }
 
 /// The qualification binary uses the same queued owner with a private native
 /// pasteboard. It does not read or replace the user's general selection.
 #[cfg(feature = "viewer")]
+struct Paused {
+    release: mpsc::Sender<()>,
+    task: tokio::task::JoinHandle<Result<(), Error>>,
+}
+#[cfg(feature = "viewer")]
+impl Paused {
+    async fn new() -> Result<Self, Error> {
+        let (entered, blocked) = oneshot::channel();
+        let (release, gate) = mpsc::channel();
+        let task = tokio::task::spawn_blocking(move || {
+            let _access = super::ACCESS.lock().map_err(|_| Error::Unavailable)?;
+            let _ = entered.send(());
+            gate.recv_timeout(Duration::from_secs(10))
+                .map_err(|_| Error::Unavailable)
+        });
+        blocked.await.map_err(|_| Error::Unavailable)?;
+        Ok(Self { release, task })
+    }
+    async fn finish(self) -> Result<(), Error> {
+        self.release.send(()).map_err(|_| Error::Unavailable)?;
+        self.task.await.map_err(|_| Error::Unavailable)?
+    }
+}
+#[cfg(feature = "viewer")]
+struct GatedRead {
+    provider: Arc<dyn Provider>,
+    group: Group,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    reads: AtomicUsize,
+}
+#[cfg(feature = "viewer")]
+impl Provider for GatedRead {
+    fn close(&self) -> ClipboardFuture<'_, ()> {
+        self.provider.close()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.provider.capabilities()
+    }
+    fn current(&self) -> Operation<'_, Snapshot> {
+        self.provider.current()
+    }
+    fn changed(&self, after: u64) -> Operation<'_, Snapshot> {
+        self.provider.changed(after)
+    }
+    fn publish(
+        &self,
+        generation: u64,
+        value: Publication,
+        original: NativeLifetime,
+    ) -> Operation<'_, Snapshot> {
+        self.provider.publish(generation, value, original)
+    }
+    fn read(
+        &self,
+        generation: u64,
+        format: Format,
+        original: NativeLifetime,
+    ) -> Operation<'_, Value> {
+        Box::pin(async move {
+            if self.reads.fetch_add(1, Ordering::AcqRel) != 0 {
+                return Err(Error::Publication);
+            }
+            // Metadata may need its own asynchronous refresh. Gate only the
+            // actual read, after that phase has completed, on the real edge.
+            let pause = Paused::new().await?;
+            let mut reading = self.provider.read(generation, format, original);
+            if !matches!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(reading.as_mut().poll(cx))).await,
+                std::task::Poll::Pending
+            ) || self.group.0.bodies.available_permits()
+                != self.group.0.policy.native_body_operations - 1
+            {
+                return Err(Error::Publication);
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+            pause.finish().await?;
+            reading.await
+        })
+    }
+}
+#[cfg(feature = "viewer")]
 pub(crate) async fn probe() -> Result<u32, Error> {
     let file_cases = super::files::probe().await?;
     let policy = Policy::shipped()?;
-    let group = Group::spawn(policy.clone(), |files| Ok(Board::isolated(files)))?;
+    let (named, name) = oneshot::channel();
+    let group = Group::spawn(policy.clone(), move |files| {
+        let board = Board::isolated(files);
+        let _ = named.send(board.board.name().to_string());
+        Ok(board)
+    })?;
     group.ready().await?;
+    let name = name.await.map_err(|_| Error::Unavailable)?;
     let context = Arc::new(());
     let retained = Arc::downgrade(&context);
     let provider = group.native(context)?;
@@ -279,6 +376,93 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     if read.encoded() != &expected {
         return Err(Error::Publication);
     }
+    let mut legacy = group.worker(true).map_err(|_| Error::Unavailable)?;
+    if !legacy.retain(Arc::new(())) {
+        return Err(Error::Publication);
+    }
+    legacy
+        .publish("legacy native publication".into())
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    let own = provider.current().await?;
+    let Value::Text(text) = provider
+        .read(own.generation, Format::TextUtf8, Arc::new(()))
+        .await?
+    else {
+        return Err(Error::Unsupported);
+    };
+    if text.as_str() != "legacy native publication" {
+        return Err(Error::Publication);
+    }
+    let pause = Paused::new().await?;
+    let mut unchanged = provider.changed(own.generation);
+    if !matches!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(unchanged.as_mut().poll(cx))).await,
+        std::task::Poll::Pending
+    ) {
+        return Err(Error::Publication);
+    }
+    drop(unchanged);
+    pause.finish().await?;
+    legacy.close().await;
+    drop(legacy);
+    let inner = group.provider();
+    let owner = inner.owner.clone();
+    let gated = Arc::new(GatedRead {
+        provider: Arc::new(inner),
+        group: group.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        reads: AtomicUsize::new(0),
+    });
+    let mut legacy =
+        crate::clipboard::native::Legacy::new(gated.clone(), owner, true, Some(own.generation));
+    if !legacy.retain(Arc::new(())) {
+        return Err(Error::Publication);
+    }
+    let mut observing = legacy.next_change();
+    if !matches!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(observing.as_mut().poll(cx))).await,
+        std::task::Poll::Pending
+    ) {
+        return Err(Error::Publication);
+    }
+    let mut external = Board {
+        board: objc2_app_kit::NSPasteboard::pasteboardWithName(
+            &objc2_foundation::NSString::from_str(&name),
+        ),
+        files: policy.selection_budget()?,
+        published: None,
+        isolated: false,
+    };
+    let expected = "copied while control input cancels its wait ✓";
+    let before = external.generation()?;
+    external.publish(
+        before,
+        Publication::Text(Text::new(
+            bytes::Bytes::from_static(expected.as_bytes()),
+            &policy.limits,
+        )?),
+        &policy,
+    )?;
+    tokio::select! {
+        _ = gated.entered.notified() => {},
+        _ = &mut observing => return Err(Error::Publication),
+        _ = tokio::time::sleep(Duration::from_secs(10)) => return Err(Error::Unavailable),
+    }
+    drop(observing);
+    gated.release.notify_one();
+    let value = tokio::time::timeout(Duration::from_secs(10), legacy.next_change())
+        .await
+        .map_err(|_| Error::Unavailable)?
+        .ok_or(Error::Unavailable)?;
+    if value != expected || gated.reads.load(Ordering::Acquire) != 1 {
+        return Err(Error::Publication);
+    }
+    legacy.close().await;
+    drop(legacy);
+    drop(gated);
+    drop(external);
     provider.close().await;
     if !matches!(provider.current().await, Err(Error::Changed)) || retained.upgrade().is_none() {
         return Err(Error::Publication);
@@ -287,7 +471,7 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     if retained.upgrade().is_some() {
         return Err(Error::Publication);
     }
-    Ok(5 + file_cases)
+    Ok(8 + file_cases)
 }
 
 fn execute(job: Job, board: &mut Board, policy: &Policy) {
@@ -450,10 +634,14 @@ impl Provider for Lease {
                 if !self.group.available() {
                     return Err(Error::Unavailable);
                 }
-                if let Some(snapshot) = changes.borrow_and_update().clone()
-                    && snapshot.generation != generation
-                {
-                    return Ok(snapshot);
+                let snapshot = changes.borrow_and_update().clone();
+                if snapshot.is_some_and(|snapshot| snapshot.generation != generation) {
+                    // The sleeping metadata cache may predate current()/publish.
+                    // Refresh on its native owner before disclosing a change.
+                    let current = self.current().await?;
+                    if current.generation != generation {
+                        return Ok(current);
+                    }
                 }
                 tokio::select! { _ = self.owner.closed_signal() => return Err(Error::Changed),
                 result = changes.changed() => result.map_err(|_| Error::Unavailable)?, }
@@ -462,79 +650,6 @@ impl Provider for Lease {
     }
 }
 
-struct Legacy {
-    provider: Lease,
-    seen: Option<u64>,
-    watching: bool,
-}
 fn desktop_error(error: Error) -> crate::DesktopError {
     crate::DesktopError::Input(error.to_string())
-}
-impl ClipboardBackend for Legacy {
-    fn retain(&mut self, context: NativeLifetime) -> bool {
-        self.provider.owner.retain(context)
-    }
-    fn close(&mut self) -> ClipboardFuture<'_, ()> {
-        self.provider.close()
-    }
-    fn publish(&mut self, text: String) -> ClipboardFuture<'_, Result<(), crate::DesktopError>> {
-        Box::pin(async move {
-            let current = self.provider.current().await.map_err(desktop_error)?;
-            let text = Text::new(
-                bytes::Bytes::from(text),
-                &self.provider.group.0.policy.limits,
-            )
-            .map_err(desktop_error)?;
-            self.provider
-                .publish(
-                    current.generation,
-                    Publication::Text(text),
-                    Arc::new(
-                        self.provider
-                            .owner
-                            .begin()
-                            .ok_or_else(|| desktop_error(Error::Changed))?,
-                    ),
-                )
-                .await
-                .map_err(desktop_error)?;
-            Ok(())
-        })
-    }
-    fn next_change(&mut self) -> ClipboardFuture<'_, Option<String>> {
-        Box::pin(async move {
-            if !self.watching {
-                self.provider.owner.closed_signal().await;
-                return None;
-            }
-            if self.seen.is_none() {
-                self.seen = Some(self.provider.current().await.ok()?.generation);
-            }
-            loop {
-                let snapshot = self.provider.changed(self.seen?).await.ok()?;
-                self.seen = Some(snapshot.generation);
-                if snapshot.owned
-                    || !snapshot
-                        .representations
-                        .iter()
-                        .any(|r| r.format == Format::TextUtf8)
-                {
-                    continue;
-                }
-                match self
-                    .provider
-                    .read(
-                        snapshot.generation,
-                        Format::TextUtf8,
-                        Arc::new(self.provider.owner.begin()?),
-                    )
-                    .await
-                {
-                    Ok(Value::Text(text)) => return Some(text.as_str().to_owned()),
-                    Err(Error::Unavailable) => return None,
-                    _ => {}
-                }
-            }
-        })
-    }
 }
