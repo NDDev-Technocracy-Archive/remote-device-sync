@@ -1,4 +1,4 @@
-# Noq-proto 1.3 path observation and optional ACK routing
+# Noq-proto 1.4.0 path observation and optional ACK routing
 
 `Connection::established_paths` now exposes a read-only snapshot of path IDs
 whose initial establishment is informed and which have not been abandoned.
@@ -7,9 +7,9 @@ forwards this for Iroh's subscribe-then-snapshot registration; no validation or
 packet scheduling decision changes. A pending/abandoned/high-ID/closed-connection
 regression covers the snapshot boundary.
 
-Exact published crates.io noq-proto1.3.0 source, checksum
-7c1e5b6fe668491eca022f745a0a9402585626c73a7b839b3424ace15d6a9c8f.
-Published upstream revision: c1f411562e6078852749b8bcf1190523096a107f,
+Exact published crates.io noq-proto 1.4.0 source, checksum
+c01a35be3ed37558c8db69554419f24eff8a63599b54f711bbe3863ec727c47d.
+Published upstream revision: 34f75c49f93de5e2ff943483cabc5b6d0c5df918,
 subdirectory noq-proto. Original MIT/Apache-2.0 license files are retained.
 One additive PathStats bool
 reports whether the path packet-number space retains unacknowledged STREAM

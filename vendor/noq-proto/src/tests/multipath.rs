@@ -1,14 +1,14 @@
 //! Tests for multipath
 
-use std::net::SocketAddr;
-use std::num::NonZeroU32;
-use std::sync::Arc;
-use std::time::Duration;
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use core::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use std::dbg;
 
 use assert_matches::assert_matches;
 use testresult::TestResult;
 use tracing::info;
 
+use crate::connection::timer::{PathTimer, Timer};
 use crate::{
     ClientConfig, ConnectionId, ConnectionIdGenerator, Endpoint, EndpointConfig, FourTuple,
     LOCAL_CID_COUNT, NetworkChangeHint, PathId, PathStatus, RandomConnectionIdGenerator,
@@ -485,10 +485,15 @@ fn open_path_validation_fails_server_side() -> TestResult {
 
     info!("manual keep-alive of PathId::ZERO");
     pair.ping_path(Client, PathId::ZERO)?;
+    // Sent here, before the clock moves: `drive_until_timer` advances time before it
+    // drives, so a queued keep-alive would otherwise go out at the deadline itself.
     pair.drive();
 
     info!("advancing time to past client path {path_id} idle");
-    pair.advance_time();
+    pair.drive_until_timer(Client, Timer::PerPath(path_id, PathTimer::PathIdle));
+    // Deliver the abandonment to the server: the timer fires while driving the client, and
+    // the loop drives the server before that packet arrives. Without this step the
+    // `poll(Server)` check below would pass simply because the server never heard about it.
     pair.drive();
 
     // The client gave up first and timed out.
@@ -900,7 +905,7 @@ fn per_path_observed_address() -> TestResult {
 
     let mut found_first = false;
     let mut found_second = false;
-    let post_connect_events = std::iter::from_fn(|| pair.poll(Client));
+    let post_connect_events = core::iter::from_fn(|| pair.poll(Client));
     for event in client_events.into_iter().chain(post_connect_events) {
         if let Event::Path(PathEvent::ObservedAddr { id, addr }) = event {
             if id == PathId::ZERO && addr == first_addr {

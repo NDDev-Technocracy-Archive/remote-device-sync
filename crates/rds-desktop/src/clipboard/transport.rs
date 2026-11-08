@@ -125,7 +125,7 @@ impl Streams {
             .map_err(|_| self.admission_error())?;
         let sequence = self
             .next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Error::Closed)?;
         let request = Request {
             id: TransferId {

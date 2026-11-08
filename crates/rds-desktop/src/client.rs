@@ -824,7 +824,7 @@ impl Default for RelayDecoder {
 
 fn next_control_seq(sequence: &AtomicU64) -> Result<u64, DesktopError> {
     sequence
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seq| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |seq| {
             seq.checked_add(1)
         })
         .map_err(|_| DesktopError::Input("control sequence exhausted".into()))

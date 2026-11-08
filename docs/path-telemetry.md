@@ -14,7 +14,7 @@ This contract does not close those tasks or promote the owned backend.
   the completed TLS handshake's initial path, then consumed `Established`
   events. Pending probes and advertised candidate addresses are not validation
   evidence. Zero lost events does not assert that all engine paths are known:
-  events can be queued or precede subscription. The Noq 1.3.0 wrapper exposes
+  events can be queued or precede subscription. The Noq 1.4.0 wrapper exposes
   individual paths and bounded event streams, not a complete live validated-path
   snapshot.
 
