@@ -1,7 +1,8 @@
 //! X11 CLIPBOARD owner using ICCCM TARGETS/TIMESTAMP and INCR transfers.
 //! No external clipboard helper. One worker/window per controlling session.
 use super::ClipboardChange;
-use crate::DesktopError;
+use crate::{DesktopError, clipboard::native::Policy};
+use bytes::Bytes;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{
@@ -17,6 +18,9 @@ use x11rb::{
     rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
+mod native;
+pub use native::Prepared;
+pub(super) use native::prepare;
 // Match the native launcher's bounded eight-window product limit. Running
 // native calls retain the permit even when their async owner is cancelled.
 static WORKERS: Semaphore = Semaphore::const_new(8);
@@ -33,6 +37,7 @@ pub(crate) struct Worker {
     task: tokio::task::JoinHandle<()>,
     joined: bool,
     lifetime: Arc<OnceLock<super::NativeLifetime>>,
+    timeout: Option<Duration>,
 }
 impl Worker {
     pub(crate) fn new(display: u32) -> Self {
@@ -42,6 +47,11 @@ impl Worker {
         Self::spawn(display, true)
     }
     fn spawn(display: u32, watch: bool) -> Self {
+        let policy = Policy::shipped();
+        let timeout = policy
+            .as_ref()
+            .ok()
+            .map(|p| Duration::from_millis(p.operation_timeout_ms));
         let lifetime = Arc::new(OnceLock::new());
         let retained = lifetime.clone();
         let (jobs, mut rx) = mpsc::channel::<Job>(1);
@@ -65,7 +75,10 @@ impl Worker {
             let Some(mut wake) = receiver else {
                 return;
             };
-            let mut clipboard = match Clipboard::new_watching(display, watch) {
+            let Ok(policy) = policy else {
+                return;
+            };
+            let mut clipboard = match Clipboard::new_watching(display, watch, &policy) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::debug!(%e, "clipboard worker unavailable");
@@ -83,12 +96,21 @@ impl Worker {
                     Err(mpsc::error::TryRecvError::Disconnected) => break,
                     Err(mpsc::error::TryRecvError::Empty) => {}
                 }
-                if let Err(error) = clipboard.pump() {
-                    tracing::warn!(%error, "clipboard selection worker ended");
-                    break;
-                }
-                if let Some(text) = clipboard.external.take() {
+                let buffered = match clipboard.pump() {
+                    Ok(buffered) => buffered,
+                    Err(error) => {
+                        tracing::warn!(%error, "clipboard selection worker ended");
+                        break;
+                    }
+                };
+                if let Some((kind, value)) = clipboard.external.take()
+                    && kind == clipboard.utf8
+                    && let Ok(text) = String::from_utf8(value)
+                {
                     changes.send(ClipboardChange { text });
+                }
+                if buffered {
+                    continue;
                 }
                 let mut fds = [
                     rustix::event::PollFd::new(
@@ -97,16 +119,7 @@ impl Worker {
                     ),
                     rustix::event::PollFd::new(&wake, rustix::event::PollFlags::IN),
                 ];
-                // Native events and jobs wake us immediately. With XFixes and
-                // no active transfer there is no deadline to service: sleep
-                // until a real event or close rather than waking at 4 Hz.
-                let timed = clipboard.incoming.is_some()
-                    || !clipboard.transfers.is_empty()
-                    || (clipboard.watching && !clipboard.xfixes);
-                let timeout = timed.then_some(rustix::event::Timespec {
-                    tv_sec: 0,
-                    tv_nsec: 250_000_000,
-                });
+                let timeout = clipboard.poll_timeout();
                 if rustix::event::poll(&mut fds, timeout.as_ref()).is_err() {
                     break;
                 }
@@ -132,11 +145,15 @@ impl Worker {
             task,
             joined: false,
             lifetime,
+            timeout,
         }
     }
     pub(crate) async fn ready(&mut self) -> Result<(), DesktopError> {
+        let timeout = self
+            .timeout
+            .ok_or_else(|| error("invalid native clipboard policy"))?;
         if let Some(ready) = self.initialized.take() {
-            match tokio::time::timeout(Duration::from_secs(2), ready).await {
+            match tokio::time::timeout(timeout, ready).await {
                 Ok(Ok(true)) => {}
                 _ => return Err(error("clipboard initialization unavailable")),
             }
@@ -195,7 +212,7 @@ struct Transfer {
     window: Window,
     property: Atom,
     kind: Atom,
-    bytes: Arc<[u8]>,
+    bytes: Bytes,
     offset: usize,
     started: Instant,
 }
@@ -216,20 +233,31 @@ struct Clipboard {
     xfixes: bool,
     fallback_at: Instant,
     incoming: Option<Incoming>,
-    external: Option<String>,
-    text: Arc<[u8]>,
+    external: Option<(Atom, Vec<u8>)>,
+    payload: Bytes,
+    published_kind: Atom,
+    native: bool,
+    generation: u64,
+    ignore_own: Option<u32>,
     transfers: Vec<Transfer>,
     chunk: usize,
+    settings: super::native::X11Policy,
+    read_timeout: Duration,
 }
 struct Incoming {
     window: Window,
+    target: Atom,
+    kind: Atom,
+    format: u8,
+    limit: usize,
     timestamp: u32,
-    started: Instant,
+    deadline: Instant,
     increment: bool,
     bytes: Vec<u8>,
 }
 impl Clipboard {
-    fn new_watching(display: u32, watching: bool) -> Result<Self, DesktopError> {
+    fn new_watching(display: u32, watching: bool, policy: &Policy) -> Result<Self, DesktopError> {
+        policy.validate().map_err(error)?;
         let (conn, screen) = RustConnection::connect(None).map_err(error)?;
         let root = conn
             .setup()
@@ -297,7 +325,7 @@ impl Clipboard {
         let chunk = conn
             .maximum_request_bytes()
             .saturating_sub(128)
-            .min(32 * 1024);
+            .min(policy.x11.selection_chunk_bytes as usize);
         let last_owner = conn
             .get_selection_owner(clipboard)
             .map_err(error)?
@@ -322,9 +350,15 @@ impl Clipboard {
             fallback_at: Instant::now(),
             incoming: None,
             external: None,
-            text: Arc::from([]),
+            payload: Bytes::new(),
+            published_kind: utf8,
+            native: false,
+            generation: 1,
+            ignore_own: None,
             transfers: Vec::new(),
             chunk,
+            settings: policy.x11.clone(),
+            read_timeout: Duration::from_millis(policy.operation_timeout_ms),
         })
     }
     fn cancel_read(&mut self) {
@@ -336,6 +370,14 @@ impl Clipboard {
         if text.len() > super::MAX_TEXT_BYTES {
             return Err(error("text exceeds 1 MiB"));
         }
+        self.publish_bytes(self.utf8, Bytes::from(text.into_bytes()), None)
+    }
+    fn publish_bytes(
+        &mut self,
+        kind: Atom,
+        bytes: Bytes,
+        expected: Option<u64>,
+    ) -> Result<(), DesktopError> {
         self.cancel_read();
         self.external = None;
         self.conn
@@ -354,7 +396,7 @@ impl Clipboard {
             .map_err(error)?
             .check()
             .map_err(error)?;
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_millis(self.settings.timestamp_timeout_ms);
         loop {
             if Instant::now() >= deadline {
                 return Err(error("server timestamp unavailable"));
@@ -372,14 +414,20 @@ impl Clipboard {
                         self.conn.stream(),
                         rustix::event::PollFlags::IN,
                     )];
-                    let timeout = rustix::event::Timespec {
-                        tv_sec: 0,
-                        tv_nsec: 10_000_000,
-                    };
+                    let timeout = timespec(deadline.saturating_duration_since(Instant::now()));
                     rustix::event::poll(&mut fds, Some(&timeout)).map_err(error)?;
                 }
             }
         }
+        if expected.is_some_and(|generation| generation != self.generation) {
+            return Err(error(
+                "native ownership changed during timestamp acquisition",
+            ));
+        }
+        let next = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| error("native generation exhausted"))?;
         self.conn
             .set_selection_owner(self.window, self.clipboard, self.time)
             .map_err(error)?
@@ -396,19 +444,50 @@ impl Clipboard {
         {
             return Err(error("selection ownership refused"));
         }
-        self.text = Arc::from(text.into_bytes());
+        self.payload = bytes;
+        self.published_kind = kind;
         self.last_owner = self.window;
-        tracing::info!(bytes = self.text.len(), "remote text clipboard published");
+        self.generation = next;
+        self.ignore_own = Some(self.time);
+        tracing::debug!(bytes = self.payload.len(), "native clipboard published");
         Ok(())
     }
 
     fn owner_changed(&mut self, owner: Window, timestamp: u32) -> Result<(), DesktopError> {
+        if owner == self.window && self.ignore_own == Some(timestamp) {
+            self.ignore_own = None;
+        } else {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| error("native generation exhausted"))?;
+        }
         self.last_owner = owner;
         self.cancel_read();
         self.external = None;
-        if !self.watching || owner == 0 || owner == self.window {
+        if self.native || !self.watching || owner == 0 || owner == self.window {
             return Ok(());
         }
+        self.start_read(
+            timestamp,
+            self.utf8,
+            self.utf8,
+            8,
+            super::MAX_TEXT_BYTES,
+            Instant::now() + self.read_timeout,
+        )
+    }
+    fn start_read(
+        &mut self,
+        timestamp: u32,
+        target: Atom,
+        kind: Atom,
+        format: u8,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<(), DesktopError> {
+        self.cancel_read();
+        self.external = None;
         // A fresh requestor window separates old INCR writes from a new owner.
         // Destroying it cancels old writes without leaking a new Atom per copy.
         let window = self.conn.generate_id().map_err(error)?;
@@ -431,13 +510,17 @@ impl Clipboard {
             .map_err(error)?;
         self.incoming = Some(Incoming {
             window,
+            target,
+            kind,
+            format,
+            limit,
             timestamp,
-            started: Instant::now(),
+            deadline,
             increment: false,
             bytes: Vec::new(),
         });
         self.conn
-            .convert_selection(window, self.clipboard, self.utf8, self.property, timestamp)
+            .convert_selection(window, self.clipboard, target, self.property, timestamp)
             .map_err(error)?
             .check()
             .map_err(error)?;
@@ -449,7 +532,7 @@ impl Clipboard {
         };
         if event.requestor != incoming.window
             || event.selection != self.clipboard
-            || event.target != self.utf8
+            || event.target != incoming.target
             || (incoming.timestamp != 0 && event.time != incoming.timestamp)
         {
             return Ok(());
@@ -464,7 +547,8 @@ impl Clipboard {
         self.read_property(false)
     }
     fn read_property(&mut self, increment: bool) -> Result<(), DesktopError> {
-        let Some(requestor) = self.incoming.as_ref().map(|read| read.window) else {
+        let Some((requestor, limit)) = self.incoming.as_ref().map(|read| (read.window, read.limit))
+        else {
             return Ok(());
         };
         let part = self
@@ -475,7 +559,7 @@ impl Clipboard {
                 self.property,
                 AtomEnum::ANY,
                 0,
-                (super::MAX_TEXT_BYTES as u32).div_ceil(4),
+                (limit as u32).div_ceil(4),
             )
             .map_err(error)?
             .reply()
@@ -489,7 +573,7 @@ impl Clipboard {
                 return Ok(());
             };
             let advertised = part.value32().and_then(|mut values| values.next());
-            if part.format != 32 || advertised.is_none_or(|n| n as usize > super::MAX_TEXT_BYTES) {
+            if part.format != 32 || advertised.is_none_or(|n| n as usize > incoming.limit) {
                 self.cancel_read();
             } else {
                 incoming.increment = true;
@@ -497,10 +581,20 @@ impl Clipboard {
             self.conn.flush().map_err(error)?;
             return Ok(());
         }
+        let Some(incoming) = &mut self.incoming else {
+            return Ok(());
+        };
+        if part.type_ != incoming.kind
+            || part.format != incoming.format
+            || incoming.bytes.len().saturating_add(part.value.len()) > incoming.limit
+        {
+            self.cancel_read();
+            return Ok(());
+        }
         if increment && part.value.is_empty() {
             if let Some(done) = self.incoming.take() {
                 let _ = self.conn.destroy_window(done.window);
-                self.external = String::from_utf8(done.bytes).ok();
+                self.external = Some((done.target, done.bytes));
             }
             self.conn.flush().map_err(error)?;
             return Ok(());
@@ -508,29 +602,51 @@ impl Clipboard {
         let Some(incoming) = &mut self.incoming else {
             return Ok(());
         };
-        if part.type_ != self.utf8
-            || part.format != 8
-            || incoming.bytes.len().saturating_add(part.value.len()) > super::MAX_TEXT_BYTES
-        {
-            self.cancel_read();
-            return Ok(());
+        if incoming.format == 32 {
+            for atom in part
+                .value32()
+                .ok_or_else(|| error("native atom list format changed"))?
+            {
+                incoming.bytes.extend_from_slice(&atom.to_le_bytes());
+            }
+        } else if !increment {
+            incoming.bytes = part.value;
+        } else {
+            incoming.bytes.extend_from_slice(&part.value);
         }
-        incoming.bytes.extend_from_slice(&part.value);
         if !increment && let Some(done) = self.incoming.take() {
             let _ = self.conn.destroy_window(done.window);
-            self.external = String::from_utf8(done.bytes).ok();
+            self.external = Some((done.target, done.bytes));
         }
         self.conn.flush().map_err(error)
     }
-    fn pump(&mut self) -> Result<(), DesktopError> {
+    fn poll_timeout(&self) -> Option<rustix::event::Timespec> {
+        let deadline = self
+            .incoming
+            .iter()
+            .map(|read| read.deadline)
+            .chain(self.transfers.iter().map(|transfer| {
+                transfer.started
+                    + Duration::from_millis(self.settings.selection_transfer_timeout_ms)
+            }))
+            .chain((self.watching && !self.xfixes).then(|| {
+                self.fallback_at + Duration::from_millis(self.settings.legacy_owner_interval_ms)
+            }))
+            .min();
+        deadline.map(|deadline| timespec(deadline.saturating_duration_since(Instant::now())))
+    }
+    fn pump(&mut self) -> Result<bool, DesktopError> {
         if self
             .incoming
             .as_ref()
-            .is_some_and(|read| read.started.elapsed() >= Duration::from_secs(2))
+            .is_some_and(|read| Instant::now() >= read.deadline)
         {
             self.cancel_read();
         }
-        if self.watching && !self.xfixes && self.fallback_at.elapsed() >= Duration::from_millis(250)
+        if self.watching
+            && !self.xfixes
+            && self.fallback_at.elapsed()
+                >= Duration::from_millis(self.settings.legacy_owner_interval_ms)
         {
             self.fallback_at = Instant::now();
             let owner = self
@@ -544,15 +660,24 @@ impl Clipboard {
                 self.owner_changed(owner, 0)?;
             }
         }
-        self.transfers
-            .retain(|t| t.started.elapsed() < Duration::from_secs(5));
-        for _ in 0..64 {
+        self.transfers.retain(|t| {
+            t.started.elapsed() < Duration::from_millis(self.settings.selection_transfer_timeout_ms)
+        });
+        let mut more = false;
+        for _ in 0..self.settings.event_batch {
             match self.conn.poll_for_event().map_err(error)? {
-                Some(e) => self.event(e)?,
-                None => break,
+                Some(e) => {
+                    self.event(e)?;
+                    more = true;
+                }
+                None => {
+                    more = false;
+                    break;
+                }
             }
         }
-        self.conn.flush().map_err(error)
+        self.conn.flush().map_err(error)?;
+        Ok(more)
     }
     fn event(&mut self, event: Event) -> Result<(), DesktopError> {
         match event {
@@ -600,7 +725,7 @@ impl Clipboard {
                 Ok(())
             }
             Event::SelectionClear(e) if e.selection == self.clipboard => {
-                self.text = Arc::from([]);
+                self.payload = Bytes::new();
                 self.last_owner = 0;
                 Ok(())
             }
@@ -619,6 +744,10 @@ impl Clipboard {
             && (e.time == 0 || e.time.wrapping_sub(self.time) < u32::MAX / 2)
         {
             if e.target == self.targets {
+                let mut targets = vec![self.targets, self.timestamp, self.published_kind];
+                if self.published_kind == self.utf8 && self.payload.is_ascii() {
+                    targets.push(AtomEnum::STRING.into());
+                }
                 accepted = self
                     .conn
                     .change_property32(
@@ -626,12 +755,7 @@ impl Clipboard {
                         e.requestor,
                         property,
                         AtomEnum::ATOM,
-                        &[
-                            self.targets,
-                            self.timestamp,
-                            self.utf8,
-                            AtomEnum::STRING.into(),
-                        ],
+                        &targets,
                     )
                     .map_err(error)?
                     .check()
@@ -649,10 +773,12 @@ impl Clipboard {
                     .map_err(error)?
                     .check()
                     .is_ok();
-            } else if e.target == self.utf8
-                || (e.target == u32::from(AtomEnum::STRING) && self.text.is_ascii())
+            } else if e.target == self.published_kind
+                || (self.published_kind == self.utf8
+                    && e.target == u32::from(AtomEnum::STRING)
+                    && self.payload.is_ascii())
             {
-                if self.text.len() <= self.chunk {
+                if self.payload.len() <= self.chunk {
                     accepted = self
                         .conn
                         .change_property8(
@@ -660,12 +786,12 @@ impl Clipboard {
                             e.requestor,
                             property,
                             e.target,
-                            &self.text,
+                            &self.payload,
                         )
                         .map_err(error)?
                         .check()
                         .is_ok();
-                } else if self.transfers.len() < 8
+                } else if self.transfers.len() < self.settings.selection_transfers
                     && !self
                         .transfers
                         .iter()
@@ -688,7 +814,7 @@ impl Clipboard {
                             e.requestor,
                             property,
                             self.incr,
-                            &[self.text.len() as u32],
+                            &[self.payload.len() as u32],
                         )
                         .map_err(error)?
                         .check()
@@ -698,7 +824,7 @@ impl Clipboard {
                             window: e.requestor,
                             property,
                             kind: e.target,
-                            bytes: self.text.clone(),
+                            bytes: self.payload.clone(),
                             offset: 0,
                             started: Instant::now(),
                         });
@@ -726,10 +852,41 @@ impl Clipboard {
     }
 }
 
+fn timespec(remaining: Duration) -> rustix::event::Timespec {
+    rustix::event::Timespec {
+        tv_sec: remaining.as_secs() as _,
+        tv_nsec: remaining.subsec_nanos() as _,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn receive(
+    #[test]
+    #[ignore = "requires dedicated Xvfb; queues native events before a reply barrier"]
+    fn native_clipboard_reports_buffered_event_debt_before_polling_the_socket() {
+        let mut clipboard = Clipboard::new_watching(0, true, &Policy::shipped().unwrap()).unwrap();
+        for _ in 0..160 {
+            clipboard
+                .conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    clipboard.window,
+                    clipboard.marker,
+                    AtomEnum::INTEGER,
+                    &[0],
+                )
+                .unwrap();
+        }
+        // Waiting for this later reply moves the preceding events into the
+        // connection's user-space queue. No further OS event is needed to
+        // complete the backlog, and socket readiness alone is insufficient.
+        clipboard.conn.get_input_focus().unwrap().reply().unwrap();
+        assert!(clipboard.pump().unwrap());
+        while clipboard.pump().unwrap() {}
+        assert!(clipboard.conn.poll_for_event().unwrap().is_none());
+    }
+    pub(super) async fn receive(
         conn: &RustConnection,
         window: Window,
         selection: Atom,

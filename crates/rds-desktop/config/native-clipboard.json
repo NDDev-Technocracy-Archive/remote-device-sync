@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "limits": {
     "text_bytes": 1048576,
     "image_bytes": 33554432,
@@ -15,5 +15,13 @@
   "native_types": 64,
   "pending_operations": 8,
   "selected_file_descriptors": 64,
-  "native_body_operations": 2
+  "native_body_operations": 2,
+  "x11": {
+    "selection_transfers": 8,
+    "selection_chunk_bytes": 32768,
+    "selection_transfer_timeout_ms": 5000,
+    "timestamp_timeout_ms": 1000,
+    "legacy_owner_interval_ms": 250,
+    "event_batch": 64
+  }
 }

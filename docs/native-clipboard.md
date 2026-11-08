@@ -58,6 +58,12 @@ standalone profile admits 64 retained selection FDs process-wide, independently
 of the protocol's 128 files per manifest. A capacity error never silently admits
 only part of a selected copy.
 
+Schema 2 adds mandatory X11 selection settings: independent native
+selection-transfer count and chunk size, transfer/timestamp deadlines,
+legacy owner-observation interval and bounded event batch. They are separate
+from native jobs and wire body concurrency. Unsupported schema versions and
+missing/unknown backend settings are refused rather than filled with defaults.
+
 Native viewing and serving providers share the same weak process budget pool.
 Each selected descriptor retains that exact physical owner, independently of a
 pasteboard worker's lifetime. A replacement with a different limit is refused
@@ -185,3 +191,29 @@ transient descriptor inherited by a concurrent spawn before CLOEXEC must not
 prolong the ended owner's lock or make immediate preparation fail. A regression
 holds that same open file description while the original owner ends and verifies
 that the retained consent state can be reopened without a delay or retry.
+
+## Prepared X11 provider
+
+`native::prepare_x11` opens the explicitly selected X server on a sleeping
+native worker under its original physical application/backend owner. Clones
+share that owner; a different owner or policy cannot replace it while it is
+alive. The prepared factory creates in-memory per-session provider leases.
+Lease close seals and drains that session's actual native calls; physical close
+also drains the board/windows before releasing process admission. This API is
+not a Wayland fallback and does not open screen-capture consent.
+
+The provider supports UTF-8 text and static PNG through the same ICCCM
+TARGETS/TIMESTAMP/INCR edge as legacy text. XFixes generation notifications wake
+metadata watchers; content is read only for an admitted representation request.
+A reply barrier observes preceding ownership changes before snapshot/read/
+publication. Queued and running native operations retain their original body
+and purpose even after their async waiter is canceled. PNG publication and
+owned reads share immutable bytes rather than re-encoding or staging them.
+
+Native selection/property limits and deadlines come from the common profile.
+The event loop drains buffered events before polling and sleeps until a real
+native/job event or the nearest active transfer deadline. The new provider
+requires XFixes; the existing legacy observation fallback remains a distinct
+supported path. File reception/source URIs, Wayland providers, manager/GUI
+integration and negotiated native mode remain unfinished and are not advertised
+by this increment.
