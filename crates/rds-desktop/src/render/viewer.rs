@@ -204,6 +204,12 @@ impl Drop for InputSender {
 
 #[derive(Clone, Default, Debug, serde::Serialize)]
 pub struct ViewerReport {
+    pub renderer: Option<super::RendererInfo>,
+    /// Native draw attempt owner; it may precede the current network attempt
+    /// while a driver call from the old attempt is still draining.
+    pub render_session_epoch: Option<u64>,
+    pub retired_draw_completions: u64,
+    pub render_timings: super::RenderTimings,
     pub session_epoch: u64,
     pub frames_received: u64,
     pub frames_submitted: u64,
@@ -274,6 +280,9 @@ pub struct ViewerSnapshot {
     pub status: String,
     pub network_stage: String,
     pub render_stage: String,
+    /// Elapsed time in an in-flight draw phase, including observer overhead.
+    /// None between draws; completed attempts are in report.render_timings.
+    pub render_stage_age_ms: Option<u64>,
     pub ui_event_age_ms: u64,
     pub decoded_frame_age_ms: Option<u64>,
     pub encoded_frame_age_ms: Option<u64>,
@@ -410,7 +419,8 @@ struct State {
     close: bool,
     interrupted: Option<Instant>,
     network_stage: String,
-    render_stage: String,
+    render_stage: &'static str,
+    render_stage_started: Option<Instant>,
     last_ui_ms: u64,
     last_encoded_ms: Option<u64>,
     occluded: bool,
@@ -465,15 +475,18 @@ impl ViewerHandle {
         lock(&self.state).network_stage = stage.into();
     }
     pub fn snapshot(&self) -> ViewerSnapshot {
-        let report = self.report();
         let state = lock(&self.state);
+        let report = self.report_locked(&state);
         let elapsed = self.started.elapsed().as_millis() as u64;
         ViewerSnapshot {
             pid: std::process::id(),
             elapsed_ms: elapsed,
             status: state.status.clone(),
             network_stage: state.network_stage.clone(),
-            render_stage: state.render_stage.clone(),
+            render_stage: state.render_stage.into(),
+            render_stage_age_ms: state
+                .render_stage_started
+                .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
             ui_event_age_ms: elapsed.saturating_sub(state.last_ui_ms),
             decoded_frame_age_ms: report.last_frame_ms.map(|v| elapsed.saturating_sub(v)),
             encoded_frame_age_ms: state.last_encoded_ms.map(|v| elapsed.saturating_sub(v)),
@@ -737,6 +750,9 @@ impl ViewerHandle {
     }
     pub fn report(&self) -> ViewerReport {
         let state = lock(&self.state);
+        self.report_locked(&state)
+    }
+    fn report_locked(&self, state: &State) -> ViewerReport {
         let mut report = state.report.clone();
         (
             report.receive_to_submit_p50_ms,
@@ -943,7 +959,8 @@ impl SessionView {
                 close: false,
                 interrupted: None,
                 network_stage: "starting".into(),
-                render_stage: "starting".into(),
+                render_stage: "starting",
+                render_stage_started: None,
                 last_ui_ms: 0,
                 last_encoded_ms: None,
                 occluded: false,
@@ -1314,18 +1331,24 @@ impl App {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
-        let (pending, restore) = lock(&self.session.handle.state)
-            .frames
-            .take(gpu.has_picture());
-        {
+        let (pending, restore, drawing_epoch) = {
             let mut state = lock(&self.session.handle.state);
+            let (pending, restore) = state.frames.take(gpu.has_picture());
             if pending.is_some() {
                 state
                     .submission_debt
                     .queued(self.session.handle.started.elapsed().as_millis() as u64);
             }
-            state.render_stage = "acquiring surface".into();
-        }
+            if state.report.renderer.as_ref() != Some(gpu.info()) {
+                state.report.renderer = Some(gpu.info().clone());
+            }
+            let epoch = state.report.session_epoch;
+            if state.report.render_session_epoch != Some(epoch) {
+                state.report.render_timings = super::RenderTimings::default();
+            }
+            state.report.render_session_epoch = Some(epoch);
+            (pending, restore, epoch)
+        };
         let ui = self
             .workspace
             .as_mut()
@@ -1338,14 +1361,31 @@ impl App {
                 .map(|frame| frame.raw.as_ref())
                 .or(restore.as_deref()),
             ui,
+            |update| {
+                let mut state = lock(&self.session.handle.state);
+                if state.report.render_session_epoch != Some(drawing_epoch) {
+                    return;
+                }
+                state.render_stage_started = update.current.map(|(_, started)| started);
+                if let Some((phase, _)) = update.current {
+                    state.render_stage = phase.name();
+                }
+                if let Some((phase, micros)) = update.completed {
+                    state.report.render_timings.record(phase, micros);
+                }
+            },
         );
         lock(&self.session.handle.state).report.gpu_uploads += gpu.uploads() - uploads_before;
         match result {
             Err(error) => self.fail(event_loop, error),
             Ok(DrawOutcome::Presented) => {
-                lock(&self.session.handle.state).render_stage = "presented".into();
+                lock(&self.session.handle.state).render_stage = "presented";
                 if let Some(frame) = pending {
                     let mut state = lock(&self.session.handle.state);
+                    if state.report.session_epoch != drawing_epoch {
+                        state.report.retired_draw_completions += 1;
+                        return;
+                    }
                     let next_queued_ms = state.frames.pending.as_ref().map(|next| next.queued_ms);
                     state.submission_debt.presented(next_queued_ms);
                     let parent = state.session_span.clone();
@@ -1360,7 +1400,7 @@ impl App {
                     state.report.frames_submitted += 1;
                     state.report.last_submission_ms =
                         Some(self.session.handle.started.elapsed().as_millis() as u64);
-                    state.render_stage = "presented".into();
+                    state.render_stage = "presented";
                     state
                         .report
                         .first_frame_ms
@@ -1380,7 +1420,7 @@ impl App {
                 {
                     probe.unavailable();
                 }
-                lock(&self.session.handle.state).render_stage = outcome.stage().into();
+                lock(&self.session.handle.state).render_stage = outcome.stage();
                 lock(&self.session.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
                     let mut state = lock(&self.session.handle.state);

@@ -216,6 +216,7 @@ mod tests {
             status: "Connected".into(),
             network_stage: "receiving".into(),
             render_stage: "presented".into(),
+            render_stage_age_ms: None,
             ui_event_age_ms: 0,
             decoded_frame_age_ms: Some(10),
             encoded_frame_age_ms: Some(10),

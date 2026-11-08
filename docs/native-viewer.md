@@ -593,22 +593,35 @@ timestamps from different hosts require clock qualification before subtraction.
 Concurrent desktops must also be distinguished by their owning connection and
 attempt context, rather than joining an input sequence alone.
 
-`nddev-remote` automatically writes private logs under `viewer-logs` beside the
-endpoint configuration (normally `~/.config/remote-device-sync/viewer-logs`).
-Each log part is 8 MiB maximum; ten generated parts are retained. Files are 0600
-in a validated 0700 directory without symlink components. The existing bounded
-telemetry output adapter performs logging away from UI/network threads.
+Current observations and bounded fault history live in memory under the policy
+described above. `rds desktop-status --viewer PID` reads exact window/tab samples
+even while the native UI is blocked; periodic live files require the explicit,
+expiring capture window. Retained incidents use the checked private directory
+and bounded writer. Samples contain no raw image/clipboard body or credentials.
+Stalled input/heartbeat writes and decode waits are bounded separately;
+reconnect causes and panics remain observable. `--report` emits an end-of-run
+receipt. Independent UI probes share the bounded wake flag, so a stalled UI
+cannot create an unbounded event queue.
 
-Every two seconds a small `state-<pid>.json` snapshot is atomically replaced.
-It contains UI dispatch age, encoded/decoded/presented-frame ages, network/render
-stage, occlusion, pending CPU bytes, received/submitted/replaced frames, actual
-GPU upload count, reconnects, watchdog repair requests and stage latency. Snapshots contain no image,
-clipboard, peer or credentials. Stalled input/heartbeat writes and decode waits
-are bounded separately; reconnect causes and panics are recorded. `--report`
-still emits an end-of-run receipt, while the live snapshot survives a hung or
-terminated UI. CLI desktop commands may opt in with `--diagnostics-dir` pointing
-to an existing private directory. Independent UI probes share the bounded wake
-flag; a stalled UI cannot create an unbounded event queue.
+The renderer reports its actual backend, device type, presentation mode, surface
+format and desired frame latency. During a draw, `render_stage` identifies
+preparation/configuration, acquisition, pixel upload, command recording,
+submission, presentation or cleanup. `render_stage_age_ms` is the elapsed time
+in the running phase; it is absent between draws. The callback releases the
+viewer lock before entering the native call, keeping local observation readable.
+
+`report.render_timings` retains constant-sized phase counts and last/maximum/
+total wall microseconds, including returned errors/skips and observer overhead.
+Preparation can require no surface reconfiguration; cleanup can occur twice in
+one draw. These are CPU-side API spans. GPU execution, compositor scanout and
+physical input-to-photon latency need separate measurement. The renderer's
+backend identifies presentation independently of the H.264 codec backend.
+
+`report.render_session_epoch` identifies the draw owner while a preceding
+attempt's native call drains. Timings reset for a newly drawn epoch. A completion
+from a retired epoch increments `retired_draw_completions` and does not supply
+the new attempt's frame/probe timing. Snapshot state and the associated report
+are collected under one owner lock. See [the native attribution observation](reports/native-render-attribution.md).
 
 `control_echo_age_ms` measures time since an actually observed heartbeat echo,
 using the viewer's clock. The last RTT is a historic sample; it does not prove
