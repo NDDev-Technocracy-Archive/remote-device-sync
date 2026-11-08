@@ -1,4 +1,4 @@
-# Noq-proto 1.3 path observation and optional ACK routing
+# Noq-proto 1.4.0 path observation and optional ACK routing
 
 `Connection::established_paths` now exposes a read-only snapshot of path IDs
 whose initial establishment is informed and which have not been abandoned.
@@ -7,9 +7,9 @@ forwards this for Iroh's subscribe-then-snapshot registration; no validation or
 packet scheduling decision changes. A pending/abandoned/high-ID/closed-connection
 regression covers the snapshot boundary.
 
-Exact published crates.io noq-proto1.3.0 source, checksum
-7c1e5b6fe668491eca022f745a0a9402585626c73a7b839b3424ace15d6a9c8f.
-Published upstream revision: c1f411562e6078852749b8bcf1190523096a107f,
+Exact published crates.io noq-proto 1.4.0 source, checksum
+c01a35be3ed37558c8db69554419f24eff8a63599b54f711bbe3863ec727c47d.
+Published upstream revision: 34f75c49f93de5e2ff943483cabc5b6d0c5df918,
 subdirectory noq-proto. Original MIT/Apache-2.0 license files are retained.
 One additive PathStats bool
 reports whether the path packet-number space retains unacknowledged STREAM
@@ -34,6 +34,31 @@ the ACK carrier, probe/STREAM distinction and clearing after ACK. The real
 Iroh fixture restores a retired standby, transfers and drains IP work, then
 recovers existing stream bytes after a later custom-link blackhole.
 Upstream contribution/convergence and installed qualification remain work.
+
+## Bounded compaction of contiguous receive data
+
+The published chunk-count guard can reject a valid contiguous buffered stream:
+ordinary defragmentation retains well-utilized packet allocations, so its chunk
+count is not the number of actual gaps. A deterministic receiver-backpressure
+regression fails on the unchanged published source. The existing 32 MiB frame
+supersession/receipt test also exposed the failure on physical macOS.
+
+After ordinary compaction, an excessive chunk count triggers one pass joining
+contiguous runs before the unchanged rejection bound. Both the chunk cap and
+compaction threshold retain their published values. True excessive gaps are
+still rejected; duplicate and overlapping floods retain their existing checks.
+The additional copy is bounded by admitted receive data and only runs when the
+ordinary compactor cannot meet the existing count limit.
+
+Compaction also distinguishes an ordered consumed prefix from the unordered
+consumed-byte count, preserving unread lower offsets after an unordered read.
+Deterministic ordered/unordered cases verify exact bytes across compaction;
+existing adversarial and random assembler cases remain required.
+
+The related upstream report is
+[Quinn #2955](https://github.com/quinn-rs/quinn/issues/2955). This adaptation uses
+the existing compactor for the bounded fallback; it does not raise limits,
+change the wire, shrink application fixtures or add retries.
 
 The MTU constructor's debug assertion keeps its numeric invariant but uses a
 static message. CodeQL treated the formatted minimum-MTU value as configuration

@@ -1,8 +1,8 @@
-# Noq 1.3.0 established-path snapshot
+# Noq 1.4.0 established-path snapshot
 
-The unmodified crates.io package was imported in commit `80ef738`. Archive
-SHA-256: `b78be567e796cfa74bb9bdc4117790af2d505eb887019cf8803244353eb09d89`.
-Upstream revision: `c1f411562e6078852749b8bcf1190523096a107f`, subdirectory
+The published crates.io package is the baseline. Archive
+SHA-256: `6249a065adc1edbc1704a95436f38dd60476064dbc3b7c47cf279e02d1590eb5`.
+Upstream revision: `34f75c49f93de5e2ff943483cabc5b6d0c5df918`, subdirectory
 `noq`. Original Apache-2.0/MIT licenses, source and package manifest are retained.
 
 The only adapter code addition is `Connection::established_paths`, a read-only

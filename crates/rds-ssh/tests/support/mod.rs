@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use rds_ssh::{Authentication, Config, PrivateKey, PublicKey};
+use rds_ssh::{Authentication, Config, PrivateKey};
 use russh::{Channel, ChannelId, Pty, server};
 use std::{
     sync::{
@@ -56,12 +56,12 @@ impl server::Handler for Handler {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        key: &PublicKey,
+        key: server::VerifiedPublicKey<'_>,
     ) -> Result<server::Auth, Self::Error> {
         self.observed.auth.fetch_add(1, Ordering::SeqCst);
         Ok(
             if user == "fixture"
-                && key.key_data() == self::key(2).public_key().key_data()
+                && key.public_key.key_data() == self::key(2).public_key().key_data()
                 && !matches!(self.case, Case::RejectAuth)
             {
                 server::Auth::Accept
