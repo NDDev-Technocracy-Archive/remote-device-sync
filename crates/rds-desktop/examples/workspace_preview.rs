@@ -230,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             println!("tab={id} probe_transfers={} unexpected_text={}",state.transfers,state.unexpected_text);
                                         }
                                     },
-                                    Some(ViewerInput::Control(_)) => {},
+                                    Some(ViewerInput::Control(_)) | Some(ViewerInput::ResumeVideo) => {},
                                     Some(ViewerInput::Close) | None => break,
                                     Some(ViewerInput::InputStalled) => panic!("synthetic input sink stopped acknowledging"),
                                 }

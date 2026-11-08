@@ -25,6 +25,10 @@ cannot report an invisible interval as submission delay.
 fault repairs. Diagnostic video-loss detection follows `decode_required`:
 hidden windows require encoded progress instead of writing a false decode-stall
 incident to disk. Control and transport faults remain observable while hidden.
+The queued resume has its own local input type, so dispatch cannot count it
+again as a repair. Decode remains suspended until this admission is complete;
+the decoder observes the request and keeps its normal repair interval while
+awaiting the keyframe. Intervening deltas still cannot produce a visible image.
 
 Managed and direct native viewers share this admission/decode path. The direct
 viewer consumes the existing encoded tap and uses the same independently

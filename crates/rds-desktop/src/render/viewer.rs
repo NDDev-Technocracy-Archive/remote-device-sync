@@ -34,6 +34,8 @@ pub use workspace::{WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
 #[derive(Debug)]
 pub enum ViewerInput {
     Control(DesktopControl),
+    /// Normal visibility recovery, separately observable from fault repair.
+    ResumeVideo,
     Close,
     InputStalled,
 }
@@ -214,6 +216,8 @@ pub struct ViewerReport {
     pub frames_received: u64,
     pub encoded_frames_discarded: u64,
     pub hidden_draws_skipped: u64,
+    pub surface_waits: u64,
+    pub retired_surface_acquisitions: u64,
     pub frames_submitted: u64,
     pub gpu_uploads: u64,
     pub last_submission_ms: Option<u64>,
@@ -410,6 +414,7 @@ struct State {
     wake_pending: bool,
     presenting: bool,
     decode_suspended: bool,
+    resume_requested: Option<Instant>,
     remote_cursor_embedded: bool,
     status: String,
     // A problem beside the connection, such as the clipboard; never a connection state.
@@ -447,8 +452,11 @@ impl State {
                     || !window.occlusion_visible
             })
     }
-    fn decode_needed(&self) -> bool {
+    fn window_can_decode(&self) -> bool {
         self.presenting && !self.close && !self.window_hidden()
+    }
+    fn decode_needed(&self) -> bool {
+        self.window_can_decode() && !self.decode_suspended
     }
 }
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
@@ -488,9 +496,14 @@ impl ViewerHandle {
     pub fn decode_needed(&self) -> bool {
         lock(&self.state).decode_needed()
     }
+    /// The sole decode consumer observes an explicitly queued resume request.
+    pub fn take_video_resume(&self) -> Option<Instant> {
+        lock(&self.state).resume_requested.take()
+    }
     pub fn decode_discarded(&self) {
         let mut state = lock(&self.state);
         state.decode_suspended = true;
+        state.resume_requested = None;
         state.frames.pending = None;
         state.submission_debt.hidden();
         if let Some(probe) = &mut state.visual_probe {
@@ -529,7 +542,7 @@ impl ViewerHandle {
             ui_event_age_ms: elapsed.saturating_sub(state.last_ui_ms),
             decoded_frame_age_ms: report.last_frame_ms.map(|v| elapsed.saturating_sub(v)),
             encoded_frame_age_ms: state.last_encoded_ms.map(|v| elapsed.saturating_sub(v)),
-            decode_required: state.decode_needed(),
+            decode_required: state.window_can_decode(),
             control_echo_age_ms: report
                 .last_control_echo_ms
                 .map(|v| elapsed.saturating_sub(v)),
@@ -660,6 +673,7 @@ impl ViewerHandle {
         let mut state = lock(&self.state);
         state.clipboard.reset();
         state.decode_suspended = false;
+        state.resume_requested = None;
         state.frames = FrameMailbox::default();
         state.submission_debt.hidden();
         state.session_span = span;
@@ -987,6 +1001,7 @@ impl SessionView {
                 wake_pending: false,
                 presenting: true,
                 decode_suspended: false,
+                resume_requested: None,
                 remote_cursor_embedded: false,
                 status: "Connecting".into(),
                 notice: None,
@@ -1213,21 +1228,21 @@ impl App {
         }
         let resume = {
             let mut state = lock(&self.session.handle.state);
-            if state.decode_suspended && state.decode_needed() {
-                state.decode_suspended = false;
-                state.report.video_resume_requests += 1;
-                true
+            if state.decode_suspended && state.window_can_decode() {
+                // Queue and mark the request before allowing decode again.
+                // The input consumer releases its queue lock before callbacks.
+                let result = self.session.input.send(ViewerInput::ResumeVideo);
+                if result.is_ok() {
+                    state.decode_suspended = false;
+                    state.resume_requested = Some(Instant::now());
+                    state.report.video_resume_requests += 1;
+                }
+                result
             } else {
-                false
+                Ok(())
             }
         };
-        if resume
-            && self
-                .session
-                .input
-                .send(ViewerInput::Control(DesktopControl::RequestIdr))
-                .is_err()
-        {
+        if resume.is_err() {
             self.fail_input(
                 event_loop,
                 DesktopError::Input("video recovery queue unavailable".into()),
@@ -1401,6 +1416,27 @@ impl App {
         self.workspace_actions(event_loop);
         self.sync_native_input(self.workspace.is_some());
         self.update_window_title();
+        if hidden && let Some(gpu) = &mut self.gpu {
+            let epoch = lock(&self.session.handle.state).report.session_epoch;
+            let result = gpu.suspend(epoch, |phase, micros| {
+                let mut state = lock(&self.session.handle.state);
+                if state.report.session_epoch == epoch {
+                    state.report.render_timings.record(phase, micros);
+                }
+            });
+            match result {
+                Ok(true) => {
+                    lock(&self.session.handle.state)
+                        .report
+                        .retired_surface_acquisitions += 1
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            }
+        }
         {
             let mut state = lock(&self.session.handle.state);
             state.report.redraws += 1;
@@ -1444,6 +1480,7 @@ impl App {
             .map(|chrome| &mut chrome.frame);
         let uploads_before = gpu.uploads();
         let result = gpu.draw(
+            drawing_epoch,
             pending
                 .as_ref()
                 .map(|frame| frame.raw.as_ref())
@@ -1500,6 +1537,25 @@ impl App {
                 }
             }
             Ok(outcome) => {
+                if matches!(
+                    outcome,
+                    DrawOutcome::Acquiring | DrawOutcome::RetiredAcquisition
+                ) {
+                    let mut state = lock(&self.session.handle.state);
+                    state.render_stage = outcome.stage();
+                    state.render_stage_started = gpu.acquisition_started();
+                    if matches!(outcome, DrawOutcome::Acquiring) {
+                        state.report.surface_waits += 1;
+                    } else {
+                        state.report.retired_surface_acquisitions += 1;
+                    }
+                    if let Some(frame) = pending
+                        && state.frames.pending.is_none()
+                    {
+                        state.frames.pending = Some(frame);
+                    }
+                    return;
+                }
                 if matches!(outcome, DrawOutcome::Occluded) {
                     lock(&self.session.handle.state).submission_debt.hidden();
                 }
@@ -1564,7 +1620,12 @@ impl ApplicationHandler<()> for App {
             })
             .and_then(|window| {
                 let window = Arc::new(window);
-                Gpu::new(window.clone(), event_loop.owned_display_handle()).map(|gpu| (window, gpu))
+                Gpu::new(
+                    window.clone(),
+                    event_loop.owned_display_handle(),
+                    self.session.handle.proxy.clone(),
+                )
+                .map(|gpu| (window, gpu))
             });
         match result {
             Ok((window, gpu)) => {

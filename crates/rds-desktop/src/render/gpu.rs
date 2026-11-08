@@ -4,6 +4,7 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{DesktopError, RawFrame};
 
+use super::acquisition::{Acquisition, Completed};
 use super::input::Viewport;
 use super::observation::{DrawObservation, DrawUpdate, Phase, RendererInfo};
 use super::workspace::chrome::UiFrame;
@@ -35,6 +36,8 @@ pub(super) enum DrawOutcome {
     Occluded,
     TimedOut,
     Reconfigured,
+    Acquiring,
+    RetiredAcquisition,
 }
 impl DrawOutcome {
     pub(super) fn stage(self) -> &'static str {
@@ -44,6 +47,8 @@ impl DrawOutcome {
             Self::Occluded => "surface occluded",
             Self::TimedOut => "surface timeout",
             Self::Reconfigured => "surface reconfigured",
+            Self::Acquiring => "waiting for surface",
+            Self::RetiredAcquisition => "retired surface acquisition",
         }
     }
 }
@@ -52,7 +57,7 @@ pub(super) struct Gpu {
     info: RendererInfo,
     instance: wgpu::Instance,
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    surface: Arc<wgpu::Surface<'static>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -62,12 +67,16 @@ pub(super) struct Gpu {
     uploads: u64,
     chrome: Option<egui_wgpu::Renderer>,
     reconfigure: bool,
+    resized: Option<PhysicalSize<u32>>,
+    acquisition: Option<Acquisition>,
+    proxy: winit::event_loop::EventLoopProxy<()>,
 }
 
 impl Gpu {
     pub(super) fn new(
         window: Arc<Window>,
         display: winit::event_loop::OwnedDisplayHandle,
+        proxy: winit::event_loop::EventLoopProxy<()>,
     ) -> Result<Self, DesktopError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
             Box::new(display),
@@ -101,7 +110,6 @@ impl Gpu {
         {
             config.format = format;
         }
-        surface.configure(&device, &config);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("RDS BGRA presentation"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -150,7 +158,7 @@ impl Gpu {
             info,
             instance,
             window,
-            surface,
+            surface: Arc::new(surface),
             device,
             queue,
             config,
@@ -159,7 +167,10 @@ impl Gpu {
             picture: None,
             uploads: 0,
             chrome: None,
-            reconfigure: false,
+            reconfigure: true,
+            resized: None,
+            acquisition: None,
+            proxy,
         })
     }
 
@@ -167,10 +178,64 @@ impl Gpu {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
+        self.resized =
+            (self.config.width != size.width || self.config.height != size.height).then_some(size);
+    }
+
+    pub(super) fn acquisition_ready(&self) -> bool {
+        self.acquisition.as_ref().is_some_and(Acquisition::ready)
+    }
+    pub(super) fn acquisition_started(&self) -> Option<std::time::Instant> {
+        self.acquisition.as_ref().map(|work| work.queued)
+    }
+    pub(super) fn suspend(
+        &mut self,
+        epoch: u64,
+        mut observe: impl FnMut(Phase, u64),
+    ) -> Result<bool, DesktopError> {
+        let Some(work) = &mut self.acquisition else {
+            return Ok(false);
+        };
+        work.retired = true;
+        let current = work.epoch == epoch;
+        let Some(completed) = work.take()? else {
+            return Ok(false);
+        };
+        self.acquisition = None;
+        if current {
+            if let Some(micros) = completed.configuration_us {
+                observe(Phase::Configuration, micros);
+            }
+            observe(Phase::Acquisition, completed.acquisition_us);
+        }
+        // No new acquisition is admitted while hidden. Release this returned
+        // native image rather than keeping a drawable for the whole pause.
+        drop(completed);
+        Ok(true)
+    }
+    fn begin_acquisition(&mut self, epoch: u64) -> Result<(), DesktopError> {
+        if let Some(size) = self.resized.take() {
+            self.config.width = size.width;
+            self.config.height = size.height;
+            self.reconfigure = true;
+        }
+        let configuration = self.reconfigure.then(|| self.config.clone());
+        self.acquisition = Some(Acquisition::start(
+            self.surface.clone(),
+            self.device.clone(),
+            configuration,
+            epoch,
+            self.proxy.clone(),
+        )?);
         self.reconfigure = false;
+        Ok(())
+    }
+
+    fn record_acquisition(completed: &Completed, observation: &mut DrawObservation<'_>) {
+        if let Some(micros) = completed.configuration_us {
+            observation.returned(Phase::Configuration, micros);
+        }
+        observation.returned(Phase::Acquisition, completed.acquisition_us);
     }
 
     fn upload(&mut self, frame: &RawFrame) -> Result<(), DesktopError> {
@@ -269,19 +334,35 @@ impl Gpu {
 
     pub(super) fn draw(
         &mut self,
+        epoch: u64,
         frame: Option<&RawFrame>,
         mut ui: Option<&mut UiFrame>,
         mut observe: impl FnMut(DrawUpdate),
     ) -> Result<DrawOutcome, DesktopError> {
         let mut observation = DrawObservation::new(&mut observe);
-        observation.enter(Phase::Configuration);
-        // A suboptimal surface remains usable for this frame, but its backing
-        // must be refreshed before acquiring another image (e.g. a DPI move).
-        if self.reconfigure {
-            self.resize(self.window.inner_size());
+        let Some(work) = &mut self.acquisition else {
+            self.begin_acquisition(epoch)?;
+            return Ok(DrawOutcome::Acquiring);
+        };
+        let Some(completed) = work.take()? else {
+            return Ok(DrawOutcome::Acquiring);
+        };
+        let retired = work.retired || work.epoch != epoch;
+        self.acquisition = None;
+        if retired {
+            drop(completed);
+            self.window.request_redraw();
+            return Ok(DrawOutcome::RetiredAcquisition);
         }
-        observation.enter(Phase::Acquisition);
-        let surface = match self.surface.get_current_texture() {
+        Self::record_acquisition(&completed, &mut observation);
+        if self.resized.is_some() {
+            // Drop an old-size image before starting configuration. A live
+            // acquired image must never overlap Surface::configure.
+            drop(completed);
+            self.begin_acquisition(epoch)?;
+            return Ok(DrawOutcome::Acquiring);
+        }
+        let surface = match completed.texture {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 self.reconfigure = true;
@@ -289,17 +370,18 @@ impl Gpu {
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 observation.enter(Phase::Configuration);
-                self.surface = self
-                    .instance
-                    .create_surface(self.window.clone())
-                    .map_err(error)?;
-                self.surface.configure(&self.device, &self.config);
+                self.surface = Arc::new(
+                    self.instance
+                        .create_surface(self.window.clone())
+                        .map_err(error)?,
+                );
+                self.reconfigure = true;
                 self.window.request_redraw();
                 return Ok(DrawOutcome::Reconfigured);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 observation.enter(Phase::Configuration);
-                self.surface.configure(&self.device, &self.config);
+                self.reconfigure = true;
                 self.window.request_redraw();
                 return Ok(DrawOutcome::Reconfigured);
             }

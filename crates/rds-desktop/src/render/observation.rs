@@ -118,6 +118,12 @@ impl<'a> DrawObservation<'a> {
         self.phase = Some(phase);
         self.started = now;
     }
+    pub(super) fn returned(&mut self, phase: Phase, micros: u64) {
+        (self.sink)(DrawUpdate {
+            current: self.phase.map(|phase| (phase, self.started)),
+            completed: Some((phase, micros)),
+        });
+    }
 }
 impl Drop for DrawObservation<'_> {
     fn drop(&mut self) {

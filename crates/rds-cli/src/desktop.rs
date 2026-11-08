@@ -681,6 +681,9 @@ mod native {
             view.decode_discarded();
             return Ok((decoder, outcome));
         }
+        if let Some(requested) = view.take_video_resume() {
+            decoder.keyframe_requested(requested);
+        }
         Ok(tokio::time::timeout(
             Duration::from_secs(5),
             decoder.push_bounded(frame.header, frame.payload),
@@ -750,6 +753,7 @@ mod native {
                                 view.frame_with_seq(raw, received, frame_seq);
                             }
                             RelayOutcome::NeedIdr => {
+                                view.video_repair_requested();
                                 tokio::time::timeout(Duration::from_secs(2), control.request_idr())
                                     .await
                                     .map_err(|_| {
@@ -878,6 +882,7 @@ mod native {
                         progress.send_replace(tokio::time::Instant::now());
                     }
                     RelayOutcome::NeedIdr => {
+                        view.video_repair_requested();
                         tokio::time::timeout(
                             Duration::from_secs(2),
                             ctrl.send(rds_core::DesktopControl::RequestIdr),

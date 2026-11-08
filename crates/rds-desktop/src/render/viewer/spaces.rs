@@ -383,7 +383,10 @@ impl ApplicationHandler<()> for Screens {
         for app in self.panes.values_mut() {
             let work = {
                 let state = lock(&app.session.handle.state);
-                state.wake_pending || state.close || state.clipboard.needs_work()
+                state.wake_pending
+                    || state.close
+                    || state.clipboard.needs_work()
+                    || app.gpu.as_ref().is_some_and(Gpu::acquisition_ready)
             };
             if work {
                 app.user_event(event_loop, ());

@@ -156,6 +156,12 @@ async fn pump_inner(
             },
             message = input.recv() => match message {
                 Some(ViewerInput::Control(message)) => message,
+                Some(ViewerInput::ResumeVideo) => {
+                    // It uses the same bounded write and ordering, but is an
+                    // intentional restart rather than a fault-repair signal.
+                    send_control(sender, DesktopControl::RequestIdr, &|_| {}).await?;
+                    continue;
+                },
                 Some(ViewerInput::Close) | None => return Ok(true),
                 Some(ViewerInput::InputStalled) => anyhow::bail!("pointer input acknowledgement stalled"),
             },
@@ -185,7 +191,7 @@ mod tests {
     use rds_core::{InputEvent, InputKind, local::DesktopUp};
     use std::sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use tokio::{
         io::DuplexStream,
@@ -211,6 +217,57 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn visibility_resume_keeps_wire_order_without_becoming_a_fault_repair() {
+        let (wire, mut remote) = tokio::io::duplex(256);
+        let (tx, mut input) = mpsc::channel(8);
+        let (_progress, last_frame) = watch::channel(tokio::time::Instant::now());
+        let repairs = Arc::new(AtomicUsize::new(0));
+        let observed = repairs.clone();
+        let task = tokio::spawn(async move {
+            pump(
+                &mut input,
+                &Wire(Mutex::new(wire)),
+                &last_frame,
+                Instant::now(),
+                |message| {
+                    if matches!(message, DesktopControl::RequestIdr) {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+            )
+            .await
+        });
+        tx.send(ViewerInput::ResumeVideo).await.unwrap();
+        tx.send(ViewerInput::Control(DesktopControl::RequestIdr))
+            .await
+            .unwrap();
+        tx.send(ViewerInput::Control(DesktopControl::Input(InputEvent {
+            seq: 91,
+            event_ts_ms: 0,
+            display_id: 0,
+            kind: InputKind::KeyDown { code: 30 },
+        })))
+        .await
+        .unwrap();
+        let mut requests = 0;
+        loop {
+            match rds_net::read_frame(&mut remote).await.unwrap() {
+                DesktopUp::Control(DesktopControl::RequestIdr) => requests += 1,
+                DesktopUp::Control(DesktopControl::Input(event)) => {
+                    assert_eq!(event.seq, 91);
+                    break;
+                }
+                DesktopUp::Control(DesktopControl::Heartbeat { .. }) => {}
+                _ => panic!("unexpected control"),
+            }
+        }
+        assert_eq!(requests, 2);
+        assert_eq!(repairs.load(Ordering::Relaxed), 1);
+        tx.send(ViewerInput::Close).await.unwrap();
+        assert!(task.await.unwrap().unwrap());
     }
 
     #[tokio::test(start_paused = true)]

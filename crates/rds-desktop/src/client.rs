@@ -771,6 +771,13 @@ impl RelayDecoder {
         }
     }
 
+    /// An external control owner already queued an IDR. Preserve the ordinary
+    /// bounded repair interval while awaiting it; this never repairs a decoder
+    /// reference or permits a delta to be presented as a fresh keyframe.
+    pub fn keyframe_requested(&mut self, requested: std::time::Instant) {
+        self.last_idr_report = Some(requested);
+    }
+
     /// Feed one relayed encoded frame. Input must already have passed the
     /// relay's sequence checks — this owns only decode-chain state.
     pub fn push(&mut self, header: &FrameHeader, payload: impl Into<bytes::Bytes>) -> RelayOutcome {
@@ -1329,6 +1336,14 @@ mod tests {
         assert!(matches!(
             decoder.push(&header, delta.data),
             RelayOutcome::NeedIdr
+        ));
+        decoder.keyframe_requested(std::time::Instant::now());
+        let still_delta = encoder.encode(&raw).unwrap();
+        assert!(!still_delta.keyframe);
+        header.seq += 1;
+        assert!(matches!(
+            decoder.push(&header, still_delta.data),
+            RelayOutcome::Pending
         ));
         raw.data = bytes::Bytes::from(vec![200; raw.data.len()]);
         encoder.request_idr();
