@@ -97,13 +97,17 @@ impl Worker {
                     ),
                     rustix::event::PollFd::new(&wake, rustix::event::PollFlags::IN),
                 ];
-                // XFixes and jobs wake us immediately. The timer only expires
-                // INCR state and supports the 4 Hz legacy owner fallback.
-                let timeout = rustix::event::Timespec {
+                // Native events and jobs wake us immediately. With XFixes and
+                // no active transfer there is no deadline to service: sleep
+                // until a real event or close rather than waking at 4 Hz.
+                let timed = clipboard.incoming.is_some()
+                    || !clipboard.transfers.is_empty()
+                    || (clipboard.watching && !clipboard.xfixes);
+                let timeout = timed.then_some(rustix::event::Timespec {
                     tv_sec: 0,
                     tv_nsec: 250_000_000,
-                };
-                if rustix::event::poll(&mut fds, Some(&timeout)).is_err() {
+                });
+                if rustix::event::poll(&mut fds, timeout.as_ref()).is_err() {
                     break;
                 }
                 if fds.iter().any(|fd| {
@@ -513,6 +517,7 @@ impl Clipboard {
         }
         incoming.bytes.extend_from_slice(&part.value);
         if !increment && let Some(done) = self.incoming.take() {
+            let _ = self.conn.destroy_window(done.window);
             self.external = String::from_utf8(done.bytes).ok();
         }
         self.conn.flush().map_err(error)
@@ -1043,9 +1048,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires a dedicated Xvfb server; reads an external selection owner"]
     async fn native_clipboard_watcher_reads_external_owner_without_echoing_own_publish() {
+        let (observer, screen) = RustConnection::connect(None).unwrap();
+        let root = observer.setup().roots[screen].root;
         let mut external = Worker::new(0);
         let mut watcher = Worker::watch(0);
+        external.ready().await.unwrap();
         watcher.ready().await.unwrap();
+        let windows = || {
+            observer
+                .query_tree(root)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .children
+                .len()
+        };
+        let retained = windows();
         for text in [
             "copied on the remote desktop".to_owned(),
             "repeat from the same owner".to_owned(),
@@ -1059,6 +1077,14 @@ mod tests {
                 .expect("clipboard worker ended")
                 .text;
             assert_eq!(change, text);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while windows() != retained {
+                assert!(
+                    Instant::now() < deadline,
+                    "completed read leaked an X11 requestor window"
+                );
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
         }
         watcher
             .publish("published by this session".into())
@@ -1071,5 +1097,56 @@ mod tests {
         );
         drop(watcher);
         drop(external);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires dedicated Xvfb; measures 20s native idle and verifies wake/drain"]
+    async fn native_clipboard_idle_owner_wakes_for_publication_and_close() {
+        fn switches() -> u64 {
+            std::fs::read_dir("/proc/self/task")
+                .unwrap()
+                .map(|entry| {
+                    std::fs::read_to_string(entry.unwrap().path().join("status"))
+                        .unwrap()
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+                        .map(|value| value.trim().parse::<u64>().unwrap())
+                        .sum::<u64>()
+                })
+                .sum()
+        }
+        let mut external = Worker::new(0);
+        let mut watcher = Worker::watch(0);
+        watcher.ready().await.unwrap();
+        external.publish("before idle".into()).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(3), watcher.next_change())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.text, "before idle");
+        let before = switches();
+        let start = Instant::now();
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let elapsed = start.elapsed();
+        let after = switches();
+        println!(
+            "native X11 clipboard idle: seconds={:.3} voluntary_switches={}",
+            elapsed.as_secs_f64(),
+            after - before
+        );
+        external.publish("after idle".into()).await.unwrap();
+        let changed = tokio::time::timeout(Duration::from_secs(3), watcher.next_change())
+            .await
+            .expect("native events must wake an idle clipboard owner")
+            .unwrap();
+        assert_eq!(changed.text, "after idle");
+        // Both workers are idle after that handoff. Closing must wake their
+        // poll and join the actual native work.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            watcher.close().await;
+            external.close().await;
+        })
+        .await
+        .expect("idle native close must drain without a clipboard event");
     }
 }
