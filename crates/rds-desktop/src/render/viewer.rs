@@ -267,6 +267,8 @@ pub struct ViewerReport {
     pub clipboard_transfers_canceled: u64,
     pub reconnects: u64,
     pub video_repair_requests: u64,
+    /// Intentional decoder restarts after an OS-hidden interval.
+    pub video_resume_requests: u64,
     pub last_recovery_ms: Option<u64>,
     pub last_frame_ms: Option<u64>,
     pub video_width: u32,
@@ -288,6 +290,7 @@ pub struct ViewerSnapshot {
     pub ui_event_age_ms: u64,
     pub decoded_frame_age_ms: Option<u64>,
     pub encoded_frame_age_ms: Option<u64>,
+    pub decode_required: bool,
     pub control_echo_age_ms: Option<u64>,
     pub submission_age_ms: Option<u64>,
     /// Time with a decoded image awaiting submission, preserved across replacement.
@@ -526,6 +529,7 @@ impl ViewerHandle {
             ui_event_age_ms: elapsed.saturating_sub(state.last_ui_ms),
             decoded_frame_age_ms: report.last_frame_ms.map(|v| elapsed.saturating_sub(v)),
             encoded_frame_age_ms: state.last_encoded_ms.map(|v| elapsed.saturating_sub(v)),
+            decode_required: state.decode_needed(),
             control_echo_age_ms: report
                 .last_control_echo_ms
                 .map(|v| elapsed.saturating_sub(v)),
@@ -1211,12 +1215,17 @@ impl App {
             let mut state = lock(&self.session.handle.state);
             if state.decode_suspended && state.decode_needed() {
                 state.decode_suspended = false;
-                state.report.video_repair_requests += 1;
+                state.report.video_resume_requests += 1;
                 true
             } else {
                 false
             }
         };
+        if resume && let Some(gpu) = &mut self.gpu {
+            // A restored native window can retain a presentation queue from
+            // before minimization. Rebind its surface before the fresh IDR.
+            gpu.invalidate_surface();
+        }
         if resume
             && self
                 .session

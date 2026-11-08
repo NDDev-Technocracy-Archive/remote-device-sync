@@ -173,6 +173,10 @@ impl Gpu {
         self.reconfigure = false;
     }
 
+    pub(super) fn invalidate_surface(&mut self) {
+        self.reconfigure = true;
+    }
+
     fn upload(&mut self, frame: &RawFrame) -> Result<(), DesktopError> {
         let row = frame
             .width

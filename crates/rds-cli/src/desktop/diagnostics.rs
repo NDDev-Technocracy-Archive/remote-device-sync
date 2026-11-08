@@ -122,8 +122,11 @@ impl Recorder {
         {
             reasons.push("clipboard_ready_pending");
         }
-        if snapshot.decoded_frame_age_ms.is_some_and(|ms| ms >= 3000) {
+        if snapshot.decode_required && snapshot.decoded_frame_age_ms.is_some_and(|ms| ms >= 3000) {
             reasons.push("decoded_video_stalled");
+        }
+        if !snapshot.decode_required && snapshot.encoded_frame_age_ms.is_some_and(|ms| ms >= 3000) {
+            reasons.push("encoded_video_stalled");
         }
         if snapshot.status == "Connected"
             && snapshot.control_echo_age_ms.is_some_and(|ms| ms >= 3000)
@@ -220,6 +223,7 @@ mod tests {
             ui_event_age_ms: 0,
             decoded_frame_age_ms: Some(10),
             encoded_frame_age_ms: Some(10),
+            decode_required: true,
             control_echo_age_ms: Some(10),
             submission_age_ms: Some(10),
             unpresented_frame_age_ms: None,
@@ -264,6 +268,9 @@ mod tests {
         let mut recorder = Recorder::default();
         let mut hidden = snapshot(0);
         hidden.occluded = true;
+        hidden.decode_required = false;
+        hidden.decoded_frame_age_ms = Some(90_000);
+        hidden.report.video_resume_requests = 1;
         hidden.unpresented_frame_age_ms = Some(90_000);
         hidden.submission_age_ms = Some(90_000);
         recorder.observe(&hidden);
@@ -275,13 +282,14 @@ mod tests {
         hidden.occluded = true;
         hidden.elapsed_ms = 2000;
         hidden.decoded_frame_age_ms = Some(4000);
+        hidden.encoded_frame_age_ms = Some(4000);
         hidden.report.reconnects = 1;
         recorder.observe(&hidden);
         let data: serde_json::Value =
             serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
         assert_eq!(
             data["reasons"],
-            serde_json::json!(["decoded_video_stalled", "desktop_reconnected"])
+            serde_json::json!(["encoded_video_stalled", "desktop_reconnected"])
         );
     }
     #[test]

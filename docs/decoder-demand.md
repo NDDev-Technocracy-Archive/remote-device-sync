@@ -21,6 +21,12 @@ requests. The next visible image requires a fresh keyframe. Reappearance queues
 one ordinary IDR request through the owning session's bounded control path;
 reconnect clears the suspended epoch. Pending frame timing and visual probes
 cannot report an invisible interval as submission delay.
+The surface is reconfigured before presenting the new reference chain, so a
+restored window does not inherit its pre-minimization presentation queue.
+`video_resume_requests` records these intentional restarts separately from
+fault repairs. Diagnostic video-loss detection follows `decode_required`:
+hidden windows require encoded progress instead of writing a false decode-stall
+incident to disk. Control and transport faults remain observable while hidden.
 
 Managed and direct native viewers share this admission/decode path. The direct
 viewer consumes the existing encoded tap and uses the same independently
