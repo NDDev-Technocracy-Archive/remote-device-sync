@@ -42,3 +42,7 @@ safe Rust types; the product adds no platform FFI or driver setting.
 Native visible/hidden recovery, idle/multi-window resource use, input responsiveness,
 resize/closure and actual source-bound Linux/macOS presentation remain acceptance
 requirements. This implementation alone is no FPS or latency improvement claim.
+
+The [physical visibility comparison](reports/native-visibility-recovery.md)
+records Linux X11 and packaged M1/M2 hidden-load and recovery results, their exact
+builds and the independent failed/unqualified cohorts which remain open.
