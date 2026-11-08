@@ -32,6 +32,9 @@ struct Args {
     /// Explicit short private fixture root; must not already exist.
     #[arg(long)]
     control_directory: Option<PathBuf>,
+    /// Serve synthetic peers for independently launched native viewers; no GUI.
+    #[arg(long)]
+    serve_only: bool,
     #[arg(long)]
     noq: bool,
 }
@@ -390,14 +393,27 @@ async fn main() -> anyhow::Result<()> {
         diagnostic_started: None,
         live_diagnostics: None,
     };
-    let result = rds_cli::desktop::workspace::run(
-        client.clone(),
-        config,
-        root.join("workspace.json"),
-        options,
-        false,
-    )
-    .await;
+    let result = if args.serve_only {
+        for device in &config.devices {
+            client
+                .request(rds_core::local::Command::Connect {
+                    target: device.target.clone(),
+                    grant: None,
+                })
+                .await?;
+        }
+        tokio::time::sleep(Duration::from_secs(args.duration)).await;
+        Ok(())
+    } else {
+        rds_cli::desktop::workspace::run(
+            client.clone(),
+            config,
+            root.join("workspace.json"),
+            options,
+            false,
+        )
+        .await
+    };
     let identity_retained = client.snapshot().await?.endpoint == local.id().to_string();
     manager.close().await?;
     local.close().await;
@@ -406,7 +422,7 @@ async fn main() -> anyhow::Result<()> {
     for task in tasks {
         tokio::time::timeout(Duration::from_secs(3), task).await??;
     }
-    let report = serde_json::json!({"backend":format!("{backend:?}"),"identity_retained":identity_retained,
+    let report = serde_json::json!({"backend":format!("{backend:?}"),"serve_only":args.serve_only,"identity_retained":identity_retained,
         "result":result.as_ref().err().map(ToString::to_string),"displays":&*stats.lock().unwrap()});
     let file = std::fs::OpenOptions::new()
         .create_new(true)
@@ -419,12 +435,26 @@ async fn main() -> anyhow::Result<()> {
         identity_retained,
         "workspace replaced the local endpoint identity"
     );
-    anyhow::ensure!(
-        stats.lock().unwrap().iter().all(|s| s.opened > 0
-            && s.frames > 0
-            && s.opened == s.closed
-            && s.held_keys.is_empty()),
-        "not every synthetic display opened, produced and closed cleanly"
-    );
+    let stats = stats.lock().unwrap();
+    if args.serve_only {
+        anyhow::ensure!(
+            stats.iter().any(|s| s.opened > 0),
+            "no external viewer opened a synthetic display"
+        );
+        anyhow::ensure!(
+            stats.iter().all(|s| s.opened == s.closed
+                && (s.opened == 0 || s.frames > 0)
+                && s.held_keys.is_empty()),
+            "external viewer left a synthetic display open or input held"
+        );
+    } else {
+        anyhow::ensure!(
+            stats.iter().all(|s| s.opened > 0
+                && s.frames > 0
+                && s.opened == s.closed
+                && s.held_keys.is_empty()),
+            "not every synthetic display opened, produced and closed cleanly"
+        );
+    }
     Ok(())
 }
