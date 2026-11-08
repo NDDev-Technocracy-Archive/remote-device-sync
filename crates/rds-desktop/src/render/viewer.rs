@@ -212,6 +212,7 @@ pub struct ViewerReport {
     pub render_timings: super::RenderTimings,
     pub session_epoch: u64,
     pub frames_received: u64,
+    pub encoded_frames_discarded: u64,
     pub frames_submitted: u64,
     pub gpu_uploads: u64,
     pub last_submission_ms: Option<u64>,
@@ -403,6 +404,7 @@ struct State {
     submission_debt: SubmissionDebt,
     wake_pending: bool,
     presenting: bool,
+    decode_suspended: bool,
     remote_cursor_embedded: bool,
     status: String,
     // A problem beside the connection, such as the clipboard; never a connection state.
@@ -427,6 +429,19 @@ struct State {
     native_window: Option<super::NativeWindowState>,
     visual_probe: Option<super::visual_probe::VisualProbe>,
     session_span: tracing::Span,
+}
+impl State {
+    fn decode_needed(&self) -> bool {
+        self.presenting
+            && !self.close
+            && !self.occluded
+            && self.native_window.is_none_or(|window| {
+                window.visible
+                    && !window.miniaturized
+                    && window.on_active_space
+                    && window.occlusion_visible
+            })
+    }
 }
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state
@@ -460,6 +475,22 @@ pub struct ViewerHandle {
     started: Instant,
 }
 impl ViewerHandle {
+    /// Unknown initial native visibility permits the first frame. Focus alone
+    /// never suppresses a visible window; only actual hiding/occlusion does.
+    pub fn decode_needed(&self) -> bool {
+        lock(&self.state).decode_needed()
+    }
+    pub fn decode_discarded(&self) {
+        let mut state = lock(&self.state);
+        state.decode_suspended = true;
+        state.frames.pending = None;
+        state.submission_debt.hidden();
+        if let Some(probe) = &mut state.visual_probe {
+            probe.unavailable();
+        }
+        state.report.encoded_frames_discarded =
+            state.report.encoded_frames_discarded.saturating_add(1);
+    }
     /// An independent diagnostic tick probes UI dispatch even when no media
     /// arrives. The existing coalescing flag keeps a stalled loop bounded.
     pub fn heartbeat_ui(&self) {
@@ -618,6 +649,7 @@ impl ViewerHandle {
         self.input_state.cancel_pointers();
         let mut state = lock(&self.state);
         state.clipboard.reset();
+        state.decode_suspended = false;
         state.frames = FrameMailbox::default();
         state.submission_debt.hidden();
         state.session_span = span;
@@ -944,6 +976,7 @@ impl SessionView {
                 submission_debt: SubmissionDebt::default(),
                 wake_pending: false,
                 presenting: true,
+                decode_suspended: false,
                 remote_cursor_embedded: false,
                 status: "Connecting".into(),
                 notice: None,
@@ -1155,11 +1188,33 @@ impl App {
         }
         true
     }
-    fn sample_window(&self) {
+    fn sample_window(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(window) = &self.window {
             let elapsed = self.session.handle.started.elapsed().as_millis() as u64;
             let sample = super::platform::window_state(window, elapsed);
             lock(&self.session.handle.state).native_window = sample;
+        }
+        let resume = {
+            let mut state = lock(&self.session.handle.state);
+            if state.decode_suspended && state.decode_needed() {
+                state.decode_suspended = false;
+                state.report.video_repair_requests += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if resume
+            && self
+                .session
+                .input
+                .send(ViewerInput::Control(DesktopControl::RequestIdr))
+                .is_err()
+        {
+            self.fail_input(
+                event_loop,
+                DesktopError::Input("video recovery queue unavailable".into()),
+            );
         }
     }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: DesktopError) {
@@ -1512,7 +1567,10 @@ impl ApplicationHandler<()> for App {
         if event_loop.exiting() {
             return;
         }
-        self.sample_window();
+        self.sample_window(event_loop);
+        if event_loop.exiting() || self.window_closed {
+            return;
+        }
         let mut state = lock(&self.session.handle.state);
         state.wake_pending = false;
         let close = state.close;
@@ -1553,7 +1611,10 @@ impl ApplicationHandler<()> for App {
         ) {
             return;
         }
-        self.sample_window();
+        self.sample_window(event_loop);
+        if event_loop.exiting() || self.window_closed {
+            return;
+        }
         lock(&self.session.handle.state).last_ui_ms =
             self.session.handle.started.elapsed().as_millis() as u64;
         if self.workspace_event(event_loop, &event) {

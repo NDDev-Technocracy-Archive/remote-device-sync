@@ -1,4 +1,4 @@
-//! Managed native control dispatch progresses independently of decode waits.
+//! Native control dispatch progresses independently of decode waits.
 use rds_core::DesktopControl;
 use rds_desktop::render::{InputReceiver, ViewerInput};
 use std::{
@@ -24,6 +24,11 @@ impl Sender for rds_client::local::ManagedControl {
         Ok(self.control(message).await?)
     }
 }
+impl Sender for tokio::sync::mpsc::Sender<DesktopControl> {
+    async fn send(&self, message: DesktopControl) -> anyhow::Result<()> {
+        Ok(self.send(message).await?)
+    }
+}
 
 const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const REPAIR_AGES: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(8)];
@@ -37,7 +42,8 @@ pub(super) enum VideoAction {
 
 /// Idle video is expected to refresh about once a second. Request at most
 /// two independent images before reopening the desktop; heartbeats alone
-/// never reset actual decoded progress. A new frame rearms this policy.
+/// never reset video progress. Visible windows require decoded frames; an
+/// intentionally hidden window instead proves bounded encoded delivery.
 #[derive(Default)]
 pub(super) struct VideoWatchdog {
     progress: Option<tokio::time::Instant>,
@@ -131,12 +137,12 @@ async fn pump_inner(
                 let progress = *progress.borrow();
                 match watchdog.observe(progress) {
                     VideoAction::Reconnect => {
-                        tracing::warn!(last_decoded_age_ms = progress.elapsed().as_millis() as u64,
+                        tracing::warn!(last_video_progress_age_ms = progress.elapsed().as_millis() as u64,
                             "desktop progress watchdog expired");
                         anyhow::bail!("remote video stopped making progress");
                     },
                     VideoAction::Repair => {
-                        tracing::warn!(last_decoded_age_ms = progress.elapsed().as_millis() as u64,
+                        tracing::warn!(last_video_progress_age_ms = progress.elapsed().as_millis() as u64,
                             "desktop progress repair requested");
                         send_control(sender, DesktopControl::RequestIdr, &sent).await?;
                     },

@@ -1391,6 +1391,7 @@ async fn relay_mode_preserves_payloads_and_defers_decode_to_consumer() {
         assert!(!delivery.payload.is_empty());
         match decoder.push(&delivery.header, delivery.payload.to_vec()) {
             RelayOutcome::Pending | RelayOutcome::NeedIdr => outcomes += 1,
+            RelayOutcome::Discarded => panic!("active decoder discarded an encoded frame"),
             #[cfg(feature = "x11")]
             RelayOutcome::Frame(raw) => {
                 assert_eq!(raw.width, delivery.header.width);

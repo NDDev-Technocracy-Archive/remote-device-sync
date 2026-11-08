@@ -161,7 +161,7 @@ impl Delivery {
         false
     }
 
-    fn decode(&mut self, header: &FrameHeader, body: Vec<u8>) -> DecodeOutcome {
+    fn decode(&mut self, header: &FrameHeader, body: bytes::Bytes) -> DecodeOutcome {
         if self.waiting_keyframe {
             if !header.keyframe {
                 return DecodeOutcome::Failed;
@@ -191,7 +191,7 @@ impl Delivery {
             }
             let encoded = crate::EncodedFrame {
                 codec: header.codec,
-                data: bytes::Bytes::from(body),
+                data: body,
                 keyframe: header.keyframe,
             };
             let started = std::time::Instant::now();
@@ -744,6 +744,9 @@ pub enum RelayOutcome {
     /// The reference chain is broken; the viewer should send
     /// `DesktopControl::RequestIdr` upstream.
     NeedIdr,
+    /// The caller deliberately discarded this encoded frame while its native
+    /// window was invisible. It is transport progress, not decoded progress.
+    Discarded,
 }
 
 /// Viewer-side decode chain for a relayed frame channel
@@ -770,15 +773,11 @@ impl RelayDecoder {
 
     /// Feed one relayed encoded frame. Input must already have passed the
     /// relay's sequence checks — this owns only decode-chain state.
-    pub fn push(&mut self, header: &FrameHeader, payload: Vec<u8>) -> RelayOutcome {
-        if header.seq == u64::MAX || self.next_seq.is_some_and(|next| header.seq < next) {
+    pub fn push(&mut self, header: &FrameHeader, payload: impl Into<bytes::Bytes>) -> RelayOutcome {
+        if !self.admit(header) {
             return RelayOutcome::Pending;
         }
-        if self.next_seq.is_some_and(|next| header.seq != next) {
-            self.delivery.invalidate();
-        }
-        self.next_seq = header.seq.checked_add(1);
-        match self.delivery.decode(header, payload) {
+        match self.delivery.decode(header, payload.into()) {
             #[cfg(feature = "x11")]
             DecodeOutcome::Decoded(raw) => RelayOutcome::Frame(raw),
             DecodeOutcome::Buffered => RelayOutcome::Pending,
@@ -798,13 +797,34 @@ impl RelayDecoder {
         }
     }
 
+    /// Skip native decode without spawning a worker or requesting repeated
+    /// repairs while invisible. The next visible decode needs a fresh keyframe;
+    /// the owning window requests it when visibility returns.
+    pub fn discard(&mut self, header: &FrameHeader) -> RelayOutcome {
+        if self.admit(header) {
+            self.delivery.invalidate();
+        }
+        RelayOutcome::Discarded
+    }
+    fn admit(&mut self, header: &FrameHeader) -> bool {
+        if header.seq == u64::MAX || self.next_seq.is_some_and(|next| header.seq < next) {
+            return false;
+        }
+        if self.next_seq.is_some_and(|next| header.seq != next) {
+            self.delivery.invalidate();
+        }
+        self.next_seq = header.seq.checked_add(1);
+        true
+    }
+
     /// Cancellation retains the global decoder permit in native work. No
     /// connection/control handle is moved into the blocking decoder.
     pub async fn push_bounded(
         self,
         header: FrameHeader,
-        payload: Vec<u8>,
+        payload: impl Into<bytes::Bytes> + Send + 'static,
     ) -> Result<(Self, RelayOutcome), DesktopError> {
+        let payload = payload.into();
         let probe = crate::decode_work::Probe::new(&header, payload.len());
         crate::decode_work::run(&DECODE_SLOTS, FRAME_STREAM_TIMEOUT, probe, move || {
             let mut decoder = self;
@@ -933,7 +953,7 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
             let decoded =
                 crate::decode_work::run(&DECODE_SLOTS, FRAME_STREAM_TIMEOUT, probe, move || {
                     let _budget = budget;
-                    let result = delivery.decode(&header, body);
+                    let result = delivery.decode(&header, body.into());
                     (delivery, result)
                 })
                 .await;
@@ -1273,6 +1293,57 @@ mod tests {
 
     #[cfg(feature = "x11")]
     #[test]
+    fn discarded_video_resumes_only_from_a_fresh_decoded_keyframe() {
+        use crate::Encoder;
+        let mut encoder = crate::H264Encoder::new(1_000_000, 30.0).unwrap();
+        let mut raw = RawFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: bytes::Bytes::from(vec![80; 64 * 64 * 4]),
+        };
+        let mut header = FrameHeader {
+            seq: 0,
+            capture_ts_ms: 0,
+            encode_done_ts_ms: 0,
+            send_ts_ms: 0,
+            keyframe: true,
+            codec: Codec::H264,
+            width: 64,
+            height: 64,
+        };
+        let mut decoder = RelayDecoder::new();
+        let first = encoder.encode(&raw).unwrap();
+        let RelayOutcome::Frame(first) = decoder.push(&header, first.data) else {
+            panic!("initial keyframe did not decode");
+        };
+        assert!(first.data[0] < 100);
+        let skipped = encoder.encode(&raw).unwrap();
+        header.seq += 1;
+        header.keyframe = skipped.keyframe;
+        assert!(matches!(decoder.discard(&header), RelayOutcome::Discarded));
+        let delta = encoder.encode(&raw).unwrap();
+        assert!(!delta.keyframe);
+        header.seq += 1;
+        header.keyframe = false;
+        assert!(matches!(
+            decoder.push(&header, delta.data),
+            RelayOutcome::NeedIdr
+        ));
+        raw.data = bytes::Bytes::from(vec![200; raw.data.len()]);
+        encoder.request_idr();
+        let recovery = encoder.encode(&raw).unwrap();
+        assert!(recovery.keyframe);
+        header.seq += 1;
+        header.keyframe = true;
+        let RelayOutcome::Frame(recovered) = decoder.push(&header, recovery.data) else {
+            panic!("fresh visible keyframe did not decode");
+        };
+        assert!(recovered.data[0] > 150, "resume exposed the old picture");
+    }
+
+    #[cfg(feature = "x11")]
+    #[test]
     fn native_decode_resyncs_at_keyframe_and_checks_header_dimensions() {
         use crate::Encoder;
         let mut encoder = crate::H264Encoder::new(1_000_000, 30.0).unwrap();
@@ -1296,25 +1367,25 @@ mod tests {
         };
         let mut delivery = Delivery::new();
         assert!(matches!(
-            delivery.decode(&header, encoded.data.to_vec()),
+            delivery.decode(&header, encoded.data.clone()),
             DecodeOutcome::Decoded(_)
         ));
         delivery.invalidate();
         header.keyframe = false;
         assert!(matches!(
-            delivery.decode(&header, encoded.data.to_vec()),
+            delivery.decode(&header, encoded.data.clone()),
             DecodeOutcome::Failed
         ));
         assert!(delivery.waiting_keyframe);
         header.keyframe = true;
         assert!(matches!(
-            delivery.decode(&header, encoded.data.to_vec()),
+            delivery.decode(&header, encoded.data.clone()),
             DecodeOutcome::Decoded(_)
         ));
         header.width = 128;
         delivery.invalidate();
         assert!(matches!(
-            delivery.decode(&header, encoded.data.to_vec()),
+            delivery.decode(&header, encoded.data.clone()),
             DecodeOutcome::Failed
         ));
     }

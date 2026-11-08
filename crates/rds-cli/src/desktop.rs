@@ -170,7 +170,7 @@ mod native {
     use super::*;
     use rds_client::local::ManagedMessage;
     use rds_desktop::{
-        client::{DesktopSession, RelayDecoder, RelayOutcome, SessionOpts},
+        client::{DesktopSession, EncodedDelivery, RelayDecoder, RelayOutcome, SessionOpts},
         render::{InputReceiver, Viewer, ViewerHandle, ViewerInput},
     };
     use std::{
@@ -670,6 +670,25 @@ mod native {
         }
     }
 
+    async fn decode_frame(
+        mut decoder: RelayDecoder,
+        frame: EncodedDelivery,
+        view: &ViewerHandle,
+    ) -> anyhow::Result<(RelayDecoder, RelayOutcome)> {
+        view.media_timing(&frame.header);
+        if !view.decode_needed() {
+            let outcome = decoder.discard(&frame.header);
+            view.decode_discarded();
+            return Ok((decoder, outcome));
+        }
+        Ok(tokio::time::timeout(
+            Duration::from_secs(5),
+            decoder.push_bounded(frame.header, frame.payload),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("desktop decode stalled"))??)
+    }
+
     async fn managed_session(
         client: &Client,
         session: SessionId,
@@ -715,13 +734,15 @@ mod native {
                         view.stage("decoding");
                         let received = Instant::now();
                         let frame_seq = frame.header.seq;
-                        view.media_timing(&frame.header);
-                        let (next, outcome) = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            decoder.push_bounded(frame.header, frame.payload),
+                        let (next, outcome) = decode_frame(
+                            decoder,
+                            EncodedDelivery {
+                                header: frame.header,
+                                payload: frame.payload.into(),
+                            },
+                            view,
                         )
-                        .await
-                        .map_err(|_| anyhow::anyhow!("desktop decode stalled"))??;
+                        .await?;
                         decoder = next;
                         match outcome {
                             RelayOutcome::Frame(raw) => {
@@ -736,6 +757,9 @@ mod native {
                                     })??
                             }
                             RelayOutcome::Pending => {}
+                            RelayOutcome::Discarded => {
+                                progress.send_replace(tokio::time::Instant::now());
+                            }
                         }
                         view.stage("receiving");
                     }
@@ -823,6 +847,7 @@ mod native {
                 output_height: Some(options.resolution.height()),
                 payload_receipts: options.payload_receipts,
                 reverse_clipboard: options.clipboard && !options.headless,
+                relay_encoded: true,
                 ..Default::default()
             },
         )
@@ -830,52 +855,79 @@ mod native {
         extent(view, session.caps(), options.display)?;
         view.status("Waiting for screen");
         let ctrl = session.control_sender();
-        let mut last_frame = tokio::time::Instant::now();
-        let mut watchdog = control::VideoWatchdog::default();
+        let mut encoded = session
+            .encoded
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing encoded desktop channel"))?;
+        let (progress, last_frame) = tokio::sync::watch::channel(tokio::time::Instant::now());
         let control_progress = liveness::ControlWatchdog::with_health(attempt.healthy.clone());
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let result = loop {
-            tokio::select! {
-                _ = stop.cancelled() => break Ok(true),
-                message = input.recv() => match message {
-                    Some(ViewerInput::Control(message)) => {
-                        view.input_sent(&message);
-                        control_progress.sent(&message);
-                        tokio::time::timeout(Duration::from_secs(2),ctrl.send(message)).await.map_err(|_|anyhow::anyhow!("direct desktop control stalled"))??;
-                    },
-                    Some(ViewerInput::Close)|None => break Ok(true),
-                    Some(ViewerInput::InputStalled) => anyhow::bail!("pointer input acknowledgement stalled"),
-                },
-                _ = tick.tick() => {
-                    control_progress.check()?;
-                    match watchdog.observe(last_frame) {
-                        control::VideoAction::Reconnect => anyhow::bail!("remote video stopped making progress"),
-                        control::VideoAction::Repair => {
-                            view.video_repair_requested();
-                            tokio::time::timeout(Duration::from_secs(2), ctrl.send(rds_core::DesktopControl::RequestIdr)).await.map_err(|_|anyhow::anyhow!("direct desktop repair stalled"))??;
-                        },
-                        control::VideoAction::Healthy => {},
+        let media = async {
+            let mut decoder = RelayDecoder::new();
+            while let Some(frame) = encoded.recv().await {
+                view.stage("decoding");
+                let received = Instant::now();
+                let seq = frame.header.seq;
+                let (next, outcome) = decode_frame(decoder, frame, view).await?;
+                decoder = next;
+                match outcome {
+                    RelayOutcome::Frame(raw) => {
+                        progress.send_replace(tokio::time::Instant::now());
+                        view.frame_with_seq(raw, received, seq);
                     }
-                    let heartbeat = control_progress.heartbeat(started.elapsed().as_millis() as u64)?;
-                    control_progress.sent(&heartbeat);
-                    tokio::time::timeout(Duration::from_secs(2),ctrl.send(heartbeat)).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
-                },
-                event = session.events.recv() => match event {
-                    Some(rds_core::DesktopEvent::Heartbeat { seq, ts_ms }) => {
-                        if control_progress.echoed(seq, ts_ms) { view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)); }
-                    },
-                    Some(rds_core::DesktopEvent::InputAck { seq,.. }) => view.input_ack(seq),
-                    Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {control_progress.clipboard_ready(id, bytes);view.clipboard_ack(id, bytes);},
-                    Some(event @ (rds_core::DesktopEvent::ClipboardOffer { .. } | rds_core::DesktopEvent::ClipboardChunk { .. } | rds_core::DesktopEvent::ClipboardError { .. })) => view.clipboard_event(event),
-                    None => break Ok(false),
-                },
-                frame = session.frames.recv() => match frame {
-                    Some(raw) => { last_frame = tokio::time::Instant::now(); view.frame(raw,Instant::now()); },
-                    None => break Ok(false),
-                },
+                    RelayOutcome::Discarded => {
+                        progress.send_replace(tokio::time::Instant::now());
+                    }
+                    RelayOutcome::NeedIdr => {
+                        tokio::time::timeout(
+                            Duration::from_secs(2),
+                            ctrl.send(rds_core::DesktopControl::RequestIdr),
+                        )
+                        .await
+                        .map_err(|_| anyhow::anyhow!("direct desktop repair stalled"))??;
+                    }
+                    RelayOutcome::Pending => {}
+                }
+                view.stage("receiving");
+            }
+            Ok(false)
+        };
+        let events = async {
+            while let Some(event) = session.events.recv().await {
+                match event {
+                    rds_core::DesktopEvent::Heartbeat { seq, ts_ms } => {
+                        if control_progress.echoed(seq, ts_ms) {
+                            view.control_rtt(
+                                (started.elapsed().as_millis() as u64).saturating_sub(ts_ms),
+                            );
+                        }
+                    }
+                    rds_core::DesktopEvent::InputAck { seq, .. } => view.input_ack(seq),
+                    rds_core::DesktopEvent::ClipboardReady { id, bytes } => {
+                        control_progress.clipboard_ready(id, bytes);
+                        view.clipboard_ack(id, bytes);
+                    }
+                    event @ (rds_core::DesktopEvent::ClipboardOffer { .. }
+                    | rds_core::DesktopEvent::ClipboardChunk { .. }
+                    | rds_core::DesktopEvent::ClipboardError { .. }) => view.clipboard_event(event),
+                }
+            }
+            Ok(false)
+        };
+        let incoming = async {
+            tokio::select! {
+                result = events => result,
+                result = media => result,
             }
         };
+        let controls = control::pump_with_liveness(
+            input,
+            &ctrl,
+            &last_frame,
+            &control_progress,
+            started,
+            |message| view.input_sent(message),
+        );
+        let result = control::run(controls, incoming, stop).await;
         drop(session);
         conn.close(0u32.into(), b"viewer session ended");
         result
@@ -970,7 +1022,7 @@ mod native {
                                     }
                                 }
                                 RelayOutcome::NeedIdr => channel.request_idr().await?,
-                                RelayOutcome::Pending => {}
+                                RelayOutcome::Pending | RelayOutcome::Discarded => {}
                             }
                         }
                         Some(ManagedMessage::Event(_)) => {}

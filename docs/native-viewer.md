@@ -1,5 +1,11 @@
 # Native desktop viewer
 
+[Native decode demand](decoder-demand.md) suppresses decoder work for windows
+which the OS reports as invisible and requests a fresh keyframe on return.
+Direct and managed native viewers keep controls independent of that decode
+path. Unknown visibility continues decode; an unfocused visible window remains
+live. Its native resource/recovery acceptance is separate from build success.
+
 ## Tabbed workspace
 
 The native application now opens a workspace with up to eight display tabs.
