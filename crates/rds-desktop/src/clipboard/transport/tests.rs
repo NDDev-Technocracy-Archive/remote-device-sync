@@ -139,18 +139,33 @@ async fn symmetric_budgets_and_exact_routes_keep_canceled_bodies_out_of_new_requ
         // A late response has no registered inbox, even when its replacement
         // is actively receiving. It can never supply that replacement's data.
         let _ = right
-            .send_bytes(&old_request, Bytes::from_static(b"old"))
+            .response(&old_request)
+            .unwrap()
+            .send_bytes(Bytes::from_static(b"old"))
             .await;
         let (sent, received, reverse_sent, reverse_received) = tokio::join!(
-            right.send_bytes(&next_request, Bytes::from_static(b"fresh")),
+            right
+                .response(&next_request)
+                .unwrap()
+                .send_bytes(Bytes::from_static(b"fresh")),
             next.bytes(),
-            left.send_bytes(&reverse_request, Bytes::from_static(b"png!")),
+            left.response(&reverse_request)
+                .unwrap()
+                .send_bytes(Bytes::from_static(b"png!")),
             reverse.bytes(),
         );
-        let (value, receipt) = received.unwrap();
+        let Received {
+            bytes: value,
+            receipt,
+            ..
+        } = received.unwrap();
         assert_eq!(value, b"fresh"[..]);
         assert_eq!(receipt, sent.unwrap());
-        let (value, receipt) = reverse_received.unwrap();
+        let Received {
+            bytes: value,
+            receipt,
+            ..
+        } = reverse_received.unwrap();
         assert_eq!(value, b"png!"[..]);
         assert_eq!(receipt, reverse_sent.unwrap());
         assert!(!receipt.published);
@@ -169,6 +184,162 @@ async fn symmetric_budgets_and_exact_routes_keep_canceled_bodies_out_of_new_requ
     })
     .await
     .unwrap();
+}
+
+/// The native operation outlives a canceled async waiter. Real filesystem I/O
+/// gives the operation a completion boundary without involving the UI or the
+/// user's general clipboard.
+async fn gated_native(
+    original: NativeLifetime,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    operation: impl FnOnce() + Send + 'static,
+) {
+    tokio::task::spawn_blocking(move || {
+        let _original = original;
+        entered.send(()).unwrap();
+        release
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        operation();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn representation_admission_precedes_native_read_and_survives_waiter_cancellation() {
+    let pair = Pair::new().await;
+    let (left, _) = pair.owners();
+    let right = Arc::new(
+        Streams::new(
+            pair.right.clone(),
+            [19; 16],
+            Limits {
+                parallel_transfers: 1,
+                ..Limits::default()
+            },
+            Arc::new(()),
+        )
+        .unwrap(),
+    );
+    let body = left
+        .request(
+            1,
+            PayloadKind::Representation(Format::TextUtf8),
+            Some(8),
+            CancellationToken::new(),
+        )
+        .unwrap();
+    let request = body.request().clone();
+    let root = std::env::temp_dir().join(format!(
+        "rds-representation-read-{:032x}",
+        rand::random::<u128>()
+    ));
+    std::fs::write(&root, b"selected").unwrap();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let source = root.clone();
+    let sender = right.clone();
+    let running = tokio::spawn(async move {
+        let response = sender.response(&request).unwrap();
+        gated_native(response.original(), entered, held, move || {
+            assert_eq!(std::fs::read(source).unwrap(), b"selected");
+        })
+        .await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    running.abort();
+    assert!(running.await.unwrap_err().is_cancelled());
+    assert!(matches!(right.response(body.request()), Err(Error::Busy)));
+    release.send(()).unwrap();
+    let permit = tokio::time::timeout(std::time::Duration::from_secs(2), right.outgoing.acquire())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(permit);
+    assert!(right.response(body.request()).is_ok());
+    drop(body);
+    std::fs::remove_file(root).unwrap();
+}
+
+#[tokio::test]
+async fn verified_representation_keeps_admission_through_actual_publication_drain() {
+    let pair = Pair::new().await;
+    let left = Streams::new(
+        pair.left.clone(),
+        [19; 16],
+        Limits {
+            parallel_transfers: 1,
+            ..Limits::default()
+        },
+        Arc::new(()),
+    )
+    .unwrap();
+    let (_, right) = pair.owners();
+    let body = left
+        .request(
+            1,
+            PayloadKind::Representation(Format::TextUtf8),
+            Some(8),
+            CancellationToken::new(),
+        )
+        .unwrap();
+    let response = right.response(body.request()).unwrap();
+    let (sent, received) = tokio::join!(
+        response.send_bytes(Bytes::from_static(b"selected")),
+        body.bytes()
+    );
+    let received = received.unwrap();
+    assert_eq!(received.receipt, sent.unwrap());
+    let root = std::env::temp_dir().join(format!(
+        "rds-representation-publish-{:032x}",
+        rand::random::<u128>()
+    ));
+    let destination = root.clone();
+    let bytes = received.bytes.clone();
+    let original = received.original();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let publishing = tokio::spawn(gated_native(original, entered, held, move || {
+        std::fs::write(destination, &bytes).unwrap();
+    }));
+    tokio::time::timeout(std::time::Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(received);
+    publishing.abort();
+    assert!(publishing.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        left.request(
+            2,
+            PayloadKind::Representation(Format::TextUtf8),
+            None,
+            CancellationToken::new()
+        ),
+        Err(Error::Busy)
+    ));
+    release.send(()).unwrap();
+    let permit = tokio::time::timeout(std::time::Duration::from_secs(2), left.incoming.acquire())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(&root).unwrap(), b"selected");
+    drop(permit);
+    assert!(
+        left.request(
+            2,
+            PayloadKind::Representation(Format::TextUtf8),
+            None,
+            CancellationToken::new()
+        )
+        .is_ok()
+    );
+    std::fs::remove_file(root).unwrap();
 }
 
 #[tokio::test]
