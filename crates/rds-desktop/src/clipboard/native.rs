@@ -10,8 +10,44 @@ use super::image::Png;
 
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Policy {
+    pub limits: Limits,
+    pub watch_interval_ms: u64,
+    pub operation_timeout_ms: u64,
+    pub native_uri_bytes: u64,
+    pub native_types: usize,
+}
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            limits: Limits::default(),
+            watch_interval_ms: 100,
+            operation_timeout_ms: 2000,
+            native_uri_bytes: rds_core::clipboard::TEXT_BYTES,
+            native_types: 64,
+        }
+    }
+}
+impl Policy {
+    pub fn validate(&self) -> Result<(), Error> {
+        self.limits.validate()?;
+        if !(5..=1000).contains(&self.watch_interval_ms)
+            || !(100..=30_000).contains(&self.operation_timeout_ms)
+            || !(1..=16 * rds_core::clipboard::TEXT_BYTES).contains(&self.native_uri_bytes)
+            || !(1..=4096).contains(&self.native_types)
+        {
+            return Err(Error::Settings);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid native clipboard policy")]
+    Settings,
     #[error("native clipboard is unavailable")]
     Unavailable,
     #[error("native clipboard ownership changed")]
@@ -33,6 +69,7 @@ pub enum Error {
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub generation: u64,
+    pub owned: bool,
     pub representations: Vec<Representation>,
 }
 

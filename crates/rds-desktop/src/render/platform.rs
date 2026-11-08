@@ -118,149 +118,75 @@ pub(super) fn remote_activity() -> RemoteActivity {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
-    read_pasteboard(&objc2_app_kit::NSPasteboard::generalPasteboard())
+fn clipboard_error(error: crate::clipboard::native::Error) -> crate::DesktopError {
+    crate::DesktopError::Input(error.to_string())
 }
-
 #[cfg(target_os = "macos")]
-fn read_pasteboard(
-    board: &objc2_app_kit::NSPasteboard,
-) -> Result<Option<String>, crate::DesktopError> {
-    use objc2_app_kit::NSPasteboardTypeString;
-    use objc2_foundation::{MainThreadMarker, NSUTF8StringEncoding};
-    let _main = MainThreadMarker::new().ok_or_else(|| {
-        crate::DesktopError::Input("clipboard access requires the main thread".into())
+fn clipboard_board() -> Result<crate::clipboard::macos::Board, crate::DesktopError> {
+    let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
+        crate::DesktopError::Input("clipboard viewer access requires the main thread".into())
     })?;
-    // SAFETY: called for an explicit paste gesture on AppKit's verified main
-    // thread. Retained Cocoa objects live through the copy; nothing is logged.
-    let Some(text) = (unsafe { board.stringForType(NSPasteboardTypeString) }) else {
-        return Ok(None);
-    };
-    // UTF-8 cannot use fewer bytes than UTF-16 code units. This cheap bound
-    // also avoids scanning an arbitrarily large native string for conversion.
-    if text.length() > crate::clipboard::MAX_TEXT_BYTES {
-        return Err(crate::DesktopError::Input(
-            "clipboard text exceeds 1 MiB".into(),
-        ));
-    }
-    if !text.canBeConvertedToEncoding(NSUTF8StringEncoding) {
-        return Err(crate::DesktopError::Input(
-            "clipboard text cannot be represented as UTF-8".into(),
-        ));
-    }
-    // Check Cocoa's byte count before allocating the Rust copy. A user may
-    // have copied a native value much larger than the wire transfer ceiling.
-    if text.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) > crate::clipboard::MAX_TEXT_BYTES {
-        return Err(crate::DesktopError::Input(
-            "clipboard text exceeds 1 MiB".into(),
-        ));
-    }
-    Ok(Some(text.to_string()))
+    crate::clipboard::macos::Board::general().map_err(clipboard_error)
 }
-
+#[cfg(target_os = "macos")]
+pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
+    use crate::clipboard::native::{Policy, Value};
+    let board = clipboard_board()?;
+    let policy = Policy::default();
+    let snapshot = board.snapshot(&policy).map_err(clipboard_error)?;
+    if !snapshot
+        .representations
+        .iter()
+        .any(|r| r.format == rds_core::clipboard::Format::TextUtf8)
+    {
+        return Ok(None);
+    }
+    match board
+        .read(
+            snapshot.generation,
+            rds_core::clipboard::Format::TextUtf8,
+            &policy,
+        )
+        .map_err(clipboard_error)?
+    {
+        Value::Text(text) => Ok(Some(text.as_str().to_owned())),
+        _ => Ok(None),
+    }
+}
 #[cfg(target_os = "macos")]
 pub(super) fn clipboard_generation() -> Result<i64, crate::DesktopError> {
-    let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
-        crate::DesktopError::Input("clipboard access requires the main thread".into())
-    })?;
-    Ok(objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as i64)
+    clipboard_board()?
+        .generation()
+        .map(|generation| generation as i64)
+        .map_err(clipboard_error)
 }
 #[cfg(not(target_os = "macos"))]
 pub(super) fn clipboard_generation() -> Result<i64, crate::DesktopError> {
     Err(crate::DesktopError::Input(
-        "clipboard publication unavailable".into(),
+        "native clipboard publication unavailable".into(),
     ))
 }
-
-/// Publish a bounded UTF-8 value to the viewer's native clipboard.  This is
-/// called only after a remote offer was explicitly requested and fully
-/// reassembled, so a malformed peer cannot partially replace the user's
-/// clipboard.
 #[cfg(target_os = "macos")]
-pub(super) fn publish_text(text: &str) -> Result<(), crate::DesktopError> {
-    write_pasteboard(&objc2_app_kit::NSPasteboard::generalPasteboard(), text)
+pub(super) fn publish_text(generation: i64, text: &str) -> Result<(), crate::DesktopError> {
+    use crate::clipboard::native::{Policy, Publication, Text};
+    let policy = Policy::default();
+    let text = Text::new(
+        bytes::Bytes::copy_from_slice(text.as_bytes()),
+        &policy.limits,
+    )
+    .map_err(clipboard_error)?;
+    clipboard_board()?
+        .publish(generation as u64, Publication::Text(text), &policy)
+        .map(|_| ())
+        .map_err(clipboard_error)
 }
-#[cfg(target_os = "macos")]
-fn write_pasteboard(
-    board: &objc2_app_kit::NSPasteboard,
-    text: &str,
-) -> Result<(), crate::DesktopError> {
-    use objc2_app_kit::NSPasteboardTypeString;
-    use objc2_foundation::{MainThreadMarker, NSString};
-    let _main = MainThreadMarker::new().ok_or_else(|| {
-        crate::DesktopError::Input("clipboard access requires the main thread".into())
-    })?;
-    if text.len() > crate::clipboard::MAX_TEXT_BYTES {
-        return Err(crate::DesktopError::Input(
-            "clipboard text exceeds 1 MiB".into(),
-        ));
-    }
-    // SAFETY: AppKit's thread is verified and NSString remains retained for
-    // the synchronous operation; no clipboard content is diagnostic output.
-    unsafe {
-        board.clearContents();
-        if !board.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) {
-            return Err(crate::DesktopError::Input(
-                "native clipboard publication refused".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-/// Isolated AppKit qualification on a fresh named pasteboard, never the user's
-/// general clipboard. Must run on the native main thread.
 #[doc(hidden)]
 #[cfg(target_os = "macos")]
 pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-    use objc2_foundation::NSString;
     let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
         crate::DesktopError::Input("clipboard probe requires the main thread".into())
     })?;
-    let board = NSPasteboard::pasteboardWithUniqueName();
-    let result = (|| {
-        for text in [
-            String::new(),
-            "Привет 🖥️\nHello".into(),
-            "UTF-8 🖥️\n".repeat(8000),
-        ] {
-            let before = board.changeCount();
-            write_pasteboard(&board, &text)?;
-            // SAFETY: the isolated board and retained returned string are
-            // accessed synchronously on the verified AppKit main thread.
-            let read = read_pasteboard(&board)?;
-            if read.as_deref() != Some(text.as_str()) || board.changeCount() == before {
-                return Err(crate::DesktopError::Input(
-                    "native clipboard probe mismatch".into(),
-                ));
-            }
-        }
-        let oversized = "x".repeat(crate::clipboard::MAX_TEXT_BYTES + 1);
-        let before = board.changeCount();
-        if write_pasteboard(&board, &oversized).is_ok() || board.changeCount() != before {
-            return Err(crate::DesktopError::Input(
-                "native clipboard oversized publication was not refused".into(),
-            ));
-        }
-        // SAFETY: the probe owns this named board on the verified main thread.
-        // Seed it directly to exercise the independent native-read bound.
-        unsafe {
-            board.clearContents();
-            if !board.setString_forType(&NSString::from_str(&oversized), NSPasteboardTypeString) {
-                return Err(crate::DesktopError::Input(
-                    "native clipboard oversized fixture was refused".into(),
-                ));
-            }
-        }
-        if read_pasteboard(&board).is_ok() {
-            return Err(crate::DesktopError::Input(
-                "native clipboard oversized read was not refused".into(),
-            ));
-        }
-        Ok(4)
-    })();
-    board.clearContents();
-    result
+    crate::clipboard::macos::probe().map_err(clipboard_error)
 }
 #[doc(hidden)]
 #[cfg(not(target_os = "macos"))]
@@ -275,7 +201,7 @@ pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn publish_text(_text: &str) -> Result<(), crate::DesktopError> {
+pub(super) fn publish_text(_generation: i64, _text: &str) -> Result<(), crate::DesktopError> {
     Err(crate::DesktopError::Input(
         "native clipboard publication is unavailable on this viewer".into(),
     ))

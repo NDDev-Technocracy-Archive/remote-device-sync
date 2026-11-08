@@ -2,6 +2,8 @@
 use crate::DesktopError;
 use std::{future::Future, pin::Pin};
 pub mod image;
+#[cfg(all(target_os = "macos", feature = "viewer"))]
+pub(crate) mod macos;
 pub mod native;
 pub mod stream;
 pub const MAX_TEXT_BYTES: usize = rds_core::clipboard::TEXT_BYTES as usize;
