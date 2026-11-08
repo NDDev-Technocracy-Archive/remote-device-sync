@@ -681,7 +681,7 @@ async fn symlink_escape_refused() {
 /// header is checked against the manifest before allocation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn forged_chunk_len_rejected() {
-    let (_s, c_ep, target, _task, _server_dir) = pair().await;
+    let (_s, c_ep, target, _task, server_dir) = pair().await;
     let conn = client_conn(&c_ep, target).await;
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
 
@@ -737,8 +737,14 @@ async fn forged_chunk_len_rejected() {
     )
     .await
     .unwrap();
-    stream.write_all(b"short").await.unwrap();
-    stream.finish().unwrap();
+    // Withhold both body and FIN. Rejection must come from validating the
+    // header against the admitted manifest, not from truncated-body EOF.
+    // Writing after that rejection races the correct STOP_SENDING response.
+    let stopped = tokio::time::timeout(Duration::from_secs(10), stream.stopped())
+        .await
+        .expect("receiver waited for a body after the forged chunk header")
+        .expect("connection ended instead of rejecting the forged stream");
+    assert_eq!(stopped, Some(rds_net::VarInt::from_u32(0)));
 
     // The receiver must abort the transfer on the len mismatch — the
     // control stream ends without Done.
@@ -746,12 +752,34 @@ async fn forged_chunk_len_rejected() {
         Duration::from_secs(10),
         rds_net::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
     )
-    .await;
+    .await
+    .expect("rejected chunk left its control session waiting indefinitely");
     match verdict {
-        Err(_) | Ok(Err(_)) => {}
-        Ok(Ok(rds_sync::proto::SyncMsg::Refuse { .. })) => {}
-        Ok(Ok(other)) => panic!("forged chunk len accepted: {other:?}"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ),
+            "unexpected rejection failure: {error}"
+        ),
+        Ok(rds_sync::proto::SyncMsg::Refuse { .. }) => {}
+        Ok(other) => panic!("forged chunk len accepted: {other:?}"),
     }
+    assert!(!server_dir.join("victim.bin").exists());
+    assert_eq!(count_parts(&server_dir.join(".rds-sync")), 0);
+    // A rejected stream must not break other uses of the admitted connection.
+    let source = scratch("after-forged-header");
+    let path = source.join("valid.bin");
+    std::fs::write(&path, b"valid after rejection").unwrap();
+    let (send, recv) = conn.open_bi().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), send_file(&conn, &path, send, recv))
+        .await
+        .expect("valid transfer stalled after rejecting the forged stream")
+        .unwrap();
+    assert_eq!(
+        std::fs::read(server_dir.join("valid.bin")).unwrap(),
+        b"valid after rejection"
+    );
 }
 
 /// Impaired lane: 5% loss + delay + jitter under both sockets, plus a
