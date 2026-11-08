@@ -77,7 +77,7 @@ struct GrantLease {
     current: Arc<ActiveGrant>,
     updates: watch::Sender<Arc<ActiveGrant>>,
     watcher: Option<JoinHandle<()>>,
-    _slot: GrantSlot,
+    _slot: Arc<GrantSlot>,
 }
 
 impl Drop for GrantLease {
@@ -166,7 +166,7 @@ impl ConnAuthz {
             current,
             updates,
             watcher: Some(watcher),
-            _slot: slot,
+            _slot: Arc::new(slot),
         }));
         Ok(())
     }
@@ -257,7 +257,8 @@ impl ConnAuthz {
 
     fn close(&self) {
         // Drop the lease outside the state lock: teardown releases the
-        // replay slot and aborts the watchdog even if stream tasks live on.
+        // connection's replay ownership and aborts its watchdog. Native work
+        // may still hold that exact reservation until its I/O actually drains.
         let previous = std::mem::replace(&mut *lock(&self.state), State::Closed);
         drop(previous);
         self.changed.send_replace(());
@@ -274,7 +275,8 @@ impl ConnAuthz {
             | State::Renewing(mut lease) => lease.watcher.take(),
             _ => None,
         };
-        // The lease and replay reservation have already dropped before await.
+        // This lease's ownership dropped before await; admitted native guards
+        // may still retain the exact replay reservation through their I/O.
         if let Some(watcher) = watcher {
             watcher.abort();
             if let Err(error) = watcher.await
@@ -282,6 +284,19 @@ impl ConnAuthz {
             {
                 tracing::debug!(%error, "grant watchdog ended");
             }
+        }
+    }
+
+    /// Pin the original grant and replay reservation through already-admitted
+    /// native I/O. Closing still seals new admission and stops the watchdog;
+    /// retained work cannot make that same grant concurrently reusable.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn native_lifetime(&self) -> Option<rds_desktop::clipboard::NativeLifetime> {
+        match &*lock(&self.state) {
+            State::Granted(lease) | State::Renewing(lease) if lease.current.live() => {
+                Some(Arc::new((lease._slot.clone(), lease.current.clone())))
+            }
+            _ => None,
         }
     }
 
@@ -900,6 +915,29 @@ mod tests {
         assert_eq!(successes.load(std::sync::atomic::Ordering::Relaxed), 1);
         authz.close();
         assert!(authz.begin().is_err());
+    }
+
+    #[cfg(feature = "desktop")]
+    #[tokio::test]
+    async fn admitted_native_work_pins_its_original_grant_after_connection_admission_closes() {
+        let (server, client, conn, _peer) = connection_pair().await;
+        let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+        let authz = Arc::new(ConnAuthz::new(true, *server.id().as_bytes(), 64));
+        authz.begin().unwrap();
+        let grant = verified(&policy, conn.remote_id(), authz.audience);
+        let id = grant.id;
+        authz.install(&conn, &policy, grant).unwrap();
+        authz.commit(&policy, &conn).unwrap();
+        let native = authz.native_lifetime().unwrap();
+        authz.close_and_wait().await;
+        assert!(authz.native_lifetime().is_none());
+        assert!(authz.begin().is_err());
+        assert!(GrantSlot::claim(&policy, id).is_err());
+        drop(native);
+        assert!(lock(&policy.active_grants).is_empty());
+        drop(GrantSlot::claim(&policy, id).unwrap());
+        client.close().await;
+        server.close().await;
     }
 
     #[test]

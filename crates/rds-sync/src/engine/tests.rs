@@ -635,12 +635,15 @@ async fn stream_pair() -> (
     rds_net::Endpoint,
     rds_net::Endpoint,
 ) {
-    let a = rds_net::bind_endpoint(rds_net::EndpointConfig::default())
-        .await
-        .unwrap();
-    let b = rds_net::bind_endpoint(rds_net::EndpointConfig::default())
-        .await
-        .unwrap();
+    // This fixture tests framed control between two local endpoints. Pin the
+    // local route so host LAN/NAT/discovery cannot turn it into a remote dial.
+    let config = rds_net::EndpointConfig {
+        bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+        discovery: false,
+        ..Default::default()
+    };
+    let a = rds_net::bind_endpoint(config.clone()).await.unwrap();
+    let b = rds_net::bind_endpoint(config).await.unwrap();
     let b_addr = b.addr();
     // The accept future must be polled while `connect` dials (iroh drives
     // the incoming handshake through it), and `b` must outlive it —

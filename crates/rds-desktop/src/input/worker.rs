@@ -23,12 +23,17 @@ pub(crate) struct InputWorker {
 }
 
 impl InputWorker {
-    pub(crate) fn new(mut sink: Option<Box<dyn InputSink>>) -> Self {
+    pub(crate) fn new(
+        sink: Option<Box<dyn InputSink>>,
+        lifetime: Option<crate::clipboard::NativeLifetime>,
+    ) -> Self {
         let (jobs, mut receiver) = mpsc::channel::<Job>(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let stopped = cancelled.clone();
         let parent = tracing::Span::current();
         let task = tokio::task::spawn_blocking(move || {
+            let _native_lifetime = lifetime;
+            let mut sink = sink;
             let _entered = parent.enter();
             while let Some(job) = receiver.blocking_recv() {
                 if stopped.load(Ordering::Acquire) || job.reply.is_closed() {
@@ -97,6 +102,7 @@ mod tests {
         release: std::sync::mpsc::Receiver<()>,
         stopped: Option<oneshot::Sender<()>>,
         calls: Arc<AtomicUsize>,
+        dropped: Arc<AtomicBool>,
     }
     impl InputSink for HeldSink {
         fn inject(&mut self, _: &InputEvent) -> Result<(), DesktopError> {
@@ -111,8 +117,25 @@ mod tests {
     }
     impl Drop for HeldSink {
         fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
             if let Some(stopped) = self.stopped.take() {
                 let _ = stopped.send(());
+            }
+        }
+    }
+
+    struct OriginalContext {
+        sink_dropped: Arc<AtomicBool>,
+        released: Option<oneshot::Sender<()>>,
+    }
+    impl Drop for OriginalContext {
+        fn drop(&mut self) {
+            assert!(
+                self.sink_dropped.load(Ordering::Acquire),
+                "caller context released before native cleanup"
+            );
+            if let Some(released) = self.released.take() {
+                let _ = released.send(());
             }
         }
     }
@@ -123,12 +146,21 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel();
         let (stopped, finished) = oneshot::channel();
         let calls = Arc::new(AtomicUsize::new(0));
-        let worker = InputWorker::new(Some(Box::new(HeldSink {
-            entered: Some(entered),
-            release: released,
-            stopped: Some(stopped),
-            calls: calls.clone(),
-        })));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (released_context, context_done) = oneshot::channel();
+        let worker = InputWorker::new(
+            Some(Box::new(HeldSink {
+                entered: Some(entered),
+                release: released,
+                stopped: Some(stopped),
+                calls: calls.clone(),
+                dropped: dropped.clone(),
+            })),
+            Some(Arc::new(OriginalContext {
+                sink_dropped: dropped,
+                released: Some(released_context),
+            })),
+        );
         let event = InputEvent {
             seq: 1,
             event_ts_ms: 0,
@@ -184,5 +216,9 @@ mod tests {
             "queued input must not execute"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), context_done)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

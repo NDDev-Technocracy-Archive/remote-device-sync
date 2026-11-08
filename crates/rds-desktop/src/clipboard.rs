@@ -1,14 +1,25 @@
 //! Explicit text paste, bounded reassembly and session-owned OS clipboard.
 use crate::DesktopError;
 use std::{future::Future, pin::Pin};
-pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+pub mod image;
+#[cfg(all(target_os = "macos", any(feature = "viewer", feature = "host")))]
+pub(crate) mod macos;
+pub mod native;
+pub(crate) mod ownership;
+pub mod stream;
+pub const MAX_TEXT_BYTES: usize = rds_core::clipboard::TEXT_BYTES as usize;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const SEND_CHUNK_BYTES: usize = 16 * 1024;
 
 /// Async clipboard lease belonging to an already consented serving backend.
 /// Native objects stay behind this interface; text is never logged.
 pub type ClipboardFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+/// The caller's original scope/key/budget owner. Native jobs retain it through
+/// actual I/O drain, including when their waiting future is canceled.
+pub type NativeLifetime = std::sync::Arc<dyn Send + Sync>;
 pub trait ClipboardBackend: Send {
+    fn retain(&mut self, context: NativeLifetime) -> bool;
+    fn close(&mut self) -> ClipboardFuture<'_, ()>;
     fn publish(&mut self, text: String) -> ClipboardFuture<'_, Result<(), DesktopError>>;
     fn next_change(&mut self) -> ClipboardFuture<'_, Option<String>>;
 }
@@ -173,7 +184,23 @@ impl Worker {
         source: Option<&dyn crate::DesktopSource>,
         display: u32,
         watching: bool,
+        lifetime: Option<NativeLifetime>,
     ) -> Self {
+        let mut worker = Self::create(source, display, watching);
+        if let Some(context) = lifetime {
+            let retained = match &mut worker.0 {
+                #[cfg(all(target_os = "linux", feature = "x11"))]
+                Backend::X11(worker) => worker.retain(context),
+                Backend::Prepared(worker) => worker.retain(context),
+                Backend::Unavailable => false,
+            };
+            if !retained {
+                return Self(Backend::Unavailable);
+            }
+        }
+        worker
+    }
+    fn create(source: Option<&dyn crate::DesktopSource>, display: u32, watching: bool) -> Self {
         if let Some(source) = source {
             return Self(match source.clipboard(display, watching) {
                 Ok(backend) => Backend::Prepared(backend),
@@ -213,6 +240,14 @@ impl Worker {
                 .await
                 .map(|text| ClipboardChange { text }),
             Backend::Unavailable => None,
+        }
+    }
+    pub(crate) async fn close(&mut self) {
+        match &mut self.0 {
+            #[cfg(all(target_os = "linux", feature = "x11"))]
+            Backend::X11(worker) => worker.close().await,
+            Backend::Prepared(worker) => worker.close().await,
+            Backend::Unavailable => {}
         }
     }
 }
