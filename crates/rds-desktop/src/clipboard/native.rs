@@ -12,6 +12,17 @@ pub use destination::Destination;
 mod remote;
 pub use remote::RemoteFiles;
 
+#[cfg(all(target_os = "linux", feature = "x11"))]
+pub use super::x11::Prepared as X11;
+
+/// Prepare the explicit local X11 clipboard edge under its original physical
+/// application/backend owner. This never probes Wayland or opens OS consent.
+/// Each admitted session then creates its own in-memory `X11::provider` lease.
+#[cfg(all(target_os = "linux", feature = "x11"))]
+pub async fn prepare_x11(policy: Policy, original: super::NativeLifetime) -> Result<X11, Error> {
+    super::x11::prepare(policy, original).await
+}
+
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -29,6 +40,18 @@ pub struct Policy {
     pub selected_file_descriptors: usize,
     /// Concurrent native body jobs, independent of transport stream credits.
     pub native_body_operations: usize,
+    pub x11: X11Policy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct X11Policy {
+    pub selection_transfers: usize,
+    pub selection_chunk_bytes: u32,
+    pub selection_transfer_timeout_ms: u64,
+    pub timestamp_timeout_ms: u64,
+    pub legacy_owner_interval_ms: u64,
+    pub event_batch: usize,
 }
 impl Policy {
     /// The standalone common profile is versioned with this application. No
@@ -41,7 +64,7 @@ impl Policy {
     }
     pub fn validate(&self) -> Result<(), Error> {
         self.limits.validate()?;
-        if self.schema_version != 1
+        if self.schema_version != 2
             || !(5..=1000).contains(&self.watch_interval_ms)
             || !(100..=30_000).contains(&self.operation_timeout_ms)
             || !(1..=16 * rds_core::clipboard::TEXT_BYTES).contains(&self.native_uri_bytes)
@@ -49,6 +72,12 @@ impl Policy {
             || !(1..=64).contains(&self.pending_operations)
             || !(1..=4096).contains(&self.selected_file_descriptors)
             || !(1..=64).contains(&self.native_body_operations)
+            || !(1..=64).contains(&self.x11.selection_transfers)
+            || !(1024..=1024 * 1024).contains(&self.x11.selection_chunk_bytes)
+            || !(100..=30_000).contains(&self.x11.selection_transfer_timeout_ms)
+            || !(100..=30_000).contains(&self.x11.timestamp_timeout_ms)
+            || !(5..=1000).contains(&self.x11.legacy_owner_interval_ms)
+            || !(1..=4096).contains(&self.x11.event_batch)
         {
             return Err(Error::Settings);
         }
@@ -344,12 +373,29 @@ mod tests {
                 "missing limit {field}"
             );
         }
+        for field in value["x11"].as_object().unwrap().keys() {
+            let mut absent = value.clone();
+            absent["x11"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Policy>(absent).is_err(),
+                "missing X11 setting {field}"
+            );
+        }
+        let mut unknown = value.clone();
+        unknown["x11"]["unknown"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<Policy>(unknown).is_err());
         let mut selected = policy.clone();
         selected.selected_file_descriptors = 1;
         selected.native_body_operations = 3;
         selected.validate().unwrap();
         assert_eq!(selected.limits, policy.limits);
-        selected.schema_version = 2;
+        selected.schema_version = 3;
+        assert!(matches!(selected.validate(), Err(Error::Settings)));
+        selected = policy.clone();
+        selected.x11.event_batch = 0;
+        assert!(matches!(selected.validate(), Err(Error::Settings)));
+        selected = policy.clone();
+        selected.x11.selection_chunk_bytes = 0;
         assert!(matches!(selected.validate(), Err(Error::Settings)));
     }
 

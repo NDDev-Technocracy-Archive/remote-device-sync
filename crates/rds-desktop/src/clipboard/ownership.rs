@@ -65,7 +65,7 @@ impl Owner {
     }
     #[cfg(any(
         test,
-        all(target_os = "linux", feature = "portal"),
+        all(target_os = "linux", feature = "x11"),
         all(target_os = "macos", feature = "host")
     ))]
     pub(crate) async fn closed_signal(&self) {
