@@ -7,6 +7,8 @@ use bytes::Bytes;
 use rds_core::clipboard::{Capabilities, FileSelection, Format, Limits, Representation};
 
 use super::image::Png;
+mod destination;
+pub use destination::Destination;
 
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
@@ -131,7 +133,7 @@ pub trait Files: Send + Sync {
     fn selection(&self) -> &FileSelection;
     fn limits(&self) -> &Limits;
     fn open(&self, file: [u8; 16]) -> Operation<'_, FileRead>;
-    fn write(&self, file: [u8; 16], destination: std::fs::File) -> Operation<'_, FileReceipt> {
+    fn write(&self, file: [u8; 16], destination: Destination) -> Operation<'_, FileReceipt> {
         Box::pin(write_file(self, file, destination))
     }
 }
@@ -191,7 +193,7 @@ impl Files for rds_sync::selection::Selection {
 async fn write_file<F: Files + ?Sized>(
     source: &F,
     file: [u8; 16],
-    destination: std::fs::File,
+    destination: Destination,
 ) -> Result<FileReceipt, Error> {
     let limits = source.limits();
     source.selection().validate(limits)?;
@@ -202,53 +204,54 @@ async fn write_file<F: Files + ?Sized>(
         .find(|entry| entry.id == file)
         .ok_or(rds_sync::selection::Error::Unknown)?
         .bytes;
-    let destination = tokio::task::spawn_blocking(move || {
-        let metadata = destination.metadata()?;
-        if !metadata.is_file() || metadata.len() != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "file promise requires a new empty regular destination",
-            ));
-        }
-        Ok(destination)
-    })
-    .await
-    .map_err(|_| Error::Unavailable)??;
+    destination
+        .run(|file| {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "file promise requires a new empty regular destination",
+                ));
+            }
+            Ok(())
+        })
+        .await?;
     let mut read = source.open(file).await?;
     if read.bytes != expected {
         return Err(rds_sync::selection::Error::Changed.into());
     }
-    let mut writer = tokio::fs::File::from_std(destination);
     let mut bytes = vec![0; limits.chunk_bytes as usize];
     let mut total = 0u64;
     let mut hash = blake3::Hasher::new();
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let result = async {
-        while total < expected {
-            let maximum = (expected - total).min(bytes.len() as u64) as usize;
-            let length = read.reader.read(&mut bytes[..maximum]).await?;
-            if length == 0 {
-                return Err(rds_sync::selection::Error::Changed.into());
-            }
-            writer.write_all(&bytes[..length]).await?;
-            hash.update(&bytes[..length]);
-            total += length as u64;
-        }
-        if read.reader.read(&mut [0u8; 1]).await? != 0 {
+    use std::os::unix::fs::FileExt;
+    use tokio::io::AsyncReadExt;
+    while total < expected {
+        let maximum = (expected - total).min(bytes.len() as u64) as usize;
+        let length = read.reader.read(&mut bytes[..maximum]).await?;
+        if length == 0 {
             return Err(rds_sync::selection::Error::Changed.into());
         }
-        read.complete.await?;
-        writer.flush().await?;
-        Ok(FileReceipt {
-            bytes: total,
-            digest: *hash.finalize().as_bytes(),
-        })
+        hash.update(&bytes[..length]);
+        let offset = total;
+        // Move the one chunk into its native write and get it back. A
+        // canceled waiter cannot release the FD or original purpose while
+        // that syscall still runs, and no Tokio file buffer copies it.
+        bytes = destination
+            .run(move |file| {
+                file.write_all_at(&bytes[..length], offset)?;
+                Ok(bytes)
+            })
+            .await?;
+        total += length as u64;
     }
-    .await;
-    // Drain queued native writes on both success and failure. The
-    // caller still owns/discards the unpublished destination on error.
-    drop(writer.into_std().await);
-    result
+    if read.reader.read(&mut [0u8; 1]).await? != 0 {
+        return Err(rds_sync::selection::Error::Changed.into());
+    }
+    read.complete.await?;
+    Ok(FileReceipt {
+        bytes: total,
+        digest: *hash.finalize().as_bytes(),
+    })
 }
 
 #[cfg(test)]
@@ -278,7 +281,10 @@ mod tests {
             .write(true)
             .open(&destination)
             .unwrap();
-        let receipt = selected.write(file, output).await.unwrap();
+        let receipt = selected
+            .write(file, Destination::new(output, Arc::new(())))
+            .await
+            .unwrap();
         assert_eq!(receipt.bytes, value.len() as u64);
         assert_eq!(receipt.digest, *blake3::hash(&value).as_bytes());
         assert_eq!(std::fs::read(&destination).unwrap(), value);
@@ -286,7 +292,12 @@ mod tests {
             .write(true)
             .open(&destination)
             .unwrap();
-        assert!(selected.write(file, existing).await.is_err());
+        assert!(
+            selected
+                .write(file, Destination::new(existing, Arc::new(())))
+                .await
+                .is_err()
+        );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
         drop(selected);
         std::fs::remove_dir_all(root).unwrap();

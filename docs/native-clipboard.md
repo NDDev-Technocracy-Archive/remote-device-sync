@@ -46,6 +46,12 @@ URI-based adapters must explicitly own and bound any staging. The current local
 file source writes one destination and drains queued native writes before its
 completion. Closing/switching/revoking a session must retain its native owners
 until in-flight operations drain; no network receipt substitutes for that.
+The native `Destination` binds its opened file to the original transfer/paste
+authority before filesystem work. Each positional write moves the one bounded
+chunk into a blocking owner, and returns that same buffer after completion.
+Canceling its waiter retains the descriptor and original caller through the
+running syscall. No queued Tokio file write or second write-buffer copy can
+outlive that purpose; the caller still owns unpublished-destination cleanup.
 
 Native adapters, negotiated transport/manager channels, gesture ownership and
 actual text/image/file pastes across the OS matrix remain the next acceptance
