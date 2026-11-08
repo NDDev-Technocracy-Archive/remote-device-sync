@@ -298,7 +298,7 @@ fn run(
                 if total.is_none_or(|total| total > MAX_PIXELS_BYTES) {
                     data.slot.fail();
                 }
-                data.slot.changed.notify_all();
+                data.slot.notify();
             })
             .process(|stream, data| {
                 let Some(mut buffer) = stream.dequeue_buffer() else {
@@ -487,6 +487,6 @@ mod exit_tests {
         });
         assert!(result.is_err());
         assert!(slots[0].extent().is_err());
-        assert!(slots[0].image(Duration::ZERO).is_err());
+        assert!(slots[0].current().is_err());
     }
 }

@@ -557,6 +557,11 @@ The X11 producer synchronously borrows a completed MIT-SHM mapping through
 conversion/encode, avoiding an owned native-resolution BGRA staging copy.
 Owned capture consumers still receive independent snapshots; the next X11
 capture cannot reuse the segment until the synchronous callback returns.
+Native damage, input refresh, picture repair and cancellation wake the original
+producer's sleeping owner. X11 polls its capture socket and one retained event
+FD; consented PipeWire and ScreenCaptureKit slots notify weak subscribers.
+Frame cadence remains a separate deadline. See
+[native capture wake ownership](native-capture-wakeup.md).
 
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
 hw encoders behind a trait) → per-frame uni stream with a `FrameHeader`

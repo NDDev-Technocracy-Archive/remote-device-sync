@@ -243,7 +243,7 @@ define_class!(
                         if let Ok(mut current) = state.slot.state.lock() {
                             current.image = None;
                         }
-                        state.slot.changed.notify_all();
+                        state.slot.notify();
                     }
                     Ok(Update::Unchanged) => {}
                     Err(_) => state.slot.fail(),

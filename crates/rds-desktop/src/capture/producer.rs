@@ -80,26 +80,43 @@ impl Producer {
         clock: &SessionClock,
     ) -> Result<Produced, DesktopError> {
         let slot = &self.slot;
+        slot.observe(&controls.wake)?;
         let idle_end = Instant::now() + Duration::from_secs(1);
-        let mut image = slot.image(Duration::from_secs(1))?;
-        let resumed = image.generation == self.generation;
-        while image.generation == self.generation
-            && !controls.idr.load(Ordering::Relaxed)
-            && !controls.input_refresh_active(clock.now_ms())
-            && Instant::now() < idle_end
-        {
-            std::thread::sleep(Duration::from_millis(10));
-            image = slot.image(Duration::from_millis(10))?;
-        }
+        let mut resumed = None;
+        let image = loop {
+            let generation = controls.wake.snapshot().ok_or_else(stopped)?;
+            let current = slot.current()?;
+            if let Some(image) = current {
+                resumed.get_or_insert(image.generation == self.generation);
+                if image.generation != self.generation
+                    || controls.idr.load(Ordering::Acquire)
+                    || controls.input_refresh_active(clock.now_ms())
+                    || Instant::now() >= idle_end
+                {
+                    break image;
+                }
+            } else if Instant::now() >= idle_end {
+                return Err(stopped());
+            }
+            if !controls.wake.wait(generation, idle_end) {
+                return Err(stopped());
+            }
+        };
+        let resumed = resumed == Some(true);
+        drop(image);
         let interval = self.interval.max(self.work);
         if crate::session::advance_cadence(&mut self.due, interval, Instant::now(), resumed) {
             controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
         }
-        if let Some(wait) = self.due.checked_duration_since(Instant::now()) {
-            std::thread::sleep(wait);
+        if !controls.wake.until(self.due) {
+            return Err(stopped());
         }
         // Refresh after cadence waiting; never encode an earlier retained image.
-        image = slot.image(Duration::from_secs(1))?;
+        let image = await_image(
+            slot,
+            &controls.wake,
+            Instant::now() + Duration::from_secs(1),
+        )?;
         let frame = &image.frame;
         if (frame.width, frame.height) != self.extent {
             return Err(DesktopError::Capture(
@@ -166,9 +183,31 @@ impl FrameProducer for Producer {
         match self.next(seq, controls, clock) {
             Ok(frame) => Some(frame),
             Err(error) => {
-                tracing::warn!(%error, "native capture/encode ended");
+                if controls.wake.snapshot().is_some() {
+                    tracing::warn!(%error, "native capture/encode ended");
+                }
                 None
             }
+        }
+    }
+}
+
+fn stopped() -> DesktopError {
+    DesktopError::Capture("native producer stopped or has no image".into())
+}
+
+fn await_image(
+    slot: &Slot,
+    wake: &crate::producer_signal::Wake,
+    deadline: Instant,
+) -> Result<Arc<crate::capture::latest::Image>, DesktopError> {
+    loop {
+        let generation = wake.snapshot().ok_or_else(stopped)?;
+        if let Some(image) = slot.current()? {
+            return Ok(image);
+        }
+        if Instant::now() >= deadline || !wake.wait(generation, deadline) {
+            return Err(stopped());
         }
     }
 }
@@ -178,6 +217,46 @@ mod tests {
     use super::*;
     use crate::{Decoder, EncodedFrame, H264Decoder, RawFrame};
     use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn closing_a_static_producer_interrupts_idle_capture_and_releases_its_reservation() {
+        let slot = Slot::new(0, Some((64, 64)));
+        slot.publish(RawFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: bytes::Bytes::from(vec![255u8; 64 * 64 * 4]),
+        });
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = budget.clone().try_acquire_owned().unwrap();
+        let mut producer = Producer::new(
+            permit,
+            slot,
+            Duration::from_millis(33),
+            Some(0),
+            Some((64, 64)),
+        )
+        .unwrap();
+        let controls = ProducerControls::new(4_000_000);
+        let clock = SessionClock::default();
+        assert!(producer.produce(0, &controls, &clock).is_some());
+        let stop = crate::producer_signal::Stop(controls.wake.clone());
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let waiting = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            assert!(producer.produce(1, &controls, &clock).is_none());
+        });
+        ready.await.unwrap();
+        drop(stop);
+        tokio::time::timeout(Duration::from_millis(250), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            budget.try_acquire().is_ok(),
+            "ended native producer retained its reservation"
+        );
+    }
 
     #[test]
     fn the_first_encoded_frame_contains_the_final_inactive_native_update() {

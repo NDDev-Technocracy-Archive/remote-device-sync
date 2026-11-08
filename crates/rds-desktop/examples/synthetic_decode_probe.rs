@@ -2,22 +2,11 @@
 use rds_desktop::{
     Decoder, FrameProducer, H264Decoder, ProducerControls, SessionClock, SyntheticProducer,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64},
-};
 use std::time::Instant;
 
 fn main() -> Result<(), rds_desktop::DesktopError> {
     for bytes in [256, 1024] {
-        let controls = ProducerControls {
-            bitrate: Arc::new(AtomicU64::new(4_000_000)),
-            idr: Arc::new(AtomicBool::new(true)),
-            deadline_misses: Arc::new(AtomicU64::new(0)),
-            requested: Arc::new(AtomicU64::new(0)),
-            input_refresh_until_ms: Arc::new(AtomicU64::new(0)),
-            input_refresh_pending: Arc::new(AtomicBool::new(false)),
-        };
+        let controls = ProducerControls::new(4_000_000);
         // Cadence is accelerated for this codec-only probe; payload bytes,
         // sequence prefixes and keyframe flags come from the real fixture.
         let mut producer = SyntheticProducer::new(100_000, 640, 480, bytes).keyframe_every(60);

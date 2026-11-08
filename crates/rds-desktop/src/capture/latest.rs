@@ -1,7 +1,7 @@
 //! Newest owned native image, shared by consented platform captures.
 use crate::{DesktopError, RawFrame};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
 
 pub(crate) struct Image {
     pub frame: RawFrame,
@@ -21,7 +21,7 @@ pub(crate) struct State {
 pub(crate) struct Slot {
     pub index: u32,
     pub(crate) state: Mutex<State>,
-    pub(crate) changed: Condvar,
+    subscribers: Mutex<Vec<Weak<crate::producer_signal::Wake>>>,
 }
 
 impl Slot {
@@ -32,7 +32,7 @@ impl Slot {
                 extent,
                 ..Default::default()
             }),
-            changed: Condvar::new(),
+            subscribers: Mutex::new(Vec::new()),
         })
     }
 
@@ -56,7 +56,39 @@ impl Slot {
                 generation: state.generation,
             }));
         }
-        self.changed.notify_all();
+        self.notify();
+    }
+    /// Native source admission already bounds live producers. Dead weak
+    /// subscriptions are removed before a new producer can register.
+    pub(crate) fn observe(
+        &self,
+        wake: &Arc<crate::producer_signal::Wake>,
+    ) -> Result<(), DesktopError> {
+        let mut subscribers = self.subscribers.lock().map_err(|_| failure())?;
+        subscribers.retain(|item| item.strong_count() > 0);
+        let weak = Arc::downgrade(wake);
+        if !subscribers.iter().any(|item| item.ptr_eq(&weak)) {
+            subscribers.push(weak);
+        }
+        Ok(())
+    }
+    pub(crate) fn notify(&self) {
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            subscribers.retain(|weak| match weak.upgrade() {
+                Some(wake) => {
+                    wake.notify();
+                    true
+                }
+                None => false,
+            });
+        }
+    }
+    pub(crate) fn current(&self) -> Result<Option<Arc<Image>>, DesktopError> {
+        let state = self.state.lock().map_err(|_| failure())?;
+        if state.failed {
+            return Err(failure());
+        }
+        Ok(state.image.clone())
     }
     pub fn extent(&self) -> Result<Option<(u32, u32)>, DesktopError> {
         let state = self.state.lock().map_err(|_| failure())?;
@@ -66,31 +98,12 @@ impl Slot {
         Ok(state.extent)
     }
 
-    pub fn image(&self, timeout: Duration) -> Result<Arc<Image>, DesktopError> {
-        let deadline = Instant::now() + timeout;
-        let mut state = self.state.lock().map_err(|_| failure())?;
-        while state.image.is_none() && !state.failed {
-            let wait = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(failure)?;
-            state = self
-                .changed
-                .wait_timeout(state, wait)
-                .map_err(|_| failure())?
-                .0;
-        }
-        if state.failed {
-            return Err(failure());
-        }
-        state.image.clone().ok_or_else(failure)
-    }
-
     pub(crate) fn fail(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.failed = true;
             state.image = None;
         }
-        self.changed.notify_all();
+        self.notify();
     }
 }
 
@@ -129,6 +142,37 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn the_native_image_and_failure_wake_the_original_subscriber_without_retaining_it() {
+        let slot = Slot::new(0, Some((16, 16)));
+        let controls = crate::ProducerControls::new(1);
+        let token = controls.wake.snapshot().unwrap();
+        slot.observe(&controls.wake).unwrap();
+        let weak = Arc::downgrade(&controls.wake);
+        let released = Arc::new(AtomicUsize::new(0));
+        slot.publish(frame(255, &released));
+        let wake = controls.wake.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            tokio::task::spawn_blocking(move || {
+                wake.wait(token, Instant::now() + std::time::Duration::from_secs(5))
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(slot.current().unwrap().unwrap().frame.data[0], 255);
+        let token = controls.wake.snapshot().unwrap();
+        slot.fail();
+        assert!(slot.current().is_err());
+        assert_ne!(controls.wake.snapshot(), Some(token));
+        drop(controls);
+        assert!(weak.upgrade().is_none());
+        slot.notify();
+        assert!(slot.subscribers.lock().unwrap().is_empty());
+        assert_eq!(released.load(Ordering::Acquire), 1);
+    }
+
     #[test]
     fn an_inactive_monitor_retains_only_its_final_update_for_a_late_reader() {
         let slot = Slot::new(10, Some((16, 16)));
@@ -138,7 +182,7 @@ mod tests {
         slot.publish(frame(255, &released));
         assert_eq!(released.load(Ordering::Relaxed), 1);
 
-        let image = slot.image(Duration::ZERO).unwrap();
+        let image = slot.current().unwrap().unwrap();
         assert_eq!(slot.index, 10);
         assert_eq!(slot.extent().unwrap(), Some((16, 16)));
         assert_eq!(&image.frame.data[..4], &[255; 4]);
@@ -160,6 +204,6 @@ mod tests {
         slot.publish(frame(255, &released));
         assert_eq!(released.load(Ordering::Relaxed), 2);
         assert!(slot.extent().is_err());
-        assert!(slot.image(Duration::ZERO).is_err());
+        assert!(slot.current().is_err());
     }
 }

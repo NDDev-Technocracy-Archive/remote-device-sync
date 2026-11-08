@@ -184,7 +184,7 @@ impl DeliveryPressure {
 #[derive(Clone)]
 struct FrameDelivery {
     repair: Arc<crate::media_repair::MediaRepair>,
-    idr: Arc<AtomicBool>,
+    idr: Arc<crate::ProducerSignal>,
     feedback: Arc<DeliveryFeedback>,
     latest_key_seq: Arc<AtomicU64>,
     payload_receipts: Option<crate::receipts::Receipts>,
@@ -197,7 +197,7 @@ enum FrameReceipt {
     Failed,
 }
 
-fn request_frame_repair(latest_key_seq: &AtomicU64, idr: &AtomicBool, failed_seq: u64) {
+fn request_frame_repair(latest_key_seq: &AtomicU64, idr: &crate::ProducerSignal, failed_seq: u64) {
     let key = latest_key_seq.load(Ordering::Acquire);
     if key == u64::MAX || key <= failed_seq {
         idr.store(true, Ordering::Release);
@@ -273,27 +273,31 @@ impl std::ops::DerefMut for AdmittedFrame {
 /// controller writes `bitrate`, the control stream flips `idr` and files
 /// `requested` bitrate targets (0 = none pending) for the controller to
 /// drain, and the producer reports `deadline_misses` it observed.
+#[derive(Clone)]
 pub struct ProducerControls {
     pub bitrate: Arc<AtomicU64>,
-    pub idr: Arc<AtomicBool>,
+    pub idr: Arc<crate::ProducerSignal>,
     pub deadline_misses: Arc<AtomicU64>,
     pub requested: Arc<AtomicU64>,
     /// Session-clock deadline for recent-input capture; does not request IDRs.
     pub input_refresh_until_ms: Arc<AtomicU64>,
     /// Accepted input not yet observed by the admitted capture producer.
-    pub input_refresh_pending: Arc<AtomicBool>,
+    pub input_refresh_pending: Arc<crate::ProducerSignal>,
+    pub(crate) wake: Arc<crate::producer_signal::Wake>,
 }
 
 impl ProducerControls {
     /// Initial steering state for a standalone or serving frame producer.
     pub fn new(initial_bps: u64) -> Self {
+        let wake = Arc::new(crate::producer_signal::Wake::default());
         Self {
             bitrate: Arc::new(AtomicU64::new(initial_bps)),
-            idr: Arc::new(AtomicBool::new(true)),
+            idr: crate::ProducerSignal::new(true, wake.clone()),
             deadline_misses: Arc::new(AtomicU64::new(0)),
             requested: Arc::new(AtomicU64::new(0)),
             input_refresh_until_ms: Arc::new(AtomicU64::new(0)),
-            input_refresh_pending: Arc::new(AtomicBool::new(false)),
+            input_refresh_pending: crate::ProducerSignal::new(false, wake.clone()),
+            wake,
         }
     }
 
@@ -687,6 +691,7 @@ pub async fn serve_desktop_with(
         .unwrap_or(8_000_000)
         .min(u64::from(u32::MAX));
     let controls = ProducerControls::new(4_000_000_u64.min(ceiling));
+    let capture_stop = crate::producer_signal::Stop(controls.wake.clone());
     let native = crate::clipboard::ownership::Owner::new();
     if let Some(context) = config.native_lifetime.clone()
         && !native.retain(context)
@@ -738,12 +743,7 @@ pub async fn serve_desktop_with(
     );
     {
         let clock = clock.clone();
-        let bitrate = Arc::clone(&controls.bitrate);
-        let idr = Arc::clone(&controls.idr);
-        let misses = Arc::clone(&controls.deadline_misses);
-        let requested = Arc::clone(&controls.requested);
-        let input_refresh_until_ms = Arc::clone(&controls.input_refresh_until_ms);
-        let input_refresh_pending = Arc::clone(&controls.input_refresh_pending);
+        let producer_controls = controls.clone();
         let mut producer = config.producer;
         let native_work = native.begin().ok_or_else(native_closed)?;
         let backend = config.source.clone();
@@ -758,17 +758,6 @@ pub async fn serve_desktop_with(
             if native_work.closed() {
                 return;
             }
-            let producer_controls = ProducerControls {
-                bitrate,
-                idr,
-                deadline_misses: misses,
-                // Share the session's target slot — a producer observing
-                // `requested` must see what the control arm filed, not a
-                // private always-empty copy.
-                requested,
-                input_refresh_until_ms,
-                input_refresh_pending,
-            };
             let mut source = match producer.take() {
                 Some(p) => p,
                 None => match backend {
@@ -1615,6 +1604,7 @@ pub async fn serve_desktop_with(
         },
     };
     native.close();
+    drop(capture_stop);
     let _ = send.0.reset(0u32.into());
     // Normal exit joins the asynchronous siblings. Cancellation during this
     // shutdown still drops the JoinSet and aborts its remaining children.
@@ -1844,6 +1834,10 @@ mod x11 {
         output_height: Option<u32>,
         last_work: Duration,
         skipped: bool,
+        polling: Option<(
+            std::sync::Weak<crate::producer_signal::Wake>,
+            Arc<crate::producer_signal::polling::Pulse>,
+        )>,
     }
 
     impl X11Producer {
@@ -1898,36 +1892,52 @@ mod x11 {
                 output_height,
                 last_work: Duration::ZERO,
                 skipped: false,
+                polling: None,
             })
         }
     }
 
     impl X11Producer {
-        /// Damage-aware pause: while the screen is still, capture and
-        /// encode cost nothing. Polls every `IDLE_POLL` for a damage
-        /// event, bounded by `IDLE_MAX` so the stream still emits a
-        /// refresh frame about once a second and session teardown
-        /// (the caller's `is_closed` check) is never deferred past it.
-        /// `idr` wakes the loop early: a viewer joining or recovering
-        /// from loss asks for a keyframe and must not wait out the cap.
-        fn idle_wait(&mut self, controls: &ProducerControls, clock: &SessionClock) -> bool {
-            const IDLE_POLL: Duration = Duration::from_millis(10);
-            const IDLE_MAX: Duration = Duration::from_secs(1);
-            let input_active = || controls.input_refresh_active(clock.now_ms());
-            if input_active() || self.capturer.changed() || controls.idr.load(Ordering::Relaxed) {
-                return false;
+        /// Damage and steering wake the same original native poll owner.
+        /// Retain the existing one-second unchanged-picture refresh deadline.
+        fn idle_wait(
+            &mut self,
+            controls: &ProducerControls,
+            clock: &SessionClock,
+        ) -> Result<bool, DesktopError> {
+            use std::os::fd::AsFd;
+            if self
+                .polling
+                .as_ref()
+                .is_none_or(|(owner, _)| !owner.ptr_eq(&Arc::downgrade(&controls.wake)))
+            {
+                self.polling = Some((Arc::downgrade(&controls.wake), controls.wake.polling()?));
             }
-            let deadline = Instant::now() + IDLE_MAX;
-            loop {
-                if self.capturer.wait_for_change(IDLE_POLL)
-                    || controls.idr.load(Ordering::Relaxed)
-                    || input_active()
-                    || Instant::now() >= deadline
-                {
+            let pulse = self
+                .polling
+                .as_ref()
+                .map(|(_, pulse)| pulse.clone())
+                .ok_or_else(|| DesktopError::Capture("native poll wake missing".into()))?;
+            pulse.drain()?;
+            let input_active = || controls.input_refresh_active(clock.now_ms());
+            if controls.wake.snapshot().is_none() {
+                return Err(DesktopError::Capture("native producer stopped".into()));
+            }
+            if input_active() || self.capturer.changed() || controls.idr.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while let Some(wait) = deadline.checked_duration_since(Instant::now()) {
+                let changed = self.capturer.wait_for_change(wait, pulse.as_fd())?;
+                pulse.drain()?;
+                if controls.wake.snapshot().is_none() {
+                    return Err(DesktopError::Capture("native producer stopped".into()));
+                }
+                if changed || controls.idr.load(Ordering::Acquire) || input_active() {
                     break;
                 }
             }
-            true
+            Ok(true)
         }
     }
 
@@ -1948,7 +1958,15 @@ mod x11 {
             controls: &ProducerControls,
             clock: &SessionClock,
         ) -> Option<Produced> {
-            let resumed = self.idle_wait(controls, clock);
+            let resumed = match self.idle_wait(controls, clock) {
+                Ok(resumed) => resumed,
+                Err(error) => {
+                    if controls.wake.snapshot().is_some() {
+                        tracing::warn!(%error,"native capture wait ended");
+                    }
+                    return None;
+                }
+            };
             // Capture/conversion has a fixed CPU cost that lowering encoded
             // bitrate cannot remove. Honor max_fps while using the achievable
             // cadence, rather than collapsing bitrate for every slow frame.
@@ -1956,8 +1974,8 @@ mod x11 {
             if advance_cadence(&mut self.next_due, interval, Instant::now(), resumed) {
                 controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
             }
-            if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
-                std::thread::sleep(sleep);
+            if !controls.wake.until(self.next_due) {
+                return None;
             }
             let capture_ts_ms = clock.now_ms();
             self.skipped = false;
@@ -2141,7 +2159,7 @@ async fn send_frame(
 fn drain_frame_receipts(
     receipts: &mut JoinSet<(u64, FrameReceipt)>,
     chain: &mut FrameChain,
-    idr: &AtomicBool,
+    idr: &crate::ProducerSignal,
     acknowledged: &mut u64,
     obsolete: &mut u64,
     failed: &mut u64,
@@ -2975,7 +2993,7 @@ mod tests {
                 let proofs = crate::receipts::Receipts::new();
                 let delivery = FrameDelivery {
                     repair: crate::media_repair::MediaRepair::new().0,
-                    idr: Arc::new(AtomicBool::new(false)),
+                    idr: crate::ProducerSignal::new(false, Arc::default()),
                     feedback: Arc::new(DeliveryFeedback::default()),
                     latest_key_seq: Arc::new(AtomicU64::new(u64::MAX)),
                     payload_receipts: Some(proofs.clone()),
@@ -3104,7 +3122,7 @@ mod tests {
                 let (a, b) = (a.unwrap(), b.unwrap());
                 let admission = Arc::new(AtomicU64::new(1));
                 let feedback = Arc::new(DeliveryFeedback::default());
-                let idr = Arc::new(AtomicBool::new(false));
+                let idr = crate::ProducerSignal::new(false, Arc::default());
                 let produce = AdmittedFrame {
                     produced: Produced {
                         header: FrameHeader {
@@ -3205,7 +3223,7 @@ mod tests {
         // The receipt worker requested repair; the producer consumed that flag
         // and the writer already admitted its replacement. The older failed
         // receipt may join afterward while that newer key is travelling.
-        let idr = AtomicBool::new(false);
+        let idr = crate::ProducerSignal::new(false, Arc::default());
         request_frame_repair(&AtomicU64::new(20), &idr, 10);
         chain.failed_receipt(10);
         assert!(
@@ -3670,7 +3688,7 @@ mod tests {
         );
         let (mut acknowledged, mut obsolete, mut failed) = (0, 0, 0);
         let mut chain = FrameChain::default();
-        let idr = AtomicBool::new(false);
+        let idr = crate::ProducerSignal::new(false, Arc::default());
         drain_frame_receipts(
             &mut receipts,
             &mut chain,
@@ -3741,3 +3759,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux", feature = "x11"))]
+mod native_idle_qa;
