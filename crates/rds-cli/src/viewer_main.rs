@@ -287,7 +287,8 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
         // An empty launch opens the connection picker; the local manager remains
         // the only endpoint identity and connection owner.
         let config = WorkspaceConfig {
-            schema_version: 1,
+            schema_version: 2,
+            appearance: Default::default(),
             presentation: if cli.spaces {
                 Presentation::Spaces
             } else {

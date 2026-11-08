@@ -1448,7 +1448,10 @@ impl ApplicationHandler<()> for App {
                 }
                 window.request_redraw();
                 if let Some(deck) = &mut self.workspace {
-                    deck.chrome = Some(super::workspace::chrome::Chrome::new(&window));
+                    deck.chrome = Some(super::workspace::chrome::Chrome::new(
+                        &window,
+                        deck.appearance,
+                    ));
                 }
                 self.shortcuts = super::platform::KeyboardShortcuts::new(
                     window.clone(),

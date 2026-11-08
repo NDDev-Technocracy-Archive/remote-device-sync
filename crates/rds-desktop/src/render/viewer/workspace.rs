@@ -2,7 +2,7 @@
 mod clipboard;
 use super::*;
 use crate::render::workspace::chrome::{Action, Chrome};
-use crate::render::workspace::{DeviceView, Tab, TabId, TabSpec, WorkspaceModel};
+use crate::render::workspace::{Appearance, DeviceView, Tab, TabId, TabSpec, WorkspaceModel};
 use std::collections::BTreeMap;
 
 pub enum WorkspaceEvent {
@@ -18,6 +18,7 @@ pub enum WorkspaceEvent {
     },
     Save {
         tabs: Vec<TabSpec>,
+        appearance: Appearance,
     },
 }
 
@@ -26,6 +27,7 @@ pub enum WorkspaceUpdate {
     Open(TabSpec),
     Message(String),
     CloseWindow,
+    Appearance(Appearance),
 }
 
 #[derive(Clone)]
@@ -51,6 +53,7 @@ impl WorkspaceHandle {
 }
 
 pub(super) struct Deck {
+    pub appearance: Appearance,
     pub model: WorkspaceModel,
     inactive: BTreeMap<TabId, SessionView>,
     pub active: Option<TabId>,
@@ -71,9 +74,11 @@ impl Deck {
         devices: Vec<DeviceView>,
         events: tokio::sync::mpsc::Sender<WorkspaceEvent>,
         actions: std::sync::mpsc::SyncSender<Action>,
+        appearance: Appearance,
     ) -> Self {
         let (_, updates) = std::sync::mpsc::sync_channel(1);
         Self {
+            appearance,
             model,
             active,
             devices,
@@ -123,6 +128,7 @@ impl Viewer {
         let (updates, receive_updates) = std::sync::mpsc::sync_channel(64);
         let (events, receive_events) = tokio::sync::mpsc::channel(32);
         viewer.app.workspace = Some(Deck {
+            appearance: Appearance::default(),
             model: WorkspaceModel::default(),
             inactive: BTreeMap::new(),
             active: None,
@@ -168,6 +174,15 @@ impl App {
                 break;
             };
             match update {
+                WorkspaceUpdate::Appearance(appearance) => {
+                    deck.appearance = appearance;
+                    if let Some(chrome) = &mut deck.chrome {
+                        chrome.appearance(appearance);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
                 WorkspaceUpdate::CloseWindow => {
                     self.release(event_loop);
                     event_loop.exit();
@@ -507,8 +522,24 @@ impl App {
                         .iter()
                         .map(|tab| tab.spec.clone())
                         .collect();
-                    if deck.events.try_send(WorkspaceEvent::Save { tabs }).is_err() {
+                    if deck
+                        .events
+                        .try_send(WorkspaceEvent::Save {
+                            tabs,
+                            appearance: deck.appearance,
+                        })
+                        .is_err()
+                    {
                         deck.message = "Save queue is full; try again".into();
+                    }
+                }
+                Action::Appearance(appearance) => {
+                    deck.appearance = appearance;
+                    if let Some(chrome) = &mut deck.chrome {
+                        chrome.appearance(appearance);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
                     }
                 }
             }

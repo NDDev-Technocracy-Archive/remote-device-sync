@@ -249,7 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = task.await;
                     }
                 }
-                WorkspaceEvent::Save { tabs } => {
+                WorkspaceEvent::Save { tabs, .. } => {
                     let _ = workspace.update(WorkspaceUpdate::Message(format!(
                         "Preview: {} tabs; no files written",
                         tabs.len()

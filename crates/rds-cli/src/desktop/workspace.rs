@@ -3,7 +3,9 @@ use super::{Options, Resolution, native, read_grant};
 use anyhow::Context;
 use rds_client::local::Client;
 use rds_core::local::Reply;
-use rds_desktop::render::workspace::{DeviceView, TabId, TabSpec, VideoSize, WorkspaceModel};
+use rds_desktop::render::workspace::{
+    Appearance, DeviceView, TabId, TabSpec, VideoSize, WorkspaceModel,
+};
 use rds_desktop::render::{Viewer, WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
@@ -35,6 +37,8 @@ impl DeviceConfig {
 pub struct WorkspaceConfig {
     pub schema_version: u32,
     #[serde(default)]
+    pub appearance: Appearance,
+    #[serde(default)]
     pub presentation: Presentation,
     pub devices: Vec<DeviceConfig>,
     pub tabs: Vec<TabSpec>,
@@ -48,7 +52,14 @@ pub enum Presentation {
 }
 impl WorkspaceConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.schema_version == 1, "unsupported workspace version");
+        anyhow::ensure!(
+            matches!(self.schema_version, 1 | 2),
+            "unsupported workspace version"
+        );
+        anyhow::ensure!(
+            self.schema_version == 2 || self.appearance == Appearance::default(),
+            "appearance requires workspace version 2"
+        );
         anyhow::ensure!(
             self.devices.len() <= 32,
             "workspace has more than 32 devices"
@@ -185,6 +196,7 @@ pub async fn run(
         Presentation::Tabs => Viewer::workspace(config.tabs.clone(), devices)?,
         Presentation::Spaces => Viewer::spaces(config.tabs.clone(), devices)?,
     };
+    handle.update(WorkspaceUpdate::Appearance(config.appearance))?;
     let stop = CancellationToken::new();
     let actor_stop = stop.clone();
     let task = tokio::spawn(async move {
@@ -400,8 +412,10 @@ async fn actor(
                             Ok((device, inventory))
                         });
                     }
-                    WorkspaceEvent::Save { tabs } => {
+                    WorkspaceEvent::Save { tabs, appearance } => {
                         config.tabs = tabs;
+                        config.schema_version = 2;
+                        config.appearance = appearance;
                         for device in &mut config.devices {
                             if let Some(binding) = bindings.get(&device.key) { device.target = binding.target(&device.target); }
                         }

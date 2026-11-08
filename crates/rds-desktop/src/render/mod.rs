@@ -7,6 +7,8 @@ pub mod workspace;
 #[cfg(feature = "viewer")]
 mod clipboard;
 #[cfg(feature = "viewer")]
+mod design;
+#[cfg(feature = "viewer")]
 mod gpu;
 #[cfg(feature = "viewer")]
 mod input;

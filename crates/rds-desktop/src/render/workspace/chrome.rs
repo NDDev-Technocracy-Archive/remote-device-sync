@@ -1,7 +1,8 @@
 //! Local workspace widgets; they never send remote input or perform network I/O.
 mod pointer;
 
-use super::{TabId, TabProfile, TabSpec, VideoSize, WorkspaceModel};
+use super::{Appearance, TabId, TabProfile, TabSpec, VideoSize, WorkspaceModel};
+use crate::render::design;
 
 #[derive(Clone)]
 pub struct DeviceView {
@@ -44,6 +45,7 @@ pub(crate) enum Action {
     Configure(TabId, TabProfile),
     Reconnect(TabId),
     Save,
+    Appearance(Appearance),
 }
 
 pub(crate) struct UiFrame {
@@ -78,6 +80,7 @@ impl Drop for UiFrame {
 }
 
 pub(crate) struct Chrome {
+    appearance: Appearance,
     context: egui::Context,
     input: egui_winit::State,
     pub frame: UiFrame,
@@ -107,13 +110,10 @@ impl Chrome {
     pub fn connected(&mut self) {
         self.connect_open = false;
     }
-    pub fn new(window: &winit::window::Window) -> Self {
+    pub fn new(window: &winit::window::Window, appearance: Appearance) -> Self {
         let context = egui::Context::default();
-        context.set_visuals(egui::Visuals::dark());
-        context.style_mut_of(egui::Theme::Dark, |style| {
-            style.spacing.item_spacing = egui::vec2(10., 8.);
-            style.spacing.button_padding = egui::vec2(12., 7.);
-        });
+        design::fonts(&context);
+        design::apply(&context, appearance);
         let input = egui_winit::State::new(
             context.clone(),
             egui::ViewportId::ROOT,
@@ -123,6 +123,7 @@ impl Chrome {
             Some(4096),
         );
         Self {
+            appearance,
             context,
             input,
             frame: UiFrame::empty(window.scale_factor() as f32),
@@ -136,6 +137,13 @@ impl Chrome {
             collapsed: false,
             pointer: Default::default(),
             repaint_at: None,
+        }
+    }
+
+    pub fn appearance(&mut self, appearance: Appearance) {
+        if self.appearance != appearance {
+            design::apply(&self.context, appearance);
+            self.appearance = appearance;
         }
     }
 
@@ -245,6 +253,15 @@ impl Chrome {
                             tab.spec.profile.max_fps, if tab.spec.profile.interactive { "" } else { " · View only" }));
                     }
                     if ui.button("Save workspace").clicked() { self.actions.push(Action::Save); }
+                    ui.menu_button("Appearance", |ui| {
+                        for appearance in Appearance::all() {
+                            let label = appearance.id().replace('-', " ");
+                            if ui.selectable_label(self.appearance == appearance, label).clicked() {
+                                self.actions.push(Action::Appearance(appearance));
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui.button("About").clicked() { self.about = true; }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.weak("Ctrl+Tab to switch");
@@ -268,10 +285,10 @@ impl Chrome {
             if model.tabs().is_empty() {
                 egui::CentralPanel::default().show(root, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.add_space((ui.available_height() * 0.3).max(20.));
+                        ui.add_space((ui.available_height() * 0.3).max(design::metrics().space_6));
                         ui.heading("Your remote workspace");
                         ui.label("Open displays from one or several computers. Each display stays connected in its own tab.");
-                        ui.add_space(16.);
+                        ui.add_space(design::metrics().space_4);
                         if ui.button("Connect a computer").clicked() { self.connect_open = true; }
                     });
                 });
@@ -279,7 +296,7 @@ impl Chrome {
             if self.connect_open {
                 let mut open = true;
                 egui::Window::new("Connect a computer").open(&mut open)
-                    .default_width(520.).collapsible(false).show(&context, |ui| {
+                    .default_width(design::metrics().size_dock_max).collapsible(false).show(&context, |ui| {
                         ui.label("Device name, endpoint ID or connection ticket");
                         ui.add(egui::TextEdit::singleline(&mut self.target).char_limit(8192).desired_width(f32::INFINITY));
                         ui.collapsing("Connection authorization", |ui| {
@@ -291,7 +308,7 @@ impl Chrome {
                         }
                         if !self.message.is_empty() { ui.label(&self.message); }
                         ui.separator();
-                        egui::ScrollArea::vertical().max_height(300.).show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(design::metrics().size_featured_card_min).show(ui, |ui| {
                             for device in devices {
                                 ui.group(|ui| {
                                     ui.strong(&device.label);
@@ -324,11 +341,11 @@ impl Chrome {
                 let mut open = model.tab(id).is_some();
                 let mut apply = false;
                 egui::Window::new("Display settings").open(&mut open)
-                    .default_width(360.).collapsible(false).show(&context, |ui| {
+                    .default_width(design::metrics().size_featured_card_min).collapsible(false).show(&context, |ui| {
                         if let Some(tab) = model.tab(id) {
                             ui.strong(format!("{} · Display {}", tab.spec.label, tab.spec.display));
                         }
-                        ui.add_space(8.);
+                        ui.add_space(design::metrics().space_2);
                         egui::ComboBox::from_label("Resolution").selected_text(video_label(profile.video_size))
                             .show_ui(ui, |ui| {
                                 for size in [VideoSize::Hd, VideoSize::FullHd, VideoSize::Native] {
@@ -349,13 +366,13 @@ impl Chrome {
                 if apply { self.actions.push(Action::Configure(id, profile)); }
             }
             if self.about {
-                egui::Window::new("About RDS").open(&mut self.about).default_width(540.).show(&context, |ui| {
-                    ui.heading("RDS remote workspace");
-                    ui.label("Multiple computers and displays, through your local RDS agent.");
+                egui::Window::new("About NDDev Remote").open(&mut self.about).default_width(design::metrics().size_dock_max).show(&context, |ui| {
+                    ui.heading("NDDev Remote");
+                    ui.label("Your computers and displays in one workspace.");
                     ui.label(concat!("Version ", env!("CARGO_PKG_VERSION")));
                     ui.separator();
                     ui.label("Embedded font copyright and license notices");
-                    egui::ScrollArea::vertical().max_height(340.).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(design::metrics().size_featured_card_min).show(ui, |ui| {
                         for (name, text) in FONT_NOTICES {
                             ui.collapsing(*name, |ui| { ui.label(*text); });
                         }
@@ -383,14 +400,23 @@ fn restore_button(context: &egui::Context) -> egui::Response {
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_TOP, egui::Vec2::ZERO)
         .movable(false)
-        .default_size([36., 26.])
+        .default_size([
+            design::metrics().size_control_md,
+            design::metrics().size_control_sm,
+        ])
         .fade_in(false)
         .show(context, |ui| panel_arrow(ui, true))
         .inner
 }
 
 fn panel_arrow(ui: &mut egui::Ui, restore: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(36., 26.), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(
+            design::metrics().size_control_md,
+            design::metrics().size_control_sm,
+        ),
+        egui::Sense::click(),
+    );
     let label = if restore {
         "Show panels"
     } else {
@@ -409,16 +435,34 @@ fn panel_arrow(ui: &mut egui::Ui, restore: bool) -> egui::Response {
     let direction = if restore { 1. } else { -1. };
     ui.painter().add(egui::Shape::line(
         vec![
-            center + egui::vec2(-5., -2.5 * direction),
-            center + egui::vec2(0., 2.5 * direction),
-            center + egui::vec2(5., -2.5 * direction),
+            center
+                + egui::vec2(
+                    -design::metrics().mark_dot,
+                    -design::metrics().mark_dot / 2. * direction,
+                ),
+            center + egui::vec2(0., design::metrics().mark_dot / 2. * direction),
+            center
+                + egui::vec2(
+                    design::metrics().mark_dot,
+                    -design::metrics().mark_dot / 2. * direction,
+                ),
         ],
-        egui::Stroke::new(1.5, visuals.fg_stroke.color),
+        egui::Stroke::new(design::metrics().mark_stroke, visuals.fg_stroke.color),
     ));
     response.on_hover_text(format!("{label} (Ctrl+Shift+H)"))
 }
 
 const FONT_NOTICES: &[(&str, &str)] = &[
+    (
+        "IBM Plex Sans and Arabic",
+        include_str!(
+            "../../../../../vendor/nddev-opennetwork-design-tokens/fonts/OFL-IBM-Plex.txt"
+        ),
+    ),
+    (
+        "OpenNetwork design system",
+        include_str!("../../../../../vendor/nddev-opennetwork-design-tokens/NOTICE"),
+    ),
     (
         "Ubuntu Light",
         include_str!("../../../assets/font-licenses/UFL.txt"),
@@ -469,7 +513,13 @@ mod tests {
                 let mut output = context.run_ui(input, |root| {
                     let response = restore_button(&context);
                     assert_eq!(root.available_rect_before_wrap(), bounds);
-                    assert_eq!(response.rect.size(), egui::vec2(36., 26.));
+                    assert_eq!(
+                        response.rect.size(),
+                        egui::vec2(
+                            design::metrics().size_control_md,
+                            design::metrics().size_control_sm
+                        )
+                    );
                     assert!((response.rect.center().x - bounds.center().x).abs() <= 1.);
                     assert_eq!(response.rect.top(), bounds.top());
                     let content = bounds * scale;

@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 
 import release
+import design_system
 
 REPOSITORY = 'NDDev-Technocracy-OpenNetwork/nddev-remote'
 BINARIES = {'rds', 'rds-agent', 'nddev-remote'}
@@ -59,6 +60,8 @@ def verify_runtime(directory, target, version, commit, channel, runtime_run):
     checksum(directory, 'SHA256SUMS', name)
     require((directory / 'build-info.json').stat().st_size <= 128 * 1024, 'oversized desktop metadata')
     info = json.loads((directory / 'build-info.json').read_text())
+    require(info.get('design_system') == design_system.verify(Path.cwd()),
+            'desktop design-system pin differs from the selected source')
     for key, value in dict(schema_version=1, source=commit, version=version, target=target,
                            features=FEATURES[target]).items():
         require(info.get(key) == value, 'desktop build identity mismatch: ' + key)

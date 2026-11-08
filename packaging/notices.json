@@ -4,5 +4,10 @@
   "font-licenses/OFL.txt": "crates/rds-desktop/assets/font-licenses/OFL.txt",
   "font-licenses/UFL.txt": "crates/rds-desktop/assets/font-licenses/UFL.txt",
   "font-licenses/emoji-icon-font-mit-license.txt": "crates/rds-desktop/assets/font-licenses/emoji-icon-font-mit-license.txt",
-  "font-licenses/provenance.json": "crates/rds-desktop/assets/font-licenses/provenance.json"
+  "font-licenses/provenance.json": "crates/rds-desktop/assets/font-licenses/provenance.json",
+  "design-system/LICENSE": "vendor/nddev-opennetwork-design-tokens/LICENSE",
+  "design-system/NOTICE": "vendor/nddev-opennetwork-design-tokens/NOTICE",
+  "design-system/THIRD_PARTY_NOTICES.md": "vendor/nddev-opennetwork-design-tokens/THIRD_PARTY_NOTICES.md",
+  "design-system/pin.json": "packaging/design-system.json",
+  "font-licenses/OFL-IBM-Plex.txt": "vendor/nddev-opennetwork-design-tokens/fonts/OFL-IBM-Plex.txt"
 }
