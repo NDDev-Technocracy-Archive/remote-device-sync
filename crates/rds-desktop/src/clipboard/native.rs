@@ -15,44 +15,77 @@ pub use remote::RemoteFiles;
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Policy {
+    pub schema_version: u32,
     pub limits: Limits,
     pub watch_interval_ms: u64,
     pub operation_timeout_ms: u64,
     pub native_uri_bytes: u64,
     pub native_types: usize,
     pub pending_operations: usize,
-}
-impl Default for Policy {
-    fn default() -> Self {
-        Self {
-            limits: Limits::default(),
-            watch_interval_ms: 100,
-            operation_timeout_ms: 2000,
-            native_uri_bytes: rds_core::clipboard::TEXT_BYTES,
-            native_types: 64,
-            pending_operations: 8,
-        }
-    }
+    /// Process-wide retained native selection FDs, independent of file count
+    /// per manifest and simultaneous wire body transfers. New owners only.
+    pub selected_file_descriptors: usize,
+    /// Concurrent native body jobs, independent of transport stream credits.
+    pub native_body_operations: usize,
 }
 impl Policy {
+    /// The standalone common profile is versioned with this application. No
+    /// environment lookup, native I/O or second editable default is involved.
+    pub fn shipped() -> Result<Self, Error> {
+        let policy: Self =
+            serde_json::from_str(include_str!("../../config/native-clipboard.json"))?;
+        policy.validate()?;
+        Ok(policy)
+    }
     pub fn validate(&self) -> Result<(), Error> {
         self.limits.validate()?;
-        if !(5..=1000).contains(&self.watch_interval_ms)
+        if self.schema_version != 1
+            || !(5..=1000).contains(&self.watch_interval_ms)
             || !(100..=30_000).contains(&self.operation_timeout_ms)
             || !(1..=16 * rds_core::clipboard::TEXT_BYTES).contains(&self.native_uri_bytes)
             || !(1..=4096).contains(&self.native_types)
             || !(1..=64).contains(&self.pending_operations)
+            || !(1..=4096).contains(&self.selected_file_descriptors)
+            || !(1..=64).contains(&self.native_body_operations)
         {
             return Err(Error::Settings);
         }
         Ok(())
     }
+    /// All viewing/serving providers in this process share one physical FD
+    /// allowance. Held files keep it alive beyond a native owner replacement.
+    pub fn selection_budget(&self) -> Result<Arc<rds_sync::selection::DescriptorBudget>, Error> {
+        self.validate()?;
+        static FILES: std::sync::OnceLock<Selections> = std::sync::OnceLock::new();
+        FILES
+            .get_or_init(Selections::default)
+            .get(self.selected_file_descriptors)
+    }
+}
+
+#[derive(Default)]
+struct Selections(std::sync::Mutex<std::sync::Weak<rds_sync::selection::DescriptorBudget>>);
+impl Selections {
+    fn get(&self, maximum: usize) -> Result<Arc<rds_sync::selection::DescriptorBudget>, Error> {
+        let mut held = self.0.lock().map_err(|_| Error::Unavailable)?;
+        if let Some(budget) = held.upgrade() {
+            if budget.maximum() != maximum {
+                return Err(Error::Settings);
+            }
+            return Ok(budget);
+        }
+        let budget = rds_sync::selection::DescriptorBudget::new(maximum)?;
+        *held = Arc::downgrade(&budget);
+        Ok(budget)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid native clipboard configuration: {0}")]
+    Configuration(#[from] serde_json::Error),
     #[error("invalid native clipboard policy")]
     Settings,
     #[error("native clipboard is unavailable")]
@@ -254,6 +287,60 @@ async fn write_file<F: Files + ?Sized>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn replacement_native_owners_share_the_retained_descriptor_allowance() {
+        let pool = Selections::default();
+        let budget = pool.get(1).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "rds-selection-budget-{:032x}",
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("selected");
+        std::fs::write(&path, b"native selection").unwrap();
+        let selection =
+            rds_sync::selection::Selection::from_paths([path], &Limits::default(), &budget)
+                .unwrap();
+        let file = selection.file(&selection.manifest().entries[0].id).unwrap();
+        drop(selection);
+        drop(budget);
+        assert_eq!(pool.get(1).unwrap().available(), 0);
+        assert!(matches!(pool.get(2), Err(Error::Settings)));
+        file.verify().unwrap();
+        drop(file);
+        assert_eq!(pool.get(2).unwrap().available(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_settings_are_complete_versioned_and_independent_of_wire_limits() {
+        let policy = Policy::shipped().unwrap();
+        let value = serde_json::to_value(&policy).unwrap();
+        for field in value.as_object().unwrap().keys() {
+            let mut absent = value.clone();
+            absent.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Policy>(absent).is_err(),
+                "missing {field}"
+            );
+        }
+        for field in value["limits"].as_object().unwrap().keys() {
+            let mut absent = value.clone();
+            absent["limits"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Policy>(absent).is_err(),
+                "missing limit {field}"
+            );
+        }
+        let mut selected = policy.clone();
+        selected.selected_file_descriptors = 1;
+        selected.native_body_operations = 3;
+        selected.validate().unwrap();
+        assert_eq!(selected.limits, policy.limits);
+        selected.schema_version = 2;
+        assert!(matches!(selected.validate(), Err(Error::Settings)));
+    }
+
     #[tokio::test]
     async fn native_file_promise_writes_only_its_selected_object_to_one_destination() {
         let root =
@@ -269,6 +356,7 @@ mod tests {
                 chunk_bytes: 4096,
                 ..Limits::default()
             },
+            &rds_sync::selection::DescriptorBudget::new(1).unwrap(),
         )
         .unwrap();
         let file = selected.manifest().entries[0].id;

@@ -12,6 +12,8 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 
 use rds_core::clipboard::{FileEntry, FileSelection, Limits};
+mod budget;
+pub use budget::DescriptorBudget;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,6 +27,8 @@ pub enum Error {
     Changed,
     #[error("file identity is absent from this selection")]
     Unknown,
+    #[error("native selected-file descriptor budget is exhausted or invalid")]
+    Capacity,
 }
 
 /// No Debug implementation: native file capabilities are not diagnostic data.
@@ -33,6 +37,11 @@ pub struct Selection {
     files: BTreeMap<[u8; 16], Arc<SelectedFile>>,
     limits: Limits,
 }
+struct Descriptor {
+    // Also on admission errors, close the handle before its reservation.
+    file: File,
+    _reservation: budget::Reservation,
+}
 
 impl Selection {
     /// Local native selection only. Never feed a peer-supplied path to this
@@ -40,8 +49,9 @@ impl Selection {
     pub fn from_paths(
         paths: impl IntoIterator<Item = std::path::PathBuf>,
         limits: &Limits,
+        budget: &Arc<DescriptorBudget>,
     ) -> Result<Self, Error> {
-        Self::admit_paths(paths, limits, None)
+        Self::admit_paths(paths, limits, budget, None)
     }
 
     /// Native resource URLs/portal selections may need their resource scope
@@ -50,17 +60,26 @@ impl Selection {
     pub fn from_paths_with_authority(
         paths: impl IntoIterator<Item = std::path::PathBuf>,
         limits: &Limits,
+        budget: &Arc<DescriptorBudget>,
         authority: Arc<dyn Send + Sync>,
     ) -> Result<Self, Error> {
-        Self::admit_paths(paths, limits, Some(authority))
+        Self::admit_paths(paths, limits, budget, Some(authority))
     }
 
     fn admit_paths(
         paths: impl IntoIterator<Item = std::path::PathBuf>,
         limits: &Limits,
+        budget: &Arc<DescriptorBudget>,
         authority: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Self, Error> {
         limits.validate()?;
+        let paths = paths.into_iter();
+        if paths.size_hint().0 > limits.files as usize {
+            return Err(rds_core::clipboard::Error::TooLarge.into());
+        }
+        if paths.size_hint().0 > budget.maximum() {
+            return Err(Error::Capacity);
+        }
         let mut files = Vec::new();
         for path in paths {
             if files.len() == limits.files as usize {
@@ -74,6 +93,9 @@ impl Selection {
                 .and_then(|name| name.to_str())
                 .ok_or(rds_core::clipboard::Error::FileName)?
                 .to_owned();
+            // Reserve before opening a path or asking its native provider for
+            // metadata. The permit follows the actual FD, not the offer/tab.
+            let permit = budget.reserve()?;
             let file = File::from(
                 rustix::fs::open(
                     &path,
@@ -85,7 +107,13 @@ impl Selection {
                 )
                 .map_err(io::Error::from)?,
             );
-            files.push((name, file));
+            files.push((
+                name,
+                Descriptor {
+                    file,
+                    _reservation: permit,
+                },
+            ));
         }
         Self::admit_files(authority, files, limits)
     }
@@ -93,8 +121,12 @@ impl Selection {
     /// The native adapter opens the explicitly selected files. No file name
     /// supplied by a remote peer ever reaches an OS open operation here.
     /// Call on a native blocking owner: metadata can require filesystem I/O.
-    pub fn from_files(files: Vec<(String, File)>, limits: &Limits) -> Result<Self, Error> {
-        Self::admit_files(None, files, limits)
+    pub fn from_files(
+        files: Vec<(String, File)>,
+        limits: &Limits,
+        budget: &Arc<DescriptorBudget>,
+    ) -> Result<Self, Error> {
+        Self::import_files(None, files, limits, budget)
     }
 
     /// Retain the native selection's original resource and caller authority
@@ -104,16 +136,43 @@ impl Selection {
     pub fn from_files_with_authority(
         files: Vec<(String, File)>,
         limits: &Limits,
+        budget: &Arc<DescriptorBudget>,
         authority: Arc<dyn Send + Sync>,
     ) -> Result<Self, Error> {
-        Self::admit_files(Some(authority), files, limits)
+        Self::import_files(Some(authority), files, limits, budget)
+    }
+
+    fn import_files(
+        authority: Option<Arc<dyn Send + Sync>>,
+        files: Vec<(String, File)>,
+        limits: &Limits,
+        budget: &Arc<DescriptorBudget>,
+    ) -> Result<Self, Error> {
+        limits.validate()?;
+        if files.len() > limits.files as usize {
+            return Err(rds_core::clipboard::Error::TooLarge.into());
+        }
+        // Already-open native handles are admitted before metadata access.
+        // Rejected imports close their handles before releasing authority.
+        let mut admitted = Vec::with_capacity(files.len());
+        for (name, file) in files {
+            let permit = budget.reserve()?;
+            admitted.push((
+                name,
+                Descriptor {
+                    file,
+                    _reservation: permit,
+                },
+            ));
+        }
+        Self::admit_files(authority, admitted, limits)
     }
 
     fn admit_files(
         // Parameters drop in reverse order on early errors: close all input
         // descriptors before releasing their native selection authority.
         authority: Option<Arc<dyn Send + Sync>>,
-        files: Vec<(String, File)>,
+        files: Vec<(String, Descriptor)>,
         limits: &Limits,
     ) -> Result<Self, Error> {
         limits.validate()?;
@@ -127,8 +186,8 @@ impl Selection {
             files: BTreeMap::new(),
             limits: limits.clone(),
         };
-        for (name, file) in files {
-            let metadata = file.metadata()?;
+        for (name, handle) in files {
+            let metadata = handle.file.metadata()?;
             if !metadata.is_file() {
                 return Err(Error::NotRegular);
             }
@@ -147,7 +206,7 @@ impl Selection {
             selection.files.insert(
                 id,
                 Arc::new(SelectedFile {
-                    file,
+                    handle,
                     metadata,
                     _authority: authority.clone(),
                 }),
@@ -172,7 +231,7 @@ impl Selection {
 
 pub struct SelectedFile {
     // Fields drop in this order: release the FD before its native authority.
-    file: File,
+    handle: Descriptor,
     metadata: Metadata,
     _authority: Option<Arc<dyn Send + Sync>>,
 }
@@ -185,7 +244,7 @@ impl SelectedFile {
     /// Verify before and after the admitted copy. Modification is a failed
     /// transfer, never a successful receipt for a silently changed source.
     pub fn verify(&self) -> Result<(), Error> {
-        let now = self.file.metadata()?;
+        let now = self.handle.file.metadata()?;
         if now.dev() != self.metadata.dev()
             || now.ino() != self.metadata.ino()
             || now.len() != self.metadata.len()
@@ -220,7 +279,11 @@ impl SelectedFile {
         let mut bytes = vec![0; length];
         let mut read = 0;
         while read < length {
-            let n = match self.file.read_at(&mut bytes[read..], offset + read as u64) {
+            let n = match self
+                .handle
+                .file
+                .read_at(&mut bytes[read..], offset + read as u64)
+            {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 result => result?,
             };
@@ -342,6 +405,36 @@ fn native<T: Send + 'static>(
 mod tests {
     use super::*;
     use std::io::Write;
+    fn file_budget() -> Arc<DescriptorBudget> {
+        DescriptorBudget::new(2).unwrap()
+    }
+
+    #[test]
+    fn held_descriptors_share_capacity_and_fail_before_another_native_open() {
+        let root = root();
+        let path = root.0.join("source");
+        std::fs::write(&path, b"selected").unwrap();
+        let budget = DescriptorBudget::new(1).unwrap();
+        let limits = Limits::default();
+        let selection = Selection::from_paths([path.clone()], &limits, &budget).unwrap();
+        let selected = selection.file(&selection.manifest().entries[0].id).unwrap();
+        drop(selection);
+        assert_eq!(budget.available(), 0);
+        // ENOENT would prove that admission touched the filesystem first.
+        assert!(matches!(
+            Selection::from_paths([root.0.join("missing")], &limits, &budget),
+            Err(Error::Capacity)
+        ));
+        selected.verify().unwrap();
+        drop(selected);
+        assert_eq!(budget.available(), 1);
+        let retained = Arc::downgrade(&budget);
+        let selection = Selection::from_paths([path], &limits, &budget).unwrap();
+        drop(budget);
+        assert!(retained.upgrade().is_some());
+        drop(selection);
+        assert!(retained.upgrade().is_none());
+    }
 
     struct Root(std::path::PathBuf);
     impl Drop for Root {
@@ -361,7 +454,8 @@ mod tests {
         let root = root();
         let path = root.0.join("source");
         std::fs::write(&path, b"selected").unwrap();
-        let selection = Selection::from_paths([path], &Limits::default()).unwrap();
+        let descriptors = DescriptorBudget::new(1).unwrap();
+        let selection = Selection::from_paths([path], &Limits::default(), &descriptors).unwrap();
         let file = selection.file(&selection.manifest().entries[0].id).unwrap();
         let budget = Arc::new(tokio::sync::Semaphore::new(1));
         let original = Arc::new(budget.clone().acquire_owned().await.unwrap());
@@ -382,6 +476,7 @@ mod tests {
         task.abort();
         drop(task);
         drop(selection);
+        assert_eq!(descriptors.available(), 0);
         assert!(retained.upgrade().is_some());
         assert!(budget.try_acquire().is_err());
         release.send(()).unwrap();
@@ -391,6 +486,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(retained.upgrade().is_none());
+        assert_eq!(descriptors.available(), 1);
     }
 
     #[test]
@@ -402,6 +498,7 @@ mod tests {
         let selection = Selection::from_files(
             vec![("copy.txt".into(), File::open(&path).unwrap())],
             &limits,
+            &file_budget(),
         )
         .unwrap();
         let id = selection.manifest().entries[0].id;
@@ -433,6 +530,7 @@ mod tests {
         let selection = Selection::from_files_with_authority(
             vec![("source".into(), File::open(&path).unwrap())],
             &limits,
+            &file_budget(),
             authority,
         )
         .unwrap();
@@ -477,7 +575,8 @@ mod tests {
         assert!(
             Selection::from_files(
                 vec![("../escape".into(), File::open(&path).unwrap())],
-                &limits
+                &limits,
+                &file_budget()
             )
             .is_err()
         );
@@ -487,13 +586,17 @@ mod tests {
                 &Limits {
                     selection_bytes: 7,
                     ..limits.clone()
-                }
+                },
+                &file_budget()
             )
             .is_err()
         );
-        let selection =
-            Selection::from_files(vec![("source".into(), File::open(&path).unwrap())], &limits)
-                .unwrap();
+        let selection = Selection::from_files(
+            vec![("source".into(), File::open(&path).unwrap())],
+            &limits,
+            &file_budget(),
+        )
+        .unwrap();
         let selected = selection.file(&selection.manifest().entries[0].id).unwrap();
         selected.verify().unwrap();
         assert!(
@@ -537,7 +640,7 @@ mod tests {
             fifo,
             root.0.clone(),
         ] {
-            assert!(Selection::from_paths([path], &Limits::default()).is_err());
+            assert!(Selection::from_paths([path], &Limits::default(), &file_budget()).is_err());
         }
     }
 }

@@ -32,6 +32,7 @@ struct Authority {
 pub(super) fn select(
     urls: Vec<Retained<NSURL>>,
     policy: &Policy,
+    budget: &Arc<rds_sync::selection::DescriptorBudget>,
     caller: Option<NativeLifetime>,
 ) -> Result<Value, Error> {
     if urls.is_empty() || urls.len() > policy.limits.files as usize {
@@ -83,6 +84,7 @@ pub(super) fn select(
     let selection = rds_sync::selection::Selection::from_paths_with_authority(
         paths,
         &policy.limits,
+        budget,
         Arc::new(authority),
     )?;
     Ok(Value::Files(Arc::new(selection)))
@@ -109,8 +111,12 @@ pub(super) async fn probe() -> Result<u32, Error> {
     let source_path = directory.0.join("Привет.txt");
     let expected = "Native selected file 🖥️\n".repeat(1000).into_bytes();
     std::fs::write(&source_path, &expected)?;
-    let board = super::Board::isolated();
-    let policy = Policy::default();
+    let policy = Policy {
+        selected_file_descriptors: 1,
+        ..Policy::shipped()?
+    };
+    let budget = policy.selection_budget()?;
+    let board = super::Board::isolated(budget.clone());
     let url = NSURL::fileURLWithPath(&NSString::from_str(
         source_path.to_str().ok_or(Error::Unavailable)?,
     ));
@@ -140,6 +146,19 @@ pub(super) async fn probe() -> Result<u32, Error> {
     let id = files.selection().entries[0].id;
     let mut read = files.open(id, Arc::new(())).await?;
     drop(files);
+    if budget.available() != 0
+        || !matches!(
+            board.read(
+                generation,
+                rds_core::clipboard::Format::Files,
+                &policy,
+                None
+            ),
+            Err(Error::File(rds_sync::selection::Error::Capacity))
+        )
+    {
+        return Err(Error::Publication);
+    }
     // Moving/replacing the pathname must neither change the selected object
     // nor discard the native scope while its opened reader still runs.
     std::fs::rename(&source_path, directory.0.join("moved"))?;
@@ -152,8 +171,8 @@ pub(super) async fn probe() -> Result<u32, Error> {
     read.reader.read_to_end(&mut actual).await?;
     read.complete.await?;
     drop(read.reader);
-    if actual != expected || retained.upgrade().is_some() {
+    if actual != expected || retained.upgrade().is_some() || budget.available() != 1 {
         return Err(Error::Publication);
     }
-    Ok(1)
+    Ok(2)
 }

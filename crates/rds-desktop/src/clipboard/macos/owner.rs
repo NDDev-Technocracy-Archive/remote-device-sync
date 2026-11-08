@@ -75,8 +75,12 @@ impl Group {
         *pool = Arc::downgrade(&group.0);
         Ok(group)
     }
-    fn spawn(policy: Policy, board: fn() -> Result<Board, Error>) -> Result<Self, Error> {
+    fn spawn(
+        policy: Policy,
+        board: fn(Arc<rds_sync::selection::DescriptorBudget>) -> Result<Board, Error>,
+    ) -> Result<Self, Error> {
         policy.validate()?;
+        let files = policy.selection_budget()?;
         let permit = NATIVE_OWNER.try_acquire().map_err(|_| Error::Unavailable)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::Unavailable)?;
         let (jobs, receiver) = mpsc::sync_channel(policy.pending_operations);
@@ -88,7 +92,7 @@ impl Group {
             snapshots: changes,
             state: state.clone(),
             watchers: watchers.clone(),
-            bodies: Arc::new(Semaphore::new(policy.limits.parallel_transfers as usize)),
+            bodies: Arc::new(Semaphore::new(policy.native_body_operations)),
             policy: policy.clone(),
         });
         runtime.spawn_blocking(move || {
@@ -107,7 +111,7 @@ impl Group {
                 state: state.clone(),
                 snapshots: snapshots.clone(),
             };
-            let mut board = match objc2::rc::autoreleasepool(|_| board()) {
+            let mut board = match objc2::rc::autoreleasepool(|_| board(files)) {
                 Ok(board) => board,
                 Err(error) => {
                     tracing::warn!(%error,"native clipboard owner unavailable");
@@ -208,8 +212,8 @@ impl Group {
 #[cfg(feature = "viewer")]
 pub(crate) async fn probe() -> Result<u32, Error> {
     let file_cases = super::files::probe().await?;
-    let policy = Policy::default();
-    let group = Group::spawn(policy.clone(), || Ok(Board::isolated()))?;
+    let policy = Policy::shipped()?;
+    let group = Group::spawn(policy.clone(), |files| Ok(Board::isolated(files)))?;
     group.ready().await?;
     let context = Arc::new(());
     let retained = Arc::downgrade(&context);

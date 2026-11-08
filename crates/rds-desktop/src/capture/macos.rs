@@ -87,7 +87,9 @@ impl MacDesktop {
         // Observe later local grants without repeating either permission API
         // or allocating a native worker while access is missing.
         wait_for_permission(Self::permission_status, &mut cancelled).await?;
-        let clipboard = match crate::clipboard::macos::Group::start(Default::default()) {
+        let clipboard = match crate::clipboard::native::Policy::shipped()
+            .and_then(crate::clipboard::macos::Group::start)
+        {
             Ok(group) => Some(group),
             Err(error) => {
                 tracing::warn!(%error,"native clipboard unavailable; screen preparation continues");
