@@ -8,7 +8,7 @@ use ashpd::desktop::{
     clipboard::{Clipboard, SelectionOwnerChanged, SetSelectionOptions},
     remote_desktop::RemoteDesktop,
 };
-use ashpd::zbus::zvariant::OwnedObjectPath;
+use ashpd::zbus::OwnedObjectPath;
 use futures_util::StreamExt;
 use std::{
     os::fd::OwnedFd,
