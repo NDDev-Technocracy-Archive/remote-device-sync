@@ -1221,11 +1221,6 @@ impl App {
                 false
             }
         };
-        if resume && let Some(gpu) = &mut self.gpu {
-            // A restored native window can retain a presentation queue from
-            // before minimization. Rebind its surface before the fresh IDR.
-            gpu.invalidate_surface();
-        }
         if resume
             && self
                 .session

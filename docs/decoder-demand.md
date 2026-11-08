@@ -21,8 +21,6 @@ requests. The next visible image requires a fresh keyframe. Reappearance queues
 one ordinary IDR request through the owning session's bounded control path;
 reconnect clears the suspended epoch. Pending frame timing and visual probes
 cannot report an invisible interval as submission delay.
-The surface is reconfigured before presenting the new reference chain, so a
-restored window does not inherit its pre-minimization presentation queue.
 `video_resume_requests` records these intentional restarts separately from
 fault repairs. Diagnostic video-loss detection follows `decode_required`:
 hidden windows require encoded progress instead of writing a false decode-stall
@@ -49,3 +47,15 @@ The real H.264 case decodes an initial image, discards a delta, refuses a later
 delta as a fresh picture, then verifies changed pixels after the requested IDR.
 Warning-denied all-target checks and library tests passed on Linux and macOS.
 Native resource comparison is pending.
+
+The physical X11 comparison has now isolated a narrower result: during ten
+seconds of native minimization, software decoding stopped (300 discarded,
+zero decoded frames), no process disk writes were attributed, and CPU fell
+from 1.80% to 0.20% of one core. Its recovery gate failed: only 58 frames were
+submitted during a 4.001-second post-restore sample, while the unchanged
+baseline submitted 120. Acquisition accounted for 2.36 seconds of that sample,
+including approximately one-second native calls. Reconfiguring the surface
+on resume did not resolve this and has been removed. This is failed acceptance
+evidence, not an accepted performance improvement or an explanation of the
+older unlabelled X11 failures. The native recovery and historical cohorts stay
+open; no threshold or diagnostic fault check has been waived.
