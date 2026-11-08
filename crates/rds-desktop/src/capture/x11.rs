@@ -62,32 +62,40 @@ pub struct X11Capturer {
 }
 
 impl X11Capturer {
-    /// Wait for X socket readiness instead of periodically polling damage.
-    /// The bounded timeout also lets IDR and teardown be observed promptly.
-    pub fn wait_for_change(&mut self, timeout: std::time::Duration) -> bool {
+    /// Wait for actual X damage or the original session's control/cancel wake.
+    pub(crate) fn wait_for_change(
+        &mut self,
+        timeout: std::time::Duration,
+        wake: std::os::fd::BorrowedFd<'_>,
+    ) -> Result<bool, DesktopError> {
         if self.changed() {
-            return true;
+            return Ok(true);
         }
-        let mut fds = [rustix::event::PollFd::new(
-            self.conn.stream(),
-            rustix::event::PollFlags::IN,
-        )];
+        let mut fds = [
+            rustix::event::PollFd::new(self.conn.stream(), rustix::event::PollFlags::IN),
+            rustix::event::PollFd::new(&wake, rustix::event::PollFlags::IN),
+        ];
         let timeout = rustix::event::Timespec {
             tv_sec: timeout.as_secs() as i64,
             tv_nsec: i64::from(timeout.subsec_nanos()),
         };
         match rustix::event::poll(&mut fds, Some(&timeout)) {
             Ok(_)
-                if fds[0].revents().intersects(
-                    rustix::event::PollFlags::ERR
-                        | rustix::event::PollFlags::HUP
-                        | rustix::event::PollFlags::NVAL,
-                ) =>
+                if fds.iter().any(|fd| {
+                    fd.revents().intersects(
+                        rustix::event::PollFlags::ERR
+                            | rustix::event::PollFlags::HUP
+                            | rustix::event::PollFlags::NVAL,
+                    )
+                }) =>
             {
-                true
+                Err(DesktopError::Capture(
+                    "native capture poll owner ended".into(),
+                ))
             }
-            Ok(_) => self.changed(),
-            Err(_) => true,
+            Ok(_) => Ok(self.changed()),
+            Err(rustix::io::Errno::INTR) => Ok(false),
+            Err(error) => Err(DesktopError::Io(error.into())),
         }
     }
     /// Select an X root by its legacy index or a RandR logical monitor by its
