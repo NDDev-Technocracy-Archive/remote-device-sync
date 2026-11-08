@@ -4992,6 +4992,7 @@ dependencies = [
  "anyhow",
  "clap",
  "iroh",
+ "png",
  "rand 0.10.3",
  "rds-agent",
  "rds-client",

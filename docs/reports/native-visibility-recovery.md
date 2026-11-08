@@ -4,7 +4,8 @@ Execution: [#213](https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote/
 [#214](https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote/issues/214).
 Observed 2026-11-08. This comparison qualifies suspension and resumption of one
 native viewer with a synthetic 640×360 H.264 source over real loopback QUIC.
-It does not qualify native capture, hardware codecs, input or the whole desktop.
+It does not qualify native capture, hardware codecs or the whole desktop.
+The independent focused keyboard sample below has its own narrower scope.
 
 Each pair used the same source, a visible warm-up, ten seconds hidden, a native
 restore, and a four-second observation after submitted frames resumed. Linux
@@ -80,11 +81,53 @@ Earlier Mac candidates wrote false incidents while intentionally hidden or when
 requesting an ordinary resume keyframe. The current decode-demand health contract
 and typed resume control correct those causes without changing fault thresholds.
 
-Separate Linux keyboard cohorts failed on the unchanged baseline before candidate
+A later restored-window candidate submitted only four frames in four seconds
+while receiving 120; its four native acquisitions occupied 3.965 seconds. WM_STATE
+was Normal, but the window did not retain focus. A separate explicit-focus check
+on the unchanged baseline lost focus to the compositor's XWayland proxy after an
+X11 synthetic click. Another fixture did not stay Iconic throughout its hidden
+interval and was rejected. These observations do not identify the cause of the
+older presentation failures or make a mapped window proof of visibility.
+
+Earlier Linux keyboard cohorts failed on the unchanged baseline before candidate
 admission: external key injection did not produce a typed keyboard ACK within the
 existing limit. Those failed preconditions, source bindings and receipts remain
-retained; this visibility comparison neither skips nor passes their input gate.
-The original unlabelled X11 cohort (102 baseline / 49 candidate submissions while
-receiving approximately 599 frames) also remains unexplained. Native Wayland,
-input responsiveness, resizing/closure and multiple-window resource behavior
-remain required independent qualification.
+retained. The independent native-input sample below fixes that fixture's admission,
+not those older product failures. The original unlabelled X11 cohort (102 baseline /
+49 candidate submissions while receiving approximately 599 frames) remains open.
+Native Wayland presentation, restore robustness, resizing/closure and multiple-window
+resource behavior still require independent qualification.
+
+## Focused native keyboard sample
+
+A separate physical Linux X11 sample used the existing consented Wayland host
+and an already admitted Mac controller, with no OS grant, endpoint key or installed
+host changes. The controller sent an absolute pointer position through Remote's
+EIS input path. The fixture checked the actual pointer against its owned window
+rectangle before clicking, then checked native active/focused window identity at
+both ends of the four-second visible interval. Portal display IDs and X11 monitor
+order were resolved separately; the source's default display was not assumed to
+be the compositor's primary monitor.
+
+Both unchanged baseline and candidate submitted 120 frames in 4.000 seconds.
+One F8 press/release produced the viewer's typed keyboard ACK maximum of 15 ms
+before and 2 ms after; the native controller's two input-dispatch acknowledgements
+had maxima of 32.592 ms and 19.243 ms. Both retained the unchanged 250 ms key limit,
+kept receiving native screen frames, finished cleanly, and preserved protected
+host/viewer/compositor PIDs. This is one focused gesture on each implementation,
+not an input-to-visible measurement or a latency distribution. It does not qualify
+minimize/restore, a native target application's consumption, hardware decoding or
+other OS input paths.
+
+The test-only `native_owned_input` example pins an existing connected peer, never
+loads a key or changes manager selection, and admits only an explicit display
+point, click, F8 and finish. Its pipe reader retains a partial command across media
+and event polling; expiry cannot leave a blocking stdin reader alive. Source
+snapshot SHA-256 was
+`b8853a2ee802ca412d49e6a3bc04b5968647d5c29db22384fe81a5c564771dcd`;
+the native controller executable was
+`398ff50e998c1902fe1bb743c02e3a8de3a8a30fd6b842ea0dadf921db2dfa56`.
+The normal M1 SDK compiled it and warning-denied native Clippy passed on M1 and
+Linux. The SDK's already reported strip-tool warning left this QA executable
+unstripped; it is not a release or installed-host qualification. The tested viewer
+executables and runtime source remain the exact builds bound above.

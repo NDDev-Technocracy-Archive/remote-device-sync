@@ -33,6 +33,7 @@ tracing.workspace = true
 zeroize = "1"
 
 [dev-dependencies]
+png.workspace = true
 iroh.workspace = true
 russh.workspace = true
 rds-agent.workspace = true
@@ -49,6 +50,14 @@ required-features = ["desktop"]
 
 [[example]]
 name = "workspace_managed_preview"
+required-features = ["desktop"]
+
+[[example]]
+name = "native_owned_input"
+required-features = ["desktop"]
+
+[[example]]
+name = "native_owned_snapshot"
 required-features = ["desktop"]
 
 [lints]
