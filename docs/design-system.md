@@ -48,3 +48,5 @@ Native visual checks on Linux and macOS, all four themes, small/large windows,
 loading/empty/error/selected/disabled controls and focus behavior are required
 before qualifying this renderer binding. Source pin verification and compilation
 alone do not establish those user journeys.
+The bounded checks and remaining platform limits are recorded in
+[the native binding report](reports/native-design-system.md).
