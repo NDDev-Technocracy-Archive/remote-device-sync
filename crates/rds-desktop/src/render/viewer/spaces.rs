@@ -125,8 +125,10 @@ impl Screens {
             super::super::clipboard::Clipboard::with_arbiter(self.clipboard.clone());
         if let Some(tab) = &tab {
             view.label(format!(
-                "RDS · {} · Display {}",
-                tab.spec.label, tab.spec.display
+                "{} · {} · Display {}",
+                crate::render::APPLICATION_NAME,
+                tab.spec.label,
+                tab.spec.display
             ));
         } else {
             view.status("Ready");
@@ -244,8 +246,10 @@ impl Screens {
         lock(&view.state).clipboard =
             super::super::clipboard::Clipboard::with_arbiter(self.clipboard.clone());
         view.label(format!(
-            "RDS · {} · Display {}",
-            tab.spec.label, tab.spec.display
+            "{} · {} · Display {}",
+            crate::render::APPLICATION_NAME,
+            tab.spec.label,
+            tab.spec.display
         ));
         app.session = session;
         app.last_window_status = None;

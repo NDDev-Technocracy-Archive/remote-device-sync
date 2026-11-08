@@ -931,7 +931,7 @@ impl SessionView {
                 remote_cursor_embedded: false,
                 status: "Connecting".into(),
                 notice: None,
-                label: "RDS".into(),
+                label: super::APPLICATION_NAME.into(),
                 extent: (0, 0),
                 report: ViewerReport::default(),
                 delays: Vec::new(),
@@ -1423,7 +1423,7 @@ impl ApplicationHandler<()> for App {
                 event_loop
                     .create_window(
                         super::platform::window_attributes()
-                            .with_title("RDS — Connecting")
+                            .with_title(format!("{} — Connecting", super::APPLICATION_NAME))
                             .with_window_level(WindowLevel::Normal)
                             .with_window_icon(Some(icon))
                             .with_fullscreen(

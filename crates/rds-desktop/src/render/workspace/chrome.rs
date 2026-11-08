@@ -215,7 +215,7 @@ impl Chrome {
                 ui.horizontal(|ui| {
                     if ui.add_enabled_ui(!model.tabs().is_empty(), |ui| panel_arrow(ui, false))
                         .inner.clicked() { toggle = true; }
-                    ui.label(egui::RichText::new("RDS").strong().size(20.));
+                    ui.label(egui::RichText::new(crate::render::APPLICATION_NAME).strong().heading());
                     ui.separator();
                     egui::ScrollArea::horizontal().id_salt("tab-scroll").show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -366,8 +366,8 @@ impl Chrome {
                 if apply { self.actions.push(Action::Configure(id, profile)); }
             }
             if self.about {
-                egui::Window::new("About NDDev Remote").open(&mut self.about).default_width(design::metrics().size_dock_max).show(&context, |ui| {
-                    ui.heading("NDDev Remote");
+                egui::Window::new(format!("About {}", crate::render::APPLICATION_NAME)).open(&mut self.about).default_width(design::metrics().size_dock_max).show(&context, |ui| {
+                    ui.heading(crate::render::APPLICATION_NAME);
                     ui.label("Your computers and displays in one workspace.");
                     ui.label(concat!("Version ", env!("CARGO_PKG_VERSION")));
                     ui.separator();

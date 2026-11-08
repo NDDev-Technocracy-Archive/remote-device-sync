@@ -2,6 +2,9 @@
 //! one GPU surface presents the active session.
 //! window/input handling stays on the OS main thread and networking stays async.
 
+#[cfg(feature = "viewer")]
+pub(super) const APPLICATION_NAME: &str = "NDDev Remote";
+
 pub mod workspace;
 
 #[cfg(feature = "viewer")]

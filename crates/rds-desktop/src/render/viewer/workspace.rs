@@ -398,8 +398,10 @@ impl App {
                 SessionView::new(tab.spec.display, self.session.handle.proxy.clone());
             session.tab = Some(id);
             view.label(format!(
-                "RDS · {} · Display {}",
-                tab.spec.label, tab.spec.display
+                "{} · {} · Display {}",
+                crate::render::APPLICATION_NAME,
+                tab.spec.label,
+                tab.spec.display
             ));
             if deck
                 .events
@@ -556,8 +558,10 @@ impl App {
             SessionView::new(tab.spec.display, self.session.handle.proxy.clone());
         new.tab = Some(id);
         view.label(format!(
-            "RDS · {} · Display {}",
-            tab.spec.label, tab.spec.display
+            "{} · {} · Display {}",
+            crate::render::APPLICATION_NAME,
+            tab.spec.label,
+            tab.spec.display
         ));
         if deck.active == Some(id) {
             self.release(event_loop);
