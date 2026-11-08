@@ -19,7 +19,9 @@ mod platform;
 #[cfg(all(feature = "viewer", feature = "host", target_os = "macos"))]
 pub use platform::native_clipboard_owner_probe;
 #[cfg(feature = "viewer")]
-pub use platform::{NativeWindowState, choose_resolution, native_clipboard_probe};
+pub use platform::{
+    NativeWindowState, WindowVisibility, choose_resolution, native_clipboard_probe,
+};
 #[cfg(feature = "viewer")]
 mod viewer;
 #[cfg(feature = "viewer")]

@@ -7,6 +7,10 @@ conversion, even while the surface could submit none of those images.
 The native viewer now admits decode only for a presenting, open window which
 the OS has not reported as hidden/occluded. AppKit's sampled visibility,
 miniaturization, active-Space and occlusion flags supplement window events.
+Portable visibility/minimization getters retain their optional values; X11
+minimization is not inferred from an occlusion event that may never arrive.
+Known-hidden windows also skip native surface acquisition and UI painting.
+`hidden_draws_skipped` distinguishes this admission from a native API skip.
 Focus alone does not suppress a visible window. Missing native visibility is
 unknown and continues decode; this does not claim that every Linux compositor
 reports full occlusion.

@@ -20,6 +20,19 @@ impl KeyboardShortcuts {
     pub fn set_active(&mut self, _active: bool) {}
 }
 
+/// Portable getters remain optional on window systems which cannot report the
+/// state. Absence cannot authorize suppressing a visible window's work.
+#[derive(Clone, Copy, Default, Debug, serde::Serialize)]
+pub struct WindowVisibility {
+    pub visible: Option<bool>,
+    pub minimized: Option<bool>,
+}
+impl WindowVisibility {
+    pub(super) fn hidden(self) -> bool {
+        self.visible == Some(false) || self.minimized == Some(true)
+    }
+}
+
 /// Own-window diagnostics, read on the OS main thread. No title/content/geometry.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct NativeWindowState {

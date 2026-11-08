@@ -213,6 +213,7 @@ pub struct ViewerReport {
     pub session_epoch: u64,
     pub frames_received: u64,
     pub encoded_frames_discarded: u64,
+    pub hidden_draws_skipped: u64,
     pub frames_submitted: u64,
     pub gpu_uploads: u64,
     pub last_submission_ms: Option<u64>,
@@ -294,6 +295,7 @@ pub struct ViewerSnapshot {
     pub unpresented_frame_age_ms: Option<u64>,
     pub pending_frame_bytes: usize,
     pub occluded: bool,
+    pub window_visibility: super::WindowVisibility,
     pub native_window: Option<super::NativeWindowState>,
     pub native_window_sample_age_ms: Option<u64>,
     pub report: ViewerReport,
@@ -426,21 +428,24 @@ struct State {
     last_ui_ms: u64,
     last_encoded_ms: Option<u64>,
     occluded: bool,
+    window_visibility: super::WindowVisibility,
     native_window: Option<super::NativeWindowState>,
     visual_probe: Option<super::visual_probe::VisualProbe>,
     session_span: tracing::Span,
 }
 impl State {
-    fn decode_needed(&self) -> bool {
-        self.presenting
-            && !self.close
-            && !self.occluded
-            && self.native_window.is_none_or(|window| {
-                window.visible
-                    && !window.miniaturized
-                    && window.on_active_space
-                    && window.occlusion_visible
+    fn window_hidden(&self) -> bool {
+        self.occluded
+            || self.window_visibility.hidden()
+            || self.native_window.is_some_and(|window| {
+                !window.visible
+                    || window.miniaturized
+                    || !window.on_active_space
+                    || !window.occlusion_visible
             })
+    }
+    fn decode_needed(&self) -> bool {
+        self.presenting && !self.close && !self.window_hidden()
     }
 }
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
@@ -532,6 +537,7 @@ impl ViewerHandle {
                 .as_ref()
                 .map_or(0, |p| p.raw.data.len()),
             occluded: state.occluded,
+            window_visibility: state.window_visibility,
             native_window: state.native_window,
             native_window_sample_age_ms: state
                 .native_window
@@ -997,6 +1003,7 @@ impl SessionView {
                 last_ui_ms: 0,
                 last_encoded_ms: None,
                 occluded: false,
+                window_visibility: super::WindowVisibility::default(),
                 native_window: None,
                 visual_probe: None,
                 session_span: tracing::Span::none(),
@@ -1192,7 +1199,13 @@ impl App {
         if let Some(window) = &self.window {
             let elapsed = self.session.handle.started.elapsed().as_millis() as u64;
             let sample = super::platform::window_state(window, elapsed);
-            lock(&self.session.handle.state).native_window = sample;
+            let visibility = super::WindowVisibility {
+                visible: window.is_visible(),
+                minimized: window.is_minimized(),
+            };
+            let mut state = lock(&self.session.handle.state);
+            state.native_window = sample;
+            state.window_visibility = visibility;
         }
         let resume = {
             let mut state = lock(&self.session.handle.state);
@@ -1373,7 +1386,9 @@ impl App {
         }
     }
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        if let (Some(deck), Some(window)) = (&mut self.workspace, &self.window)
+        let hidden = lock(&self.session.handle.state).window_hidden();
+        if !hidden
+            && let (Some(deck), Some(window)) = (&mut self.workspace, &self.window)
             && let Some(chrome) = &mut deck.chrome
         {
             let status = lock(&self.session.handle.state).status.clone();
@@ -1382,7 +1397,21 @@ impl App {
         self.workspace_actions(event_loop);
         self.sync_native_input(self.workspace.is_some());
         self.update_window_title();
-        lock(&self.session.handle.state).report.redraws += 1;
+        {
+            let mut state = lock(&self.session.handle.state);
+            state.report.redraws += 1;
+            if state.window_hidden() {
+                state.frames.pending = None;
+                state.submission_debt.hidden();
+                state.render_stage = "window hidden";
+                state.render_stage_started = None;
+                state.report.hidden_draws_skipped += 1;
+                if let Some(probe) = &mut state.visual_probe {
+                    probe.unavailable();
+                }
+                return;
+            }
+        }
         let Some(gpu) = &mut self.gpu else {
             return;
         };
