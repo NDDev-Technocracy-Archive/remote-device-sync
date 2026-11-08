@@ -1,0 +1,254 @@
+//! Native clipboard ownership, independent of the viewing/serving role. OS
+//! adapters serialize their native objects and return futures; the UI never
+//! waits for another application's selection provider or a filesystem call.
+use std::{future::Future, pin::Pin, sync::Arc};
+
+use bytes::Bytes;
+use rds_core::clipboard::{Capabilities, FileSelection, Format, Limits, Representation};
+
+use super::image::Png;
+
+pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("native clipboard is unavailable")]
+    Unavailable,
+    #[error("native clipboard ownership changed")]
+    Changed,
+    #[error("native clipboard does not offer the requested representation")]
+    Unsupported,
+    #[error("native clipboard publication was refused")]
+    Publication,
+    #[error(transparent)]
+    Contract(#[from] rds_core::clipboard::Error),
+    #[error(transparent)]
+    Image(#[from] super::image::Error),
+    #[error(transparent)]
+    File(#[from] rds_sync::selection::Error),
+    #[error("native clipboard I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub generation: u64,
+    pub representations: Vec<Representation>,
+}
+
+#[derive(Clone)]
+pub struct Text(Bytes);
+impl Text {
+    pub fn new(bytes: Bytes, limits: &Limits) -> Result<Self, Error> {
+        limits.validate_value(Format::TextUtf8, &bytes)?;
+        Ok(Self(bytes))
+    }
+    pub fn encoded(&self) -> &Bytes {
+        &self.0
+    }
+    pub fn as_str(&self) -> &str {
+        // The private constructor validates UTF-8; Bytes stays immutable.
+        std::str::from_utf8(&self.0).expect("validated native UTF-8 remains immutable")
+    }
+}
+
+/// Native read result. Selected files are held descriptors, never a remote
+/// path or an authorization to a whole synchronization root.
+pub enum Value {
+    Text(Text),
+    Image(Png),
+    Files(Arc<dyn Files>),
+}
+impl Value {
+    pub fn format(&self) -> Format {
+        match self {
+            Self::Text(_) => Format::TextUtf8,
+            Self::Image(_) => Format::ImagePng,
+            Self::Files(_) => Format::Files,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct FileReceipt {
+    pub bytes: u64,
+    pub digest: [u8; 32],
+}
+
+impl std::fmt::Debug for FileReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileReceipt")
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A native file promise can ask only for an item in its pinned manifest. Its
+/// owned local destination came from the receiving application's native paste
+/// operation. The implementation retains its exact session/authority and all
+/// native I/O until completion or cancellation drain.
+pub trait Files: Send + Sync {
+    fn selection(&self) -> &FileSelection;
+    fn limits(&self) -> &Limits;
+    fn open(&self, file: [u8; 16]) -> Operation<'_, FileRead>;
+    fn write(&self, file: [u8; 16], destination: std::fs::File) -> Operation<'_, FileReceipt> {
+        Box::pin(write_file(self, file, destination))
+    }
+}
+
+/// A file can originate locally or in another remote tab. Forwarding its reader
+/// never requires a local staging copy. After the exact body is consumed,
+/// `complete` must verify its native version or upstream integrity and drain
+/// its owner before a downstream stream/native destination is committed.
+pub struct FileRead {
+    pub bytes: u64,
+    pub reader: Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+    pub complete: Operation<'static, ()>,
+}
+
+/// Publication is separate from a source read: file promises write directly to
+/// a native destination; adapters which require URIs own their bounded staging.
+pub enum Publication {
+    Text(Text),
+    Image(Png),
+    Files(Arc<dyn Files>),
+}
+
+pub trait Provider: Send + Sync {
+    fn capabilities(&self) -> Capabilities;
+    fn current(&self) -> Operation<'_, Snapshot>;
+    fn read(&self, generation: u64, format: Format) -> Operation<'_, Value>;
+    fn publish(&self, expected_generation: u64, value: Publication) -> Operation<'_, Snapshot>;
+    fn changed(&self, after_generation: u64) -> Operation<'_, Snapshot>;
+}
+
+impl Files for rds_sync::selection::Selection {
+    fn selection(&self) -> &FileSelection {
+        self.manifest()
+    }
+    fn limits(&self) -> &Limits {
+        self.limits()
+    }
+    fn open(&self, file: [u8; 16]) -> Operation<'_, FileRead> {
+        Box::pin(async move {
+            let selected = self.file(&file)?;
+            let bytes = selected.bytes();
+            let reader = selected.clone().reader(self.limits().clone()).await?;
+            Ok(FileRead {
+                bytes,
+                reader: Box::pin(reader),
+                complete: Box::pin(async move {
+                    tokio::task::spawn_blocking(move || selected.verify())
+                        .await
+                        .map_err(|_| Error::Unavailable)??;
+                    Ok(())
+                }),
+            })
+        })
+    }
+}
+
+async fn write_file<F: Files + ?Sized>(
+    source: &F,
+    file: [u8; 16],
+    destination: std::fs::File,
+) -> Result<FileReceipt, Error> {
+    let limits = source.limits();
+    source.selection().validate(limits)?;
+    let expected = source
+        .selection()
+        .entries
+        .iter()
+        .find(|entry| entry.id == file)
+        .ok_or(rds_sync::selection::Error::Unknown)?
+        .bytes;
+    let destination = tokio::task::spawn_blocking(move || {
+        let metadata = destination.metadata()?;
+        if !metadata.is_file() || metadata.len() != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file promise requires a new empty regular destination",
+            ));
+        }
+        Ok(destination)
+    })
+    .await
+    .map_err(|_| Error::Unavailable)??;
+    let mut read = source.open(file).await?;
+    if read.bytes != expected {
+        return Err(rds_sync::selection::Error::Changed.into());
+    }
+    let mut writer = tokio::fs::File::from_std(destination);
+    let mut bytes = vec![0; limits.chunk_bytes as usize];
+    let mut total = 0u64;
+    let mut hash = blake3::Hasher::new();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let result = async {
+        while total < expected {
+            let maximum = (expected - total).min(bytes.len() as u64) as usize;
+            let length = read.reader.read(&mut bytes[..maximum]).await?;
+            if length == 0 {
+                return Err(rds_sync::selection::Error::Changed.into());
+            }
+            writer.write_all(&bytes[..length]).await?;
+            hash.update(&bytes[..length]);
+            total += length as u64;
+        }
+        if read.reader.read(&mut [0u8; 1]).await? != 0 {
+            return Err(rds_sync::selection::Error::Changed.into());
+        }
+        read.complete.await?;
+        writer.flush().await?;
+        Ok(FileReceipt {
+            bytes: total,
+            digest: *hash.finalize().as_bytes(),
+        })
+    }
+    .await;
+    // Drain queued native writes on both success and failure. The
+    // caller still owns/discards the unpublished destination on error.
+    drop(writer.into_std().await);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_file_promise_writes_only_its_selected_object_to_one_destination() {
+        let root =
+            std::env::temp_dir().join(format!("rds-file-promise-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        let destination = root.join("pasted");
+        let value = "Привет 🖥️\n".repeat(10000).into_bytes();
+        std::fs::write(&source, &value).unwrap();
+        let selected = rds_sync::selection::Selection::from_paths(
+            [source],
+            &Limits {
+                chunk_bytes: 4096,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        let file = selected.manifest().entries[0].id;
+        let output = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&destination)
+            .unwrap();
+        let receipt = selected.write(file, output).await.unwrap();
+        assert_eq!(receipt.bytes, value.len() as u64);
+        assert_eq!(receipt.digest, *blake3::hash(&value).as_bytes());
+        assert_eq!(std::fs::read(&destination).unwrap(), value);
+        let existing = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&destination)
+            .unwrap();
+        assert!(selected.write(file, existing).await.is_err());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        drop(selected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

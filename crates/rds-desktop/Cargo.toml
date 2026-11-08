@@ -15,6 +15,8 @@ viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", 
 
 [dependencies]
 blake3.workspace = true
+image.workspace = true
+png.workspace = true
 bytes.workspace = true
 rand.workspace = true
 memmap2 = { version = "0.9", optional = true }
@@ -24,6 +26,7 @@ openh264 = { version = "0.9", optional = true }
 openh264-sys2 = { version = "0.9", default-features = false, optional = true }
 rds-core.workspace = true
 rds-net.workspace = true
+rds-sync.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -68,7 +71,6 @@ tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 noq.workspace = true
 rds-bench = { workspace = true, features = ["transport-noq"] }
-rds-sync.workspace = true
 
 [lints]
 workspace = true

@@ -32,7 +32,7 @@ repository = "https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote"
 #   rds-relay     → rds-core, rds-net
 #   rds-audio     → rds-core
 #   rds-sync      → rds-core, rds-net
-#   rds-desktop   → rds-core, rds-net
+#   rds-desktop   → rds-core, rds-net, rds-sync (selected-file capabilities)
 #   rds-client    → rds-core, rds-net, rds-discovery (outgoing sessions and local IPC)
 #   rds-ssh       → standard SSH library and async I/O (no endpoint ownership)
 #   rds-agent     → everything client-facing
@@ -42,6 +42,8 @@ repository = "https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote"
 [workspace.dependencies]
 anyhow = "1"
 blake3 = "1"
+image = { version = "0.25.10", default-features = false, features = ["png", "tiff"] }
+png = "0.18.1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 data-encoding = "2"

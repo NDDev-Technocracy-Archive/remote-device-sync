@@ -1,7 +1,10 @@
 //! Explicit text paste, bounded reassembly and session-owned OS clipboard.
 use crate::DesktopError;
 use std::{future::Future, pin::Pin};
-pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+pub mod image;
+pub mod native;
+pub mod stream;
+pub const MAX_TEXT_BYTES: usize = rds_core::clipboard::TEXT_BYTES as usize;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const SEND_CHUNK_BYTES: usize = 16 * 1024;
 
