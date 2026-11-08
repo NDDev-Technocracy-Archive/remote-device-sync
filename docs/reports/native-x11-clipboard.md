@@ -52,3 +52,29 @@ This increment does not advertise negotiated native clipboard mode. The shared
 session/manager/UI flow, Wayland provider, native file publication and actual
 cross-device application pastes still require qualification. Installed hosts,
 device identities and OS permissions are unchanged.
+
+## Combined dependency qualification
+
+Runtime source `f0d0671f4691fc550b5b69c7724dab8f39cf669f` includes the current
+transport/native dependency set. Its snapshot SHA-256 is
+`8046c62fa11ccad22f1bb1cb6c7c2bdf9319944d6de63a246996422ed8fcb168`.
+Full Linux workspace all-target denied Clippy passed. The viewer/X11 library
+passed 202 display-free cases (10 native/display cases excluded there), then all
+seven explicit native X11 cases passed. The idle observation remained five
+voluntary switches over 20.002 seconds. Selected Apple Silicon all-target
+denied Clippy, native desktop/CLI/agent tests and 19 packaging checks also passed.
+
+Both local optimized Mac build attempts stopped at the development cache's
+server startup error before producing an artifact, including the accepted
+toolchain source. Instead, the existing
+[native CI producer](https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote/actions/runs/42527075635)
+supplied probe artifact `13636139389`. Its checkout source is
+`859a04f7dbde68f408c3328ab0d68c5833607bca`, whose tree matches the runtime source
+above. ZIP SHA-256 is
+`40c8046983db9d9d234433b6feaf29dcdea5b4484c7cc7733e55e9ca9b2e57ef`;
+probe executable SHA-256 is
+`3ce6948aa4f9fcf70e33ec4367ac876749b8006a2640c1fc6dc5f6bce9ef41c0`.
+The verified exact executable passed strict native signature verification and
+all 14 private-pasteboard cases on physical M1 and M2. Both retained the
+`sandbox_extension_consume` permission warning; these probes do not qualify a
+sandboxed application or operating-system consent.

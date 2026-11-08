@@ -109,6 +109,8 @@ impl Worker {
                 {
                     changes.send(ClipboardChange { text });
                 }
+                // RustConnection may retain another event batch after its
+                // socket stops being ready. Revisit jobs/stop before draining.
                 if buffered {
                     continue;
                 }
