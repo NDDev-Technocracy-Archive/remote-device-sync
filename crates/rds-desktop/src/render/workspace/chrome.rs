@@ -396,7 +396,7 @@ impl Chrome {
 }
 
 fn restore_button(context: &egui::Context) -> egui::Response {
-    egui::Area::new(egui::Id::new("restore-workspace-panels"))
+    egui::Area::new(egui::Id::unique("restore-workspace-panels"))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_TOP, egui::Vec2::ZERO)
         .movable(false)
@@ -422,7 +422,7 @@ fn panel_arrow(ui: &mut egui::Ui, restore: bool) -> egui::Response {
     } else {
         "Hide panels"
     };
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     let visuals = ui.style().interact(&response);
     ui.painter().rect(
         rect,

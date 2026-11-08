@@ -44,7 +44,7 @@ pub(super) enum Closed {
 }
 
 pub(super) struct Owner {
-    pending: Arc<Mutex<Option<ashpd::zbus::zvariant::OwnedObjectPath>>>,
+    pending: Arc<Mutex<Option<ashpd::zbus::OwnedObjectPath>>>,
     close: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     pub closed: watch::Receiver<Option<Closed>>,
@@ -90,18 +90,15 @@ async fn rpc<T>(
 
 fn cursor_mode(value: Option<&std::ffi::OsStr>) -> Result<CursorMode, DesktopError> {
     match value {
-        None => Ok(CursorMode::Embedded),
-        Some(value) if value == "embedded" => Ok(CursorMode::Embedded),
-        Some(value) if value == "hidden" => Ok(CursorMode::Hidden),
+        None => Ok(CursorMode::EMBEDDED),
+        Some(value) if value == "embedded" => Ok(CursorMode::EMBEDDED),
+        Some(value) if value == "hidden" => Ok(CursorMode::HIDDEN),
         Some(_) => Err(DesktopError::Capture(
             "invalid RDS_PORTAL_CURSOR_MODE; expected embedded or hidden".into(),
         )),
     }
 }
-fn require_cursor_mode(
-    available: ashpd::enumflags2::BitFlags<CursorMode>,
-    selected: CursorMode,
-) -> Result<(), DesktopError> {
+fn require_cursor_mode(available: CursorMode, selected: CursorMode) -> Result<(), DesktopError> {
     if available.contains(selected) {
         Ok(())
     } else {
@@ -116,7 +113,7 @@ pub(super) async fn open(
     let cursor_mode = cursor_mode(std::env::var_os("RDS_PORTAL_CURSOR_MODE").as_deref())?;
     tracing::info!(
         mode = match cursor_mode {
-            CursorMode::Hidden => "hidden",
+            CursorMode::HIDDEN => "hidden",
             _ => "embedded",
         },
         "Wayland portal capture cursor mode selected"
@@ -143,7 +140,7 @@ pub(super) async fn open(
             connection.map_err(|_| error("bus connection"))?.map_err(|_| error("bus connection"))?
         },
     };
-    let devices = DeviceType::Keyboard | DeviceType::Pointer;
+    let devices = DeviceType::KEYBOARD | DeviceType::POINTER;
     let creating = async {
         rpc(
             "application registration",
@@ -214,7 +211,7 @@ pub(super) async fn open(
             screencast.select_sources(
                 &session,
                 SelectSourcesOptions::default()
-                    .set_sources(Some(SourceType::Monitor.into()))
+                    .set_sources(Some(SourceType::MONITOR))
                     .set_multiple(true)
                     .set_cursor_mode(cursor_mode),
             ),
@@ -261,7 +258,7 @@ pub(super) async fn open(
                 .mapping_id()
                 .filter(|s| !s.is_empty() && s.len() <= 256)
                 .ok_or_else(|| error("input mapping identity"))?;
-            if stream.source_type() != Some(SourceType::Monitor)
+            if stream.source_type() != Some(SourceType::MONITOR)
                 || matches!(stream.pipe_wire_node_id(), 0 | u32::MAX)
                 || monitors.iter().any(|m: &Monitor| {
                     m.stable_id == stable
@@ -381,7 +378,7 @@ async fn start(
     connection: &ashpd::zbus::Connection,
 ) -> Result<ashpd::desktop::remote_desktop::SelectedDevices, DesktopError> {
     use ashpd::desktop::Response;
-    use ashpd::zbus::zvariant::{OwnedObjectPath, Value};
+    use ashpd::zbus::{OwnedObjectPath, Variant};
     let sender = connection
         .unique_name()
         .ok_or_else(|| error("request peer"))?
@@ -422,7 +419,7 @@ async fn start(
     .await
     .map_err(|_| error("start proxy deadline"))?
     .map_err(|_| error("start proxy"))?;
-    let options = std::collections::HashMap::from([("handle_token", Value::from(token))]);
+    let options = std::collections::HashMap::from([("handle_token", Variant::from(token))]);
     let returned: OwnedObjectPath =
         tokio::time::timeout(RPC_TIMEOUT, remote.call("Start", &(session, "", options)))
             .await
@@ -457,10 +454,7 @@ async fn start(
     }
 }
 
-async fn close_request(
-    connection: &ashpd::zbus::Connection,
-    path: ashpd::zbus::zvariant::OwnedObjectPath,
-) {
+async fn close_request(connection: &ashpd::zbus::Connection, path: ashpd::zbus::OwnedObjectPath) {
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         let proxy = ashpd::zbus::Proxy::new(
             connection,
@@ -481,11 +475,11 @@ mod request_tests {
     fn explicit_cursor_modes_are_validated_without_fallback_or_global_environment_changes() {
         use std::ffi::OsStr;
         let embedded = cursor_mode(None).unwrap();
-        assert_eq!(embedded, CursorMode::Embedded);
+        assert_eq!(embedded, CursorMode::EMBEDDED);
         let hidden = cursor_mode(Some(OsStr::new("hidden"))).unwrap();
-        assert_eq!(hidden, CursorMode::Hidden);
-        assert!(require_cursor_mode(CursorMode::Embedded.into(), hidden).is_err());
-        assert!(require_cursor_mode(CursorMode::Embedded | CursorMode::Hidden, hidden).is_ok());
+        assert_eq!(hidden, CursorMode::HIDDEN);
+        assert!(require_cursor_mode(CursorMode::EMBEDDED, hidden).is_err());
+        assert!(require_cursor_mode(CursorMode::EMBEDDED | CursorMode::HIDDEN, hidden).is_ok());
         let request = SelectSourcesOptions::default().set_cursor_mode(hidden);
         assert_eq!(
             serde_json::to_value(request).unwrap()["cursor_mode"]["value"],
@@ -499,7 +493,7 @@ mod request_tests {
     use ashpd::zbus;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, BufReader};
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+    use zbus::{OwnedObjectPath, OwnedVariant};
 
     struct EarlyResponsePortal {
         response: u32,
@@ -508,7 +502,7 @@ mod request_tests {
 
     fn fixture_path(
         header: &zbus::message::Header<'_>,
-        options: &std::collections::HashMap<String, OwnedValue>,
+        options: &std::collections::HashMap<String, OwnedVariant>,
         segment: &str,
         token_key: &str,
     ) -> OwnedObjectPath {
@@ -534,7 +528,7 @@ mod request_tests {
 
         async fn create_session(
             &self,
-            options: std::collections::HashMap<String, OwnedValue>,
+            options: std::collections::HashMap<String, OwnedVariant>,
             #[zbus(connection)] connection: &zbus::Connection,
             #[zbus(header)] header: zbus::message::Header<'_>,
         ) -> zbus::fdo::Result<OwnedObjectPath> {
@@ -550,7 +544,7 @@ mod request_tests {
                         0_u32,
                         std::collections::HashMap::from([(
                             "session_handle",
-                            OwnedValue::from(session.into_inner()),
+                            OwnedVariant::from(session.into_inner()),
                         )]),
                     ),
                 )
@@ -562,7 +556,7 @@ mod request_tests {
             &self,
             _session: OwnedObjectPath,
             _parent: &str,
-            options: std::collections::HashMap<String, OwnedValue>,
+            options: std::collections::HashMap<String, OwnedVariant>,
             #[zbus(connection)] connection: &zbus::Connection,
             #[zbus(header)] header: zbus::message::Header<'_>,
         ) -> zbus::fdo::Result<OwnedObjectPath> {
@@ -577,7 +571,7 @@ mod request_tests {
                     "Response",
                     &(
                         self.response,
-                        std::collections::HashMap::from([("devices", OwnedValue::from(3_u32))]),
+                        std::collections::HashMap::from([("devices", OwnedVariant::from(3_u32))]),
                     ),
                 )
                 .await?;
@@ -604,9 +598,7 @@ mod request_tests {
             .unwrap()
             .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .name("org.freedesktop.portal.Desktop")
-            .unwrap()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 EarlyResponsePortal {
@@ -614,12 +606,10 @@ mod request_tests {
                     wrong_path,
                 },
             )
-            .unwrap()
             .build()
             .await
             .unwrap();
         let client = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -658,7 +648,7 @@ mod request_tests {
                     result
                         .unwrap()
                         .devices()
-                        .contains(DeviceType::Keyboard | DeviceType::Pointer)
+                        .contains(DeviceType::KEYBOARD | DeviceType::POINTER)
                 );
             } else {
                 assert!(
@@ -726,9 +716,7 @@ mod request_tests {
             .unwrap()
             .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .name("org.freedesktop.portal.Desktop")
-            .unwrap()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 EarlyResponsePortal {
@@ -736,12 +724,10 @@ mod request_tests {
                     wrong_path: false,
                 },
             )
-            .unwrap()
             .build()
             .await
             .unwrap();
         let client = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -811,16 +797,12 @@ mod request_tests {
             OwnedObjectPath::try_from("/org/freedesktop/portal/desktop/request/1_0/rds_test")
                 .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .name("org.freedesktop.portal.Desktop")
-            .unwrap()
             .serve_at(path.clone(), Request(calls.clone()))
-            .unwrap()
             .build()
             .await
             .unwrap();
         let client = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
