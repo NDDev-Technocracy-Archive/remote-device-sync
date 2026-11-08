@@ -1,4 +1,4 @@
-# Iroh1.3 periodic custom selection patch
+# Iroh 1.4.1 periodic custom selection patch
 
 Initial actor registration subscribes before reading Noq's established-path
 snapshot. A deferred accepting future can otherwise miss an already validated
@@ -6,9 +6,9 @@ standby permanently because the event stream does not replay history. Identical
 snapshot/event observations do not emit duplicate opens or increment metrics.
 The original handshake-path relay restoration policy is retained.
 
-Upstream: published crates.io `iroh`1.3.0, checksum
-885787b892b5e2507c701f132ecbd45d2bad4bbb75157a19427087c16dadb833.
-Original SPDX MIT OR Apache-2.0 license files from exact upstream tag v1.3.0
+Upstream: published crates.io `iroh` 1.4.1, checksum
+e3689cab508af9bcef7816c1201b403595ec6aa20e7d15e1f9683bb4be4a5b17.
+Original SPDX MIT OR Apache-2.0 license files from exact upstream revision d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940
 and the additional BSD-3-Clause Tailscale-derived source notice are retained. No QUIC/TLS/relay wire change.
 
 The published selector only runs after connection/path topology events. Add one
@@ -73,3 +73,10 @@ uses a real signed directory and isolated relay with dead, wrong-key and
 previously authenticated/reassigned hints; the path-state regression covers
 live-authenticated/unrelated cache preservation. Owned Noq's address-reuse
 fixture awaits its asynchronous UDP-driver close before binding the replacement.
+
+## Upstream refresh
+
+The pending four-tuple queue deduplication is now upstream and is no longer a
+local change. The other opt-in adaptations above are carried onto the published
+source. Default features and transport eligibility are retained. Qualification
+is recorded separately; a successful source merge is not behavior evidence.
