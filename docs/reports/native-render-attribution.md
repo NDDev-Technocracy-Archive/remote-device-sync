@@ -45,3 +45,20 @@ Native fixture jobs closed cleanly and their private IPC roots were removed
 with owner/inode checks. Existing production processes retained their PIDs.
 Linux library and warning-denied all-target checks passed for the instrumented
 draw path; final-head public Linux/macOS lanes remain required.
+
+The exact public PR producer also ran on physical Apple Silicon. The visible
+M2 viewer reported Metal/integrated GPU/Fifo/BGRA8sRGB/latency 1 and submitted
+573 frames in 20 seconds, with zero attributed process writes and no diagnostic
+file writes/incidents. Acquisition/upload/commands/submission/presentation
+maxima were respectively 22,880/1,552/4,200/925/852 µs. Its fixture closed cleanly
+and the installed host retained its PID.
+
+On M1, direct-background and ordinary packaged-app launches both remained
+occluded. The retained observation showed 506 received frames, zero GPU uploads
+and submissions, 517 acquisition attempts/skips (maximum 644 µs), and no later
+draw stages. AppKit reported an inactive, visible but fully occluded window;
+the local observation endpoint remained healthy. This qualifies attribution of
+skipped native draws, not visible presentation on M1. No acquisition stall or
+rendering correction is inferred from it. Owned fixture processes closed and
+the installed host retained its PID. Neither Mac result closes the earlier
+unexplained X11 cohort or establishes hardware-codec/input-to-photon acceptance.
