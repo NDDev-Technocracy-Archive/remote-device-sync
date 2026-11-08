@@ -40,6 +40,33 @@ path cannot redirect that authority. Modification during the selected copy is
 reported as a failed source. No content pre-read, chunk-cache write or second
 full receiver copy is required by this core.
 
+Every selection constructor requires the physical owner's `DescriptorBudget`.
+Path selection reserves before open; imported native handles reserve before
+metadata access. A held descriptor drops its FD before its reservation on both
+normal completion and admission errors. Readers and canceled native operations
+retain the descriptor and its budget until actual I/O returns. A new offer,
+closed provider or replacement owner cannot reset capacity still used by a file.
+
+The native policy is versioned in
+`crates/rds-desktop/config/native-clipboard.json`. It declares every setting,
+including nested representation limits; absent/unknown fields and unsupported
+schema versions are refused. `Policy::shipped` reads this compiled common
+profile without filesystem/environment access; an embedding may supply its own
+validated typed policy. Native selected descriptors, queued jobs, native body
+operations and directional wire transfers are separate allowances. The
+standalone profile admits 64 retained selection FDs process-wide, independently
+of the protocol's 128 files per manifest. A capacity error never silently admits
+only part of a selected copy.
+
+Native viewing and serving providers share the same weak process budget pool.
+Each selected descriptor retains that exact physical owner, independently of a
+pasteboard worker's lifetime. A replacement with a different limit is refused
+while an old descriptor/native owner remains; an explicit new policy applies
+after the old resource drains. The source/reader tests exercise this boundary
+and capacity rejection before even a nonexistent pathname is opened.
+Native checks and source/probe bindings are recorded in
+[the descriptor admission report](reports/native-clipboard-descriptors.md).
+
 The desktop crate consumes this narrow file capability from `rds-sync` rather
 than introducing a second filesystem-transfer implementation. Sync's configured
 root authorization and resumable journal remain independent; a clipboard offer

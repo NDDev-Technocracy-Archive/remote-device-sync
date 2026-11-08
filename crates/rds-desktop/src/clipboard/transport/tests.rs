@@ -180,9 +180,12 @@ async fn real_selected_file_crosses_quic_without_a_staging_file() {
     std::fs::create_dir(&root).unwrap();
     let value = "native clipboard 🖥️\n".repeat(20_000).into_bytes();
     std::fs::write(root.join("selected"), &value).unwrap();
-    let selected =
-        rds_sync::selection::Selection::from_paths([root.join("selected")], &Limits::default())
-            .unwrap();
+    let selected = rds_sync::selection::Selection::from_paths(
+        [root.join("selected")],
+        &Limits::default(),
+        &rds_sync::selection::DescriptorBudget::new(1).unwrap(),
+    )
+    .unwrap();
     let file = selected.manifest().entries[0].id;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let pair = Pair::new().await;
@@ -223,9 +226,12 @@ async fn remote_native_promise_writes_only_its_selected_file_and_receipts_verifi
     std::fs::create_dir(&root).unwrap();
     let bytes = "remote file ✓\n".repeat(30_000).into_bytes();
     std::fs::write(root.join("selected"), &bytes).unwrap();
-    let selected =
-        rds_sync::selection::Selection::from_paths([root.join("selected")], &Limits::default())
-            .unwrap();
+    let selected = rds_sync::selection::Selection::from_paths(
+        [root.join("selected")],
+        &Limits::default(),
+        &rds_sync::selection::DescriptorBudget::new(1).unwrap(),
+    )
+    .unwrap();
     let file = selected.manifest().entries[0].id;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let pair = Pair::backend(rds_net::Backend::Noq).await;
@@ -304,9 +310,12 @@ async fn outgoing_reservation_survives_cancellation_of_its_actual_native_open() 
         std::env::temp_dir().join(format!("rds-native-body-{:032x}", rand::random::<u128>()));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("selected"), b"selected").unwrap();
-    let selected =
-        rds_sync::selection::Selection::from_paths([root.join("selected")], &Limits::default())
-            .unwrap();
+    let selected = rds_sync::selection::Selection::from_paths(
+        [root.join("selected")],
+        &Limits::default(),
+        &rds_sync::selection::DescriptorBudget::new(1).unwrap(),
+    )
+    .unwrap();
     let file = selected.manifest().entries[0].id;
     let (entered, ready) = tokio::sync::oneshot::channel();
     let (release, held) = std::sync::mpsc::channel();

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "limits": {
+    "text_bytes": 1048576,
+    "image_bytes": 33554432,
+    "image_pixels": 16777216,
+    "selection_bytes": 68719476736,
+    "files": 128,
+    "chunk_bytes": 262144,
+    "parallel_transfers": 2
+  },
+  "watch_interval_ms": 100,
+  "operation_timeout_ms": 2000,
+  "native_uri_bytes": 1048576,
+  "native_types": 64,
+  "pending_operations": 8,
+  "selected_file_descriptors": 64,
+  "native_body_operations": 2
+}

@@ -31,7 +31,7 @@ pub enum ShortcutModifier {
 /// One selected policy. Peers use the smaller admitted limits; a capability
 /// declaration alone never grants screen control, clipboard or filesystem I/O.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     pub text_bytes: u64,
     pub image_bytes: u64,
