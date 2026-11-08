@@ -7,6 +7,7 @@ pub(crate) mod macos;
 pub mod native;
 pub(crate) mod ownership;
 pub mod stream;
+pub mod transport;
 pub const MAX_TEXT_BYTES: usize = rds_core::clipboard::TEXT_BYTES as usize;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const SEND_CHUNK_BYTES: usize = 16 * 1024;

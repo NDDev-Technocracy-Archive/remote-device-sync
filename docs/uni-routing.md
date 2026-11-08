@@ -15,6 +15,25 @@ sequence or chunk identity: parallel tag reads need not complete in the order
 streams were accepted. Legacy `Sync` and shared `Desktop`
 service-kind routing remain available only for explicit direct compatibility.
 
+Native clipboard bodies append `ClipboardBody { id }`, where the ID binds the
+desktop, offer and monotonically allocated local request. Its receiver claims
+the exact route before sending request metadata, takes one body, then releases
+the inbox. Delayed, duplicate and unrequested bodies cannot satisfy a later
+request. This transport does not itself admit clipboard access or advertise
+native mode; the desktop must explicitly negotiate capabilities and policy.
+Independent incoming/outgoing body budgets prevent simultaneous requests from
+occupying the permits needed to answer each other. Body streams use priority
+zero, below control and media. Closure seals admission and cancels network I/O;
+an unfinished sender resets instead of silently finishing a partial body.
+Remote file readers and their integrity proofs both retain the original body
+permit and desktop owner. Native workers have their own retained I/O ownership.
+Each request also carries its original offer/paste cancellation scope. Invalidating
+that scope interrupts header/body reads as well as refusing new admission. Direct
+source reads and destination writes retain the body reservation through actual
+native I/O, even
+when their async waiter is canceled. This extends the same ownership into native
+file promises without a staged file or a separate receive pump.
+
 ## Ownership and termination
 
 Facade Connection handles and their UniStreams inboxes share the router owner.

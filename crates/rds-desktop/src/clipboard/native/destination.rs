@@ -8,7 +8,10 @@ use crate::clipboard::NativeLifetime;
 /// caller supplies that operation's original peer/service/purpose owner, not
 /// a replacement scope. This type grants no filesystem or network permission.
 /// No Debug: destination capabilities are not diagnostic data.
-pub struct Destination(Arc<OwnedDestination>);
+pub struct Destination {
+    owner: Arc<OwnedDestination>,
+    retained: Option<NativeLifetime>,
+}
 struct OwnedDestination {
     // Close the FD before releasing its original caller on every drop path.
     file: File,
@@ -16,10 +19,22 @@ struct OwnedDestination {
 }
 impl Destination {
     pub fn new(file: File, original: NativeLifetime) -> Self {
-        Self(Arc::new(OwnedDestination {
-            file,
-            _lifetime: original,
-        }))
+        Self {
+            owner: Arc::new(OwnedDestination {
+                file,
+                _lifetime: original,
+            }),
+            retained: None,
+        }
+    }
+    /// Add the actual body reservation without replacing the destination's
+    /// native paste authority. Every running syscall retains both owners.
+    pub(crate) fn retaining(mut self, context: NativeLifetime) -> Self {
+        self.retained = Some(Arc::new((self.retained.take(), context)));
+        self
+    }
+    pub(super) fn lifetime(&self) -> NativeLifetime {
+        Arc::new((self.owner.clone(), self.retained.clone()))
     }
     pub(crate) async fn validate_empty(&self) -> Result<(), Error> {
         self.run(|file| {
@@ -53,11 +68,16 @@ impl Destination {
         &self,
         operation: impl FnOnce(&File) -> std::io::Result<T> + Send + 'static,
     ) -> Result<T, Error> {
-        let owner = self.0.clone();
-        tokio::task::spawn_blocking(move || operation(&owner.file))
-            .await
-            .map_err(|_| Error::Unavailable)?
-            .map_err(Error::Io)
+        let owners = (self.owner.clone(), self.retained.clone());
+        tokio::task::spawn_blocking(move || {
+            // Move the whole pair: precise closure capture of only .0 would
+            // release the body reservation before the native syscall runs.
+            let held = owners;
+            operation(&held.0.file)
+        })
+        .await
+        .map_err(|_| Error::Unavailable)?
+        .map_err(Error::Io)
     }
 }
 
@@ -71,6 +91,18 @@ mod tests {
     impl Drop for OriginalCaller {
         fn drop(&mut self) {
             if let Some(done) = self.0.take() {
+                let _ = done.send(());
+            }
+        }
+    }
+    struct BodyReservation {
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        dropped: Option<oneshot::Sender<()>>,
+    }
+    impl Drop for BodyReservation {
+        fn drop(&mut self) {
+            drop(self.permit.take());
+            if let Some(done) = self.dropped.take() {
                 let _ = done.send(());
             }
         }
@@ -91,7 +123,14 @@ mod tests {
         let (done, drained) = oneshot::channel();
         let context = Arc::new(OriginalCaller(Some(done)));
         let retained = Arc::downgrade(&context);
-        let destination = Destination::new(output, context);
+        let budget = Arc::new(tokio::sync::Semaphore::new(1));
+        let (budget_dropped, budget_drained) = oneshot::channel();
+        let reservation = Arc::new(BodyReservation {
+            permit: Some(budget.clone().acquire_owned().await.unwrap()),
+            dropped: Some(budget_dropped),
+        });
+        let retained_budget = Arc::downgrade(&reservation);
+        let destination = Destination::new(output, context).retaining(reservation);
         let (entered, ready) = oneshot::channel();
         let (release, held) = std::sync::mpsc::channel();
         let waiting = tokio::spawn(async move {
@@ -118,12 +157,23 @@ mod tests {
             retained.upgrade().is_some(),
             "native I/O lost its original caller"
         );
+        assert!(retained_budget.upgrade().is_some());
+        assert!(
+            budget.try_acquire().is_err(),
+            "canceled waiter released the running body reservation"
+        );
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), drained)
             .await
             .unwrap()
             .unwrap();
         assert!(retained.upgrade().is_none());
+        tokio::time::timeout(Duration::from_secs(2), budget_drained)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(retained_budget.upgrade().is_none());
+        assert_eq!(budget.available_permits(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

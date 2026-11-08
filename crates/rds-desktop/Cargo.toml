@@ -29,6 +29,7 @@ rds-net.workspace = true
 rds-sync.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes", "damage", "xkb", "randr"], optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "vulkan", "gles", "wgsl"], optional = true }

@@ -32,14 +32,7 @@ pub async fn receive_reader<R: AsyncRead + Unpin + Send + 'static>(
     Ok(native::FileRead {
         bytes: header.bytes,
         reader: Box::pin(reader),
-        complete: Box::pin(async move {
-            proof.await.map(|_| ()).map_err(|error| match error {
-                Error::Io(error) => native::Error::Io(error),
-                Error::Length | Error::Integrity => native::Error::Integrity,
-                Error::Contract(error) => native::Error::Contract(error),
-                Error::Source(error) => error,
-            })
-        }),
+        complete: Box::pin(async move { proof.await.map(|_| ()).map_err(Error::into_native) }),
     })
 }
 
