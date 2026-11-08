@@ -48,6 +48,10 @@ class ReleaseContract(unittest.TestCase):
         Path("packaging/macos.json").write_bytes(settings.read_bytes())
         resources = settings.parent / 'notices.json'
         Path('packaging/notices.json').write_bytes(resources.read_bytes())
+        design = settings.parent / 'design-system.json'
+        Path('packaging/design-system.json').write_bytes(design.read_bytes())
+        shutil.copytree(settings.parent.parent / 'vendor/nddev-opennetwork-design-tokens',
+                        Path('vendor/nddev-opennetwork-design-tokens'))
         assets = settings.parent.parent / 'crates/rds-desktop/assets'
         shutil.copytree(assets / 'font-licenses', Path('crates/rds-desktop/assets/font-licenses'))
         shutil.copyfile(assets / 'app-icon.icns', Path('crates/rds-desktop/assets/app-icon.icns'))

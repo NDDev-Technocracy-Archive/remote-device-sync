@@ -2,11 +2,14 @@
 //! No child viewer processes, Space-number APIs or duplicated remote streams.
 use super::super::clipboard::CopyFence;
 use super::*;
-use crate::render::workspace::{DeviceView, TabId, TabSpec, WorkspaceModel, chrome::Action};
+use crate::render::workspace::{
+    Appearance, DeviceView, TabId, TabSpec, WorkspaceModel, chrome::Action,
+};
 use std::collections::BTreeMap;
 mod clipboard;
 
 pub(super) struct Screens {
+    appearance: Appearance,
     model: WorkspaceModel,
     devices: Vec<DeviceView>,
     panes: BTreeMap<Option<TabId>, App>,
@@ -58,6 +61,7 @@ impl Viewer {
         let (events, receiver) = tokio::sync::mpsc::channel(32);
         let handle = WorkspaceHandle::new(updates, proxy.clone());
         viewer.screens = Some(Screens {
+            appearance: Appearance::default(),
             model: WorkspaceModel::default(),
             devices,
             panes: BTreeMap::new(),
@@ -85,6 +89,10 @@ impl Screens {
     fn project(&mut self) {
         for (id, app) in &mut self.panes {
             if let Some(deck) = &mut app.workspace {
+                deck.appearance = self.appearance;
+                if let Some(chrome) = &mut deck.chrome {
+                    chrome.appearance(self.appearance);
+                }
                 deck.model = self.model.clone();
                 if let Some(id) = id {
                     let _ = deck.model.select(*id);
@@ -117,8 +125,10 @@ impl Screens {
             super::super::clipboard::Clipboard::with_arbiter(self.clipboard.clone());
         if let Some(tab) = &tab {
             view.label(format!(
-                "RDS · {} · Display {}",
-                tab.spec.label, tab.spec.display
+                "{} · {} · Display {}",
+                crate::render::APPLICATION_NAME,
+                tab.spec.label,
+                tab.spec.display
             ));
         } else {
             view.status("Ready");
@@ -139,6 +149,7 @@ impl Screens {
                 self.devices.clone(),
                 self.events.clone(),
                 self.action_sender.clone(),
+                self.appearance,
             )),
             activity: tab
                 .as_ref()
@@ -235,8 +246,10 @@ impl Screens {
         lock(&view.state).clipboard =
             super::super::clipboard::Clipboard::with_arbiter(self.clipboard.clone());
         view.label(format!(
-            "RDS · {} · Display {}",
-            tab.spec.label, tab.spec.display
+            "{} · {} · Display {}",
+            crate::render::APPLICATION_NAME,
+            tab.spec.label,
+            tab.spec.display
         ));
         app.session = session;
         app.last_window_status = None;
@@ -262,6 +275,10 @@ impl Screens {
                 break;
             };
             match update {
+                WorkspaceUpdate::Appearance(appearance) => {
+                    self.appearance = appearance;
+                    self.project();
+                }
                 WorkspaceUpdate::CloseWindow => {
                     event_loop.exit();
                     return;
@@ -338,9 +355,20 @@ impl Screens {
                         .iter()
                         .map(|tab| tab.spec.clone())
                         .collect();
-                    if self.events.try_send(WorkspaceEvent::Save { tabs }).is_err() {
+                    if self
+                        .events
+                        .try_send(WorkspaceEvent::Save {
+                            tabs,
+                            appearance: self.appearance,
+                        })
+                        .is_err()
+                    {
                         self.message("Save queue is full; try again");
                     }
+                }
+                Action::Appearance(appearance) => {
+                    self.appearance = appearance;
+                    self.project();
                 }
             }
         }

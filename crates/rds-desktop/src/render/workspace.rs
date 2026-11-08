@@ -1,5 +1,7 @@
 //! Bounded native workspace intent. Transport and credentials remain caller-owned.
 use serde::{Deserialize, Serialize};
+mod appearance;
+pub use appearance::Appearance;
 
 #[cfg(feature = "viewer")]
 pub(crate) mod chrome;
