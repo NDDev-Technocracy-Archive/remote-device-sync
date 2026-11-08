@@ -146,6 +146,7 @@ pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
             snapshot.generation,
             rds_core::clipboard::Format::TextUtf8,
             &policy,
+            None,
         )
         .map_err(clipboard_error)?
     {

@@ -69,15 +69,28 @@ scope through native completion, even when its receiver times out. No watcher
 means the native owner sleeps on its queue. Consented Mac hosting uses this
 owner for the existing text mode. The current viewer wrappers still require
 migration to its asynchronous contract before native clipboard mode is offered.
-Native files remain unsupported until NSURL authority and paste promises are
-implemented; string URLs are not a substitute for native file authority.
+File sources are read as native NSURL objects, with their resource scopes and
+original caller held by every selected descriptor and reader. Foundation's
+filesystem representation is bounded across the whole selection; a serialized
+string URL never substitutes for the native object. Unscoped local URLs still
+require ordinary process filesystem access. Successful resource-scope starts
+are balanced after descriptor cleanup. Native file publication/paste promises
+remain unsupported, so macOS source and receiver capabilities differ.
 
 `native_clipboard` runs against private named pasteboards. The first seven
 AppKit cases passed on physical Apple Silicon hosts using the exact PR probe
-artifact. The queued owner adds five separately reported cases. These probes do
+artifact. The queued owner adds five cases, and the native file case reads an
+explicit NSURL selection after its pathname has been moved/replaced. Its held
+descriptor supplies the original bytes while the caller authority survives
+through completion. These probes do
 not read the general clipboard, change OS grants or establish cross-device paste
 acceptance. PR probe bytes are bound to their source tree and artifact digest;
 release provenance is emitted only for successful main producers.
+
+Native API references: [NSPasteboard object reading](https://developer.apple.com/documentation/appkit/nspasteboard)
+and [NSURL resource scope](https://developer.apple.com/documentation/foundation/nsurl/startaccessingsecurityscopedresource()).
+These APIs do not establish sandboxed or receiving-application acceptance by
+themselves; those remain separate native platform cases.
 
 Wayland consent-state ownership explicitly unlocks its file on teardown. A
 transient descriptor inherited by a concurrent spawn before CLOEXEC must not

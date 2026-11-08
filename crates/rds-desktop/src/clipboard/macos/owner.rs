@@ -46,6 +46,7 @@ enum Command {
     Read {
         generation: u64,
         format: Format,
+        authority: Option<NativeLifetime>,
         reply: oneshot::Sender<Result<Value, Error>>,
     },
     Publish {
@@ -196,6 +197,7 @@ impl Group {
 /// pasteboard. It does not read or replace the user's general selection.
 #[cfg(feature = "viewer")]
 pub(crate) async fn probe() -> Result<u32, Error> {
+    let file_cases = super::files::probe().await?;
     let policy = Policy::default();
     let group = Group::spawn(policy.clone(), || Ok(Board::isolated()))?;
     group.ready().await?;
@@ -269,7 +271,7 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     if retained.upgrade().is_some() {
         return Err(Error::Publication);
     }
-    Ok(5)
+    Ok(5 + file_cases)
 }
 
 fn execute(job: Job, board: &mut Board, policy: &Policy) {
@@ -283,9 +285,10 @@ fn execute(job: Job, board: &mut Board, policy: &Policy) {
         Command::Read {
             generation,
             format,
+            authority,
             reply,
         } if !reply.is_closed() => {
-            let _ = reply.send(board.read(generation, format, policy));
+            let _ = reply.send(board.read(generation, format, policy, authority));
         }
         Command::Publish {
             generation,
@@ -362,7 +365,11 @@ impl Provider for Lease {
         };
         Capabilities {
             receive: formats.clone(),
-            offer: formats,
+            offer: if self.group.available() {
+                vec![Format::TextUtf8, Format::ImagePng, Format::Files]
+            } else {
+                Vec::new()
+            },
             shortcut: ShortcutModifier::Command,
             limits: self.group.0.policy.limits.clone(),
         }
@@ -371,11 +378,20 @@ impl Provider for Lease {
         Box::pin(self.call(false, Command::Current))
     }
     fn read(&self, generation: u64, format: Format) -> Operation<'_, Value> {
-        Box::pin(self.call(true, move |reply| Command::Read {
-            generation,
-            format,
-            reply,
-        }))
+        Box::pin(async move {
+            let authority: Option<NativeLifetime> = if format == Format::Files {
+                Some(Arc::new(self.owner.begin().ok_or(Error::Changed)?))
+            } else {
+                None
+            };
+            self.call(true, move |reply| Command::Read {
+                generation,
+                format,
+                authority,
+                reply,
+            })
+            .await
+        })
     }
     fn publish(&self, generation: u64, value: Publication) -> Operation<'_, Snapshot> {
         Box::pin(self.call(true, move |reply| Command::Publish {

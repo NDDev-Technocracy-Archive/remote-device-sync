@@ -1,5 +1,5 @@
-//! Serialized AppKit pasteboard edge. Cocoa objects stay on their native owner;
-//! only validated Rust values and selected-file capabilities leave it. General
+//! Serialized AppKit pasteboard edge. Mutable objects stay on their native owner;
+//! immutable NSURL scopes follow selected-file capabilities through I/O. General
 //! and isolated probe boards share this implementation, without TCC mutation.
 #![allow(unsafe_code)]
 use std::sync::Mutex;
@@ -10,15 +10,17 @@ use objc2::{
     rc::{Retained, autoreleasepool},
 };
 use objc2_app_kit::{
-    NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF,
 };
-use objc2_foundation::{NSData, NSString, NSUTF8StringEncoding};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL, NSUTF8StringEncoding};
 use rds_core::clipboard::{Format, Representation};
 
 use super::{
     image::Png,
     native::{Error, Policy, Publication, Snapshot, Text, Value},
 };
+mod files;
 
 #[cfg(feature = "host")]
 mod owner;
@@ -42,6 +44,7 @@ enum Raw {
     Text(String),
     Png(Bytes),
     Tiff(Bytes),
+    Files(Vec<Retained<NSURL>>),
 }
 
 impl Board {
@@ -96,6 +99,7 @@ impl Board {
                             types.containsObject(NSPasteboardTypePNG)
                                 || types.containsObject(NSPasteboardTypeTIFF),
                         ),
+                        (Format::Files, types.containsObject(NSPasteboardTypeFileURL)),
                     ] {
                         if present {
                             representations.push(Representation {
@@ -122,6 +126,7 @@ impl Board {
         generation: u64,
         format: Format,
         policy: &Policy,
+        authority: Option<super::NativeLifetime>,
     ) -> Result<Value, Error> {
         policy.validate()?;
         let raw = {
@@ -170,7 +175,30 @@ impl Board {
                                 Raw::Tiff(bytes)
                             }
                         }
-                        Format::Files => return Err(Error::Unsupported),
+                        Format::Files => {
+                            if self
+                                .board
+                                .pasteboardItems()
+                                .is_none_or(|items| items.count() > policy.limits.files as usize)
+                            {
+                                return Err(rds_core::clipboard::Error::TooLarge.into());
+                            }
+                            let classes = NSArray::from_slice(&[NSURL::class()]);
+                            let objects = self
+                                .board
+                                .readObjectsForClasses_options(&classes, None)
+                                .ok_or(Error::Unsupported)?;
+                            if objects.count() > policy.limits.files as usize {
+                                return Err(rds_core::clipboard::Error::TooLarge.into());
+                            }
+                            let mut urls = Vec::with_capacity(objects.count());
+                            for object in objects.iter() {
+                                urls.push(
+                                    object.downcast::<NSURL>().map_err(|_| Error::Unsupported)?,
+                                );
+                            }
+                            Raw::Files(urls)
+                        }
                     }
                 };
                 if self.board.changeCount() as u64 != generation {
@@ -184,6 +212,7 @@ impl Board {
             Raw::Text(text) => Value::Text(Text::new(Bytes::from(text), &policy.limits)?),
             Raw::Png(bytes) => Value::Image(Png::new(bytes, &policy.limits)?),
             Raw::Tiff(bytes) => Value::Image(Png::from_tiff(&bytes, &policy.limits)?),
+            Raw::Files(urls) => files::select(urls, policy, authority)?,
         };
         if self.generation()? != generation {
             return Err(Error::Changed);
@@ -277,7 +306,8 @@ pub(crate) fn probe() -> Result<u32, Error> {
         let text = Text::new(Bytes::from(text), &policy.limits)?;
         let expected = text.encoded().clone();
         let snapshot = board.publish(before, Publication::Text(text), &policy)?;
-        let Value::Text(read) = board.read(snapshot.generation, Format::TextUtf8, &policy)? else {
+        let Value::Text(read) = board.read(snapshot.generation, Format::TextUtf8, &policy, None)?
+        else {
             return Err(Error::Unsupported);
         };
         if read.encoded() != &expected || !snapshot.owned || snapshot.generation == before {
@@ -298,7 +328,8 @@ pub(crate) fn probe() -> Result<u32, Error> {
     let image = Png::new(Bytes::from(encoded), &policy.limits)?;
     let expected = image.encoded().clone();
     let snapshot = board.publish(board.generation()?, Publication::Image(image), &policy)?;
-    let Value::Image(read) = board.read(snapshot.generation, Format::ImagePng, &policy)? else {
+    let Value::Image(read) = board.read(snapshot.generation, Format::ImagePng, &policy, None)?
+    else {
         return Err(Error::Unsupported);
     };
     if read.encoded() != &expected {
@@ -350,7 +381,7 @@ pub(crate) fn probe() -> Result<u32, Error> {
         }
     }
     if board
-        .read(board.generation()?, Format::TextUtf8, &policy)
+        .read(board.generation()?, Format::TextUtf8, &policy, None)
         .is_ok()
     {
         return Err(Error::Publication);

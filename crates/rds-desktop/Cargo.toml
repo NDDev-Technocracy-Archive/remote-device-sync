@@ -56,8 +56,8 @@ serde_json = { workspace = true, optional = true }
 # lifetime. Explicit superclass features are required by the 0.3 bindings.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", optional = true }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSControl", "NSEvent", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"], optional = true }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo", "NSArray", "NSDictionary", "NSValue", "NSError"], optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSControl", "NSEvent", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo", "NSArray", "NSDictionary", "NSValue", "NSError", "NSURL"], optional = true }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"], optional = true }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventTypes", "CGEventSource", "CGRemoteOperation", "CGWindow", "libc"], optional = true }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "objc2-core-video"], optional = true }

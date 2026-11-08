@@ -41,6 +41,25 @@ impl Selection {
         paths: impl IntoIterator<Item = std::path::PathBuf>,
         limits: &Limits,
     ) -> Result<Self, Error> {
+        Self::admit_paths(paths, limits, None)
+    }
+
+    /// Native resource URLs/portal selections may need their resource scope
+    /// retained beyond the selection owner. Paths still come only from the
+    /// local native selection, never a remote manifest or request.
+    pub fn from_paths_with_authority(
+        paths: impl IntoIterator<Item = std::path::PathBuf>,
+        limits: &Limits,
+        authority: Arc<dyn Send + Sync>,
+    ) -> Result<Self, Error> {
+        Self::admit_paths(paths, limits, Some(authority))
+    }
+
+    fn admit_paths(
+        paths: impl IntoIterator<Item = std::path::PathBuf>,
+        limits: &Limits,
+        authority: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<Self, Error> {
         limits.validate()?;
         let mut files = Vec::new();
         for path in paths {
@@ -68,13 +87,35 @@ impl Selection {
             );
             files.push((name, file));
         }
-        Self::from_files(files, limits)
+        Self::admit_files(authority, files, limits)
     }
 
     /// The native adapter opens the explicitly selected files. No file name
     /// supplied by a remote peer ever reaches an OS open operation here.
     /// Call on a native blocking owner: metadata can require filesystem I/O.
     pub fn from_files(files: Vec<(String, File)>, limits: &Limits) -> Result<Self, Error> {
+        Self::admit_files(None, files, limits)
+    }
+
+    /// Retain the native selection's original resource and caller authority
+    /// through every selected descriptor and reader, including blocking reads
+    /// which outlive cancellation of their async waiter. This opaque owner
+    /// supplies lifetime only; it never authorizes an additional path.
+    pub fn from_files_with_authority(
+        files: Vec<(String, File)>,
+        limits: &Limits,
+        authority: Arc<dyn Send + Sync>,
+    ) -> Result<Self, Error> {
+        Self::admit_files(Some(authority), files, limits)
+    }
+
+    fn admit_files(
+        // Parameters drop in reverse order on early errors: close all input
+        // descriptors before releasing their native selection authority.
+        authority: Option<Arc<dyn Send + Sync>>,
+        files: Vec<(String, File)>,
+        limits: &Limits,
+    ) -> Result<Self, Error> {
         limits.validate()?;
         if files.len() > limits.files as usize {
             return Err(rds_core::clipboard::Error::TooLarge.into());
@@ -103,9 +144,14 @@ impl Selection {
                 bytes: metadata.len(),
             };
             selection.manifest.entries.push(entry);
-            selection
-                .files
-                .insert(id, Arc::new(SelectedFile { file, metadata }));
+            selection.files.insert(
+                id,
+                Arc::new(SelectedFile {
+                    file,
+                    metadata,
+                    _authority: authority.clone(),
+                }),
+            );
         }
         selection.manifest.validate(limits)?;
         Ok(selection)
@@ -125,8 +171,10 @@ impl Selection {
 }
 
 pub struct SelectedFile {
+    // Fields drop in this order: release the FD before its native authority.
     file: File,
     metadata: Metadata,
+    _authority: Option<Arc<dyn Send + Sync>>,
 }
 
 impl SelectedFile {
@@ -323,21 +371,40 @@ mod tests {
             chunk_bytes: 7,
             ..Limits::default()
         };
-        let selection =
-            Selection::from_files(vec![("source".into(), File::open(&path).unwrap())], &limits)
-                .unwrap();
+        let authority = Arc::new(());
+        let retained = Arc::downgrade(&authority);
+        let selection = Selection::from_files_with_authority(
+            vec![("source".into(), File::open(&path).unwrap())],
+            &limits,
+            authority,
+        )
+        .unwrap();
         let file = selection.file(&selection.manifest().entries[0].id).unwrap();
         let (mut first, mut second) = (
             file.clone().reader(limits.clone()).await.unwrap(),
             file.reader(limits).await.unwrap(),
         );
         drop(selection);
+        assert!(
+            retained.upgrade().is_some(),
+            "reader lost original native authority"
+        );
         let (mut a, mut b) = (Vec::new(), Vec::new());
         let (ra, rb) = tokio::join!(first.read_to_end(&mut a), second.read_to_end(&mut b));
         assert_eq!(ra.unwrap(), value.len());
         assert_eq!(rb.unwrap(), value.len());
         assert_eq!(a, value);
         assert_eq!(b, value);
+        drop(first);
+        assert!(
+            retained.upgrade().is_some(),
+            "second reader lost its native authority"
+        );
+        drop(second);
+        assert!(
+            retained.upgrade().is_none(),
+            "drained readers retained native authority"
+        );
         assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 1);
     }
 
