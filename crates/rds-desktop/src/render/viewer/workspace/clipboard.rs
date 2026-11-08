@@ -142,14 +142,11 @@ impl App {
                     .clipboard
                     .handoff_pending(generation);
                 if pending {
-                    match session.clipboard_work() {
-                        Ok(value) => published = value,
-                        Err(error) => {
-                            session.handle.status(format!("Input stopped: {error}"));
-                            session.handle.close();
-                            let _ = session.input.send(ViewerInput::Close);
-                            pending = false;
-                        }
+                    published = session.clipboard_work();
+                    if !published {
+                        pending = lock(&session.handle.state)
+                            .clipboard
+                            .handoff_pending(generation);
                     }
                 }
             }
@@ -160,10 +157,7 @@ impl App {
                 }
             }
         } else {
-            match self.session.clipboard_work() {
-                Ok(_) => {}
-                Err(error) => self.fail_input(event_loop, error),
-            }
+            self.session.clipboard_work();
             if let Ok(generation) = super::super::super::platform::clipboard_generation()
                 && lock(&self.session.handle.state)
                     .clipboard
@@ -196,13 +190,13 @@ impl App {
             deck.clipboard_message("Copied text ready");
         }
         self.workspace = Some(deck);
-        if let Some(paste) = paste
-            && self.paste_text(event_loop, true)
-        {
-            for kind in
-                super::super::super::input::deferred_paste_chord(&self.session.keys, paste.shift)
-            {
-                self.input(event_loop, kind);
+        if let Some(paste) = paste {
+            let chord =
+                super::super::super::input::deferred_paste_chord(&self.session.keys, paste.shift);
+            if self.paste_text(true, chord.len()) {
+                for kind in chord {
+                    self.input(event_loop, kind);
+                }
             }
         }
         true
