@@ -126,13 +126,15 @@ fn clipboard_board() -> Result<crate::clipboard::macos::Board, crate::DesktopErr
     let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
         crate::DesktopError::Input("clipboard viewer access requires the main thread".into())
     })?;
-    crate::clipboard::macos::Board::general().map_err(clipboard_error)
+    let policy = crate::clipboard::native::Policy::shipped().map_err(clipboard_error)?;
+    let files = policy.selection_budget().map_err(clipboard_error)?;
+    crate::clipboard::macos::Board::general(files).map_err(clipboard_error)
 }
 #[cfg(target_os = "macos")]
 pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
     use crate::clipboard::native::{Policy, Value};
     let board = clipboard_board()?;
-    let policy = Policy::default();
+    let policy = Policy::shipped().map_err(clipboard_error)?;
     let snapshot = board.snapshot(&policy).map_err(clipboard_error)?;
     if !snapshot
         .representations
@@ -170,7 +172,7 @@ pub(super) fn clipboard_generation() -> Result<i64, crate::DesktopError> {
 #[cfg(target_os = "macos")]
 pub(super) fn publish_text(generation: i64, text: &str) -> Result<(), crate::DesktopError> {
     use crate::clipboard::native::{Policy, Publication, Text};
-    let policy = Policy::default();
+    let policy = Policy::shipped().map_err(clipboard_error)?;
     let text = Text::new(
         bytes::Bytes::copy_from_slice(text.as_bytes()),
         &policy.limits,

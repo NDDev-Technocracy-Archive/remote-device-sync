@@ -36,6 +36,7 @@ static ACCESS: Mutex<()> = Mutex::new(());
 
 pub(crate) struct Board {
     board: Retained<NSPasteboard>,
+    files: std::sync::Arc<rds_sync::selection::DescriptorBudget>,
     published: Option<u64>,
     isolated: bool,
 }
@@ -48,7 +49,9 @@ enum Raw {
 }
 
 impl Board {
-    pub(crate) fn general() -> Result<Self, Error> {
+    pub(crate) fn general(
+        files: std::sync::Arc<rds_sync::selection::DescriptorBudget>,
+    ) -> Result<Self, Error> {
         // SAFETY: Objective-C owns and retains this AppKit factory result. An
         // unavailable login pasteboard may return nil despite the annotation;
         // Option preserves that failure instead of constructing a null object.
@@ -56,15 +59,17 @@ impl Board {
             unsafe { msg_send![NSPasteboard::class(), generalPasteboard] };
         Ok(Self {
             board: board.ok_or(Error::Unavailable)?,
+            files,
             published: None,
             isolated: false,
         })
     }
 
     #[cfg(feature = "viewer")]
-    fn isolated() -> Self {
+    fn isolated(files: std::sync::Arc<rds_sync::selection::DescriptorBudget>) -> Self {
         Self {
             board: NSPasteboard::pasteboardWithUniqueName(),
+            files,
             published: None,
             isolated: true,
         }
@@ -212,7 +217,7 @@ impl Board {
             Raw::Text(text) => Value::Text(Text::new(Bytes::from(text), &policy.limits)?),
             Raw::Png(bytes) => Value::Image(Png::new(bytes, &policy.limits)?),
             Raw::Tiff(bytes) => Value::Image(Png::from_tiff(&bytes, &policy.limits)?),
-            Raw::Files(urls) => files::select(urls, policy, authority)?,
+            Raw::Files(urls) => files::select(urls, policy, &self.files, authority)?,
         };
         if self.generation()? != generation {
             return Err(Error::Changed);
@@ -295,8 +300,8 @@ impl Drop for Board {
 /// Native named-board probe; never replaces the user's general clipboard.
 #[cfg(feature = "viewer")]
 pub(crate) fn probe() -> Result<u32, Error> {
-    let mut board = Board::isolated();
-    let policy = Policy::default();
+    let policy = Policy::shipped()?;
+    let mut board = Board::isolated(policy.selection_budget()?);
     for text in [
         String::new(),
         "Привет 🖥️\nHello".into(),
