@@ -444,7 +444,7 @@ mod tests {
         writer.submit(None, Some(b"{}".to_vec()), 1);
         assert_eq!(writer.health().incident_admission_dropped_total, 1);
         until(|| writer.health().incident_write_errors_total > 0).await;
-        let socket = directory(&root.0, std::process::id());
+        let socket = directory(std::process::id()).unwrap();
         for seq in 0..5 {
             registration
                 .publish(format!("{{\"sample\":{seq}}}").as_bytes())

@@ -79,6 +79,8 @@ pub struct SocketOwner {
 
 impl SocketOwner {
     pub async fn bind(path: PathBuf) -> Result<(Self, UnixListener), Error> {
+        // Reject unsupported addresses before creating a directory or lock.
+        std::os::unix::net::SocketAddr::from_pathname(path.join(SOCKET))?;
         let checked = path.clone();
         let directory = tokio::task::spawn_blocking(move || {
             let directory = directory(&checked, true)?;
@@ -144,4 +146,21 @@ pub async fn connect(path: &Path) -> Result<UnixStream, Error> {
     let stream = UnixStream::connect(path.join(SOCKET)).await?;
     authenticate(&stream)?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unsupported_socket_address_creates_no_partial_directory() {
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("nddev-address-{:x}", rand::random::<u64>()));
+        let path = root.join("long".repeat(32));
+        assert!(SocketOwner::bind(path.clone()).await.is_err());
+        assert!(!root.exists());
+        assert!(!path.exists());
+    }
 }

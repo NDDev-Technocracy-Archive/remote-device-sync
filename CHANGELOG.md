@@ -6,7 +6,7 @@
 
 **Engineering preview.** Ordinary native viewers retain live health and fault
 history in bounded memory instead of writing and logging a full snapshot every
-two seconds. `rds desktop-status --directory <diagnostics>/live-<pid>` reads the
+two seconds. `rds desktop-status --viewer <pid>` reads the
 current scoped observations through a private same-UID Unix socket, without
 loading endpoint keys or opening a remote session. Completed fault windows keep
 bounded disk retention. Sampling continues independently of file writes, with

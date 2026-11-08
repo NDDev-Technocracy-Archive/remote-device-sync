@@ -29,6 +29,9 @@ struct Args {
     report: PathBuf,
     #[arg(long, default_value_t = 180)]
     duration: u64,
+    /// Explicit short private fixture root; must not already exist.
+    #[arg(long)]
+    control_directory: Option<PathBuf>,
     #[arg(long)]
     noq: bool,
 }
@@ -328,10 +331,11 @@ async fn main() -> anyhow::Result<()> {
     ];
     // The macOS per-user temporary path can already consume most of sun_path.
     // Canonical /tmp keeps this private fixture's IPC names below that bound.
-    let root = std::path::Path::new("/tmp").canonicalize()?.join(format!(
+    let generated = std::path::Path::new("/tmp").canonicalize()?.join(format!(
         "rds-workspace-managed-{:032x}",
         rand::random::<u128>()
     ));
+    let root = args.control_directory.unwrap_or(generated);
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let mut manager = Server::start(Some(Prepared::bind(&root).await?), local.clone(), None);
     let client = Client::new(&root);

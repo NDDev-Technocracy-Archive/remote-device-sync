@@ -137,8 +137,20 @@ pub(super) struct Run {
     task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
-pub fn directory(root: &Path, viewer: u32) -> PathBuf {
-    root.join(format!("live-{viewer}"))
+pub fn directory(viewer: u32) -> anyhow::Result<PathBuf> {
+    // Runtime IPC is independent of retained diagnostic paths and their length.
+    // The Linux login runtime is normally memory-backed. Canonical /tmp is a
+    // short Unix fallback, including macOS's symlinked temporary-directory tree.
+    let root = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(path) => PathBuf::from(path),
+        None => Path::new("/tmp").canonicalize()?,
+    };
+    Ok(root
+        .join(format!(
+            "nddev-remote-{}",
+            rustix::process::geteuid().as_raw()
+        ))
+        .join(format!("viewer-{viewer}")))
 }
 
 impl Run {
@@ -150,10 +162,13 @@ impl Run {
         if options.live_diagnostics.is_some() {
             return Ok(None);
         }
-        let Some(root) = &options.diagnostics_dir else {
-            return Ok(None);
+        let directory = match directory(std::process::id()) {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(error=?error,"live observation runtime unavailable; desktop remains active");
+                return Ok(None);
+            }
         };
-        let directory = directory(root, std::process::id());
         let handle = Handle::default();
         options.live_diagnostics = Some(handle.clone());
         let stop = CancellationToken::new();
@@ -165,7 +180,7 @@ impl Run {
             let (owner, listener) = match binding {
                 Ok(binding) => binding,
                 Err(error) => {
-                    tracing::warn!(%error,"live observation interface unavailable; desktop remains active");
+                    tracing::warn!(error=?error,"live observation interface unavailable; desktop remains active");
                     return Ok(());
                 }
             };

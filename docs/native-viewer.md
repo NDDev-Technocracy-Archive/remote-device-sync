@@ -101,10 +101,15 @@ logging and replacing a JSON file every two seconds. One private same-UID Unix
 socket per viewer exposes current samples:
 
 ```sh
-rds desktop-status --directory /path/to/private/diagnostics/live-PID
+rds desktop-status --viewer PID
 ```
 
-This command does not load an endpoint key or connect to a remote computer. Its
+The socket lives in the standard per-user runtime namespace, separately from
+the retained diagnostics directory, so long storage paths do not exceed Unix
+address limits. Linux uses XDG_RUNTIME_DIR when set; canonical /tmp is the short
+Unix fallback with a private UID-owned namespace. An explicit --directory may
+select a checked runtime directory. This command does not load an endpoint key
+or connect to a remote computer. Its
 versioned response lists exact window/tab revisions and includes each sample
 clock, policy and storage health. An unobserved or concurrently closed scope has
 no snapshot; absence is not a healthy sample. Requests, scopes, payloads and
