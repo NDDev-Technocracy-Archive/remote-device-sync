@@ -94,6 +94,10 @@ impl Recorder {
             .saturating_add(storage.incident_write_errors_total)
             .saturating_add(storage.incident_queue_evicted_total)
             .saturating_add(storage.incident_oversize_total);
+        let storage_errors = storage_errors
+            .saturating_add(storage.live_query_errors_total)
+            .saturating_add(storage.incident_admission_dropped_total)
+            .saturating_add(storage.snapshot_admission_dropped_total);
         let failed_storage = storage_errors > self.previous_storage_errors;
         self.previous_storage_errors = storage_errors;
         let mut reasons = Vec::new();

@@ -115,7 +115,7 @@ pub async fn run(
     client: Client,
     mut config: WorkspaceConfig,
     path: PathBuf,
-    options: Options,
+    mut options: Options,
     all_displays: bool,
 ) -> anyhow::Result<()> {
     config.validate()?;
@@ -180,6 +180,7 @@ pub async fn run(
             displays: vec![],
         })
         .collect();
+    let observation = super::live::Run::start(&mut options).await?;
     let (viewer, handle, events) = match config.presentation {
         Presentation::Tabs => Viewer::workspace(config.tabs.clone(), devices)?,
         Presentation::Spaces => Viewer::spaces(config.tabs.clone(), devices)?,
@@ -198,6 +199,9 @@ pub async fn run(
     {
         task.abort();
         let _ = task.await;
+    }
+    if let Some(observation) = observation {
+        observation.close().await;
     }
     result?;
     Ok(())
@@ -354,8 +358,8 @@ async fn actor(
                         let binding = bindings.entry(device.key.clone()).or_default().clone();
                         let task = tokio::spawn(async move {
                             let diagnostic_stop = worker_stop.child_token();
-                            let observing = native::observe(display.clone(), selected.diagnostics_dir.clone(),
-                                selected.diagnostic_health.clone(), diagnostic_stop.clone(), Some((tab.id.value(), tab.revision)));
+                            let observing = native::observe(display.clone(), selected.clone(),
+                                diagnostic_stop.clone(), Some((tab.id.value(), tab.revision)));
                             let running = async {
                                 let result = async {
                                 native::configure_visual_probe(&display, &selected)?;

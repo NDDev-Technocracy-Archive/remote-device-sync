@@ -57,6 +57,7 @@ struct Config {
     payload_receipts: Option<bool>,
     clipboard: Option<bool>,
     diagnostic_visual_probe: Option<PathBuf>,
+    diagnostics: Option<rds_cli::desktop::observation::Policy>,
 }
 
 #[tokio::main]
@@ -64,13 +65,22 @@ async fn main() -> std::process::ExitCode {
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).expect("validated CLI arguments");
     let setup = (|| -> anyhow::Result<_> {
-        let (log, directory) = rds_cli::logging::ViewerLog::create()?;
-        cli.options.diagnostics_dir.get_or_insert(directory);
-        Ok(rds_observe::install_with_writer(
-            rds_observe::Service::Cli,
-            rds_observe::Config::from_env("warn,rds_cli=info,rds_desktop=info")?,
-            log,
-        )?)
+        let config = rds_observe::Config::from_env("warn,rds_cli=info,rds_desktop=info")?;
+        match rds_cli::logging::ViewerLog::create() {
+            Ok((log, directory)) => {
+                cli.options.diagnostics_dir.get_or_insert(directory);
+                Ok(rds_observe::install_with_writer(
+                    rds_observe::Service::Cli,
+                    config,
+                    log,
+                )?)
+            }
+            Err(error) => {
+                let telemetry = rds_observe::install(rds_observe::Service::Cli, config)?;
+                tracing::warn!(%error,"private viewer log unavailable; using bounded console diagnostics");
+                Ok(telemetry)
+            }
+        }
     })();
     match setup {
         Ok(telemetry) => {
@@ -82,7 +92,7 @@ async fn main() -> std::process::ExitCode {
             }));
             tracing::info!(
                 pid = std::process::id(),
-                "native viewer started with persistent diagnostics"
+                "native viewer started with bounded diagnostics"
             );
             let result = telemetry.run(run(cli, &matches)).await;
             telemetry.finish(result)
@@ -175,6 +185,22 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                     cli.grant_file = config.grant_file;
                 }
                 configured_resolution = config.resolution;
+                if let Some(policy) = config.diagnostics {
+                    if matches.value_source("sample_interval_ms") != Some(ValueSource::CommandLine)
+                    {
+                        cli.options.diagnostics.sample_interval_ms = policy.sample_interval_ms;
+                    }
+                    if matches.value_source("snapshot_window_seconds")
+                        != Some(ValueSource::CommandLine)
+                    {
+                        cli.options.diagnostics.snapshot_window_seconds =
+                            policy.snapshot_window_seconds;
+                    }
+                    if matches.value_source("retained_incidents") != Some(ValueSource::CommandLine)
+                    {
+                        cli.options.diagnostics.retained_incidents = policy.retained_incidents;
+                    }
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),

@@ -1,7 +1,8 @@
 //! Agent-owned outgoing sessions, accessed through a same-UID Unix socket.
 //! The manager borrows the agent endpoint; it never reads identity material.
 mod connect;
-mod socket;
+/// Shared same-UID Unix socket ownership for local product interfaces.
+pub mod socket;
 mod state;
 mod sync;
 mod tcp;

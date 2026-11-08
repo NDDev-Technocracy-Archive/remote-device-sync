@@ -86,8 +86,8 @@ An empty workspace reports Ready and holds no remote-session activity token;
 closing its last tab releases the macOS activity that otherwise prevents idle
 system sleep during a requested remote session.
 
-Workspace live diagnostics use a distinct tab/revision snapshot name; normal
-tab completion removes its live snapshot while bounded incidents remain in the
+Workspace live diagnostics retain a distinct tab/revision scope in memory;
+normal tab completion removes that scope while bounded incidents remain in the
 existing private recorder. GPU uploads and frame/input state are counted for the
 owning tab. **About** contains the embedded fonts' unchanged copyright/license
 notices; native packaging includes the same notices.
@@ -96,15 +96,55 @@ Current qualification and remaining platform/network boundaries are recorded in
 [the workspace report](reports/rds-tabbed-workspace-20261010.md). A synthetic
 native preview is not proof of multi-device network or installed acceptance.
 
-Automatic diagnostics also save `incident-<timestamp>-<pid>.json` windows in the
-private viewer log directory. Up to ten windows survive ordinary log rotation;
+Ordinary observation keeps live metadata and fault history in memory instead of
+logging and replacing a JSON file every two seconds. One private same-UID Unix
+socket per viewer exposes current samples:
+
+```sh
+rds desktop-status --viewer PID
+```
+
+The socket lives in the standard per-user runtime namespace, separately from
+the retained diagnostics directory, so long storage paths do not exceed Unix
+address limits. Linux uses XDG_RUNTIME_DIR when set; canonical /tmp is the short
+Unix fallback with a private UID-owned namespace. An explicit --directory may
+select a checked runtime directory. This command does not load an endpoint key
+or connect to a remote computer. Its
+versioned response lists exact window/tab revisions and includes each sample
+clock, policy and storage health. An unobserved or concurrently closed scope has
+no snapshot; absence is not a healthy sample. Requests, scopes, payloads and
+concurrent readers are bounded. The interface uses the same checked directory,
+file ownership and native peer credentials as the local agent API.
+
+`--diagnostic-snapshot-seconds 30` additionally publishes private live JSON files
+for thirty seconds. The window belongs to the application run; opening another
+tab does not extend it. Expiry drops queued file snapshots and removes only the
+exact inode this writer published. `--diagnostic-interval-ms` selects the sample
+cadence (100..60000 ms), and `--diagnostic-retained-incidents` sets completed
+incident retention (1..1000). These fields also live in the optional `diagnostics`
+object of version-1 viewer configuration as `sample_interval_ms`,
+`snapshot_window_seconds` and `retained_incidents`; explicit CLI fields win.
+Defaults are two-second in-memory sampling, no live-file window and ten retained
+incidents. These settings do not change durable workspace, identity or consent
+writers.
+
+A separate bounded writer retains one queued item and four retry incidents,
+with one active native write. Sampling and authenticated reads do not wait for
+file I/O. Health distinguishes queue admission loss, native write errors and
+pending-operation age. A failed private application log uses the existing
+bounded console adapter instead of preventing startup. A completely unavailable
+private directory leaves the local read interface explicitly unavailable.
+
+Automatic diagnostics save `incident-<timestamp>-<pid>.json` windows in the
+private viewer log directory. By default ten windows survive ordinary log rotation;
 each is capped at 256 KiB. They contain at most thirty prior snapshots and six
 following samples, metadata only. The recorder warns on a pending ACK beyond
 250 ms, three-second decoded-video inactivity, visible submission inactivity
 beyond one second or a reconnect. It saves ten seconds after the trigger and
 uses a thirty-second cooldown. Occlusion alone does not trigger a surface fault.
 Graceful shutdown preserves an interrupted window; abrupt process death can
-leave only the regular live snapshot and logs. Two-second sampling can miss
+leave only retained operation logs and previously completed incidents unless an
+explicit file window was selected. Default two-second sampling can miss
 short pending incidents, so completed slow-ACK counter changes also trigger a
 window, alongside independent rate-limited warnings.
 
