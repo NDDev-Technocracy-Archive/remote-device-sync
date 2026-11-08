@@ -598,7 +598,6 @@ mod request_tests {
             .unwrap()
             .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .name("org.freedesktop.portal.Desktop")
             .unwrap()
             .serve_at(
@@ -613,7 +612,6 @@ mod request_tests {
             .await
             .unwrap();
         let client = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -720,7 +718,6 @@ mod request_tests {
             .unwrap()
             .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .name("org.freedesktop.portal.Desktop")
             .unwrap()
             .serve_at(
@@ -735,7 +732,6 @@ mod request_tests {
             .await
             .unwrap();
         let client = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -805,7 +801,6 @@ mod request_tests {
             OwnedObjectPath::try_from("/org/freedesktop/portal/desktop/request/1_0/rds_test")
                 .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .name("org.freedesktop.portal.Desktop")
             .unwrap()
             .serve_at(path.clone(), Request(calls.clone()))
@@ -814,7 +809,6 @@ mod request_tests {
             .await
             .unwrap();
         let client = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
