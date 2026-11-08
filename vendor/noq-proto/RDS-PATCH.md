@@ -35,6 +35,31 @@ Iroh fixture restores a retired standby, transfers and drains IP work, then
 recovers existing stream bytes after a later custom-link blackhole.
 Upstream contribution/convergence and installed qualification remain work.
 
+## Bounded compaction of contiguous receive data
+
+The published chunk-count guard can reject a valid contiguous buffered stream:
+ordinary defragmentation retains well-utilized packet allocations, so its chunk
+count is not the number of actual gaps. A deterministic receiver-backpressure
+regression fails on the unchanged published source. The existing 32 MiB frame
+supersession/receipt test also exposed the failure on physical macOS.
+
+After ordinary compaction, an excessive chunk count triggers one pass joining
+contiguous runs before the unchanged rejection bound. Both the chunk cap and
+compaction threshold retain their published values. True excessive gaps are
+still rejected; duplicate and overlapping floods retain their existing checks.
+The additional copy is bounded by admitted receive data and only runs when the
+ordinary compactor cannot meet the existing count limit.
+
+Compaction also distinguishes an ordered consumed prefix from the unordered
+consumed-byte count, preserving unread lower offsets after an unordered read.
+Deterministic ordered/unordered cases verify exact bytes across compaction;
+existing adversarial and random assembler cases remain required.
+
+The related upstream report is
+[Quinn #2955](https://github.com/quinn-rs/quinn/issues/2955). This adaptation uses
+the existing compactor for the bounded fallback; it does not raise limits,
+change the wire, shrink application fixtures or add retries.
+
 The MTU constructor's debug assertion keeps its numeric invariant but uses a
 static message. CodeQL treated the formatted minimum-MTU value as configuration
 data derived from test certificate setup. Removing the interpolation avoids
