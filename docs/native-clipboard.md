@@ -69,6 +69,15 @@ Native adapters, negotiated transport/manager channels, gesture ownership and
 actual text/image/file pastes across the OS matrix remain the next acceptance
 steps. The legacy text mode remains admitted during the coordinated upgrade.
 
+The requested-body transport now uses the existing connection's tagged router,
+one isolated uni stream per request and independent bounded directional budgets.
+It claims before request metadata is sent and resets canceled partial sends.
+It neither opens an OS provider nor authorizes clipboard access by itself.
+Real loopback tests cover simultaneous requests, a late canceled response,
+selected-file integrity without a staging file, and progressing control/media
+beside a backpressured file. The native handshake, manager and GUI still need
+coordinated integration before this mode is advertised to a user.
+
 ## Native ownership
 
 The serving session owns one sealed admission/drain lifetime. Capture, input

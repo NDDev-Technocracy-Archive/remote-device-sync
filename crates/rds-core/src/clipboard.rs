@@ -307,7 +307,7 @@ impl FileSelection {
 
 /// A transfer is pinned to an existing desktop, its exact offer and one request.
 /// The owner additionally binds this to its authenticated connection and grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TransferId {
     pub desktop: [u8; 16],
     pub offer: u64,

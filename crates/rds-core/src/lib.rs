@@ -73,6 +73,9 @@ pub enum UniHello {
     /// the routing table — never a replacement session's inbox. Never
     /// reuse an ID on a connection.
     DesktopFrames { id: [u8; 16] },
+    /// One explicitly requested native clipboard body. The owning desktop
+    /// negotiates native clipboard support before claiming or sending it.
+    ClipboardBody { id: clipboard::TransferId },
 }
 
 /// First frame on every bi-directional stream.
@@ -570,6 +573,20 @@ mod tests {
         assert_eq!(uf2, [vec![5], vec![44; 16]].concat());
         assert!(postcard::from_bytes::<LegacyHello>(&dv2).is_err());
         assert!(postcard::from_bytes::<LegacyUni>(&uf2).is_err());
+        let clipboard = UniHello::ClipboardBody {
+            id: clipboard::TransferId {
+                desktop: [45; 16],
+                offer: 1,
+                request: 2,
+            },
+        };
+        let encoded = postcard::to_stdvec(&clipboard).unwrap();
+        assert_eq!(encoded, [vec![6], vec![45; 16], vec![1, 2]].concat());
+        assert_eq!(
+            postcard::from_bytes::<UniHello>(&encoded).unwrap(),
+            clipboard
+        );
+        assert!(postcard::from_bytes::<LegacyUni>(&encoded).is_err());
     }
 
     #[test]
