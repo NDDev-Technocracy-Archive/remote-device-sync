@@ -606,7 +606,6 @@ mod request_tests {
                     wrong_path,
                 },
             )
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -725,7 +724,6 @@ mod request_tests {
                     wrong_path: false,
                 },
             )
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -801,7 +799,6 @@ mod request_tests {
         let server = zbus::connection::Builder::address(address.as_str())
             .name("org.freedesktop.portal.Desktop")
             .serve_at(path.clone(), Request(calls.clone()))
-            .unwrap()
             .build()
             .await
             .unwrap();
