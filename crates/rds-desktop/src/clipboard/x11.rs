@@ -83,12 +83,21 @@ impl Worker {
                     Err(mpsc::error::TryRecvError::Disconnected) => break,
                     Err(mpsc::error::TryRecvError::Empty) => {}
                 }
-                if let Err(error) = clipboard.pump() {
-                    tracing::warn!(%error, "clipboard selection worker ended");
-                    break;
-                }
+                let buffered = match clipboard.pump() {
+                    Ok(buffered) => buffered,
+                    Err(error) => {
+                        tracing::warn!(%error, "clipboard selection worker ended");
+                        break;
+                    }
+                };
                 if let Some(text) = clipboard.external.take() {
                     changes.send(ClipboardChange { text });
+                }
+                // poll_for_event can have more events in RustConnection's
+                // user-space buffer even after the socket stops being ready.
+                // Revisit jobs/stop and drain the next bounded batch first.
+                if buffered {
+                    continue;
                 }
                 let mut fds = [
                     rustix::event::PollFd::new(
@@ -522,7 +531,7 @@ impl Clipboard {
         }
         self.conn.flush().map_err(error)
     }
-    fn pump(&mut self) -> Result<(), DesktopError> {
+    fn pump(&mut self) -> Result<bool, DesktopError> {
         if self
             .incoming
             .as_ref()
@@ -546,13 +555,21 @@ impl Clipboard {
         }
         self.transfers
             .retain(|t| t.started.elapsed() < Duration::from_secs(5));
+        let mut buffered = false;
         for _ in 0..64 {
             match self.conn.poll_for_event().map_err(error)? {
-                Some(e) => self.event(e)?,
-                None => break,
+                Some(e) => {
+                    self.event(e)?;
+                    buffered = true;
+                }
+                None => {
+                    buffered = false;
+                    break;
+                }
             }
         }
-        self.conn.flush().map_err(error)
+        self.conn.flush().map_err(error)?;
+        Ok(buffered)
     }
     fn event(&mut self, event: Event) -> Result<(), DesktopError> {
         match event {
@@ -729,6 +746,30 @@ impl Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires dedicated Xvfb; queues native events before a reply barrier"]
+    fn native_clipboard_reports_buffered_event_debt_before_polling_the_socket() {
+        let mut clipboard = Clipboard::new_watching(0, true).unwrap();
+        for _ in 0..160 {
+            clipboard
+                .conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    clipboard.window,
+                    clipboard.marker,
+                    AtomEnum::INTEGER,
+                    &[0],
+                )
+                .unwrap();
+        }
+        // Waiting for this later reply moves the preceding events into the
+        // connection's user-space queue. No further OS event is needed to
+        // complete the backlog, and socket readiness alone is insufficient.
+        clipboard.conn.get_input_focus().unwrap().reply().unwrap();
+        assert!(clipboard.pump().unwrap());
+        while clipboard.pump().unwrap() {}
+        assert!(clipboard.conn.poll_for_event().unwrap().is_none());
+    }
     async fn receive(
         conn: &RustConnection,
         window: Window,

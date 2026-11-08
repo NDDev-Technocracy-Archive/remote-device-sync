@@ -38,3 +38,15 @@ clipboard over real QUIC while media waits, and idle wake/close. Workspace
 all-target denied Clippy also passed. No wire format, OS permission or native
 clipboard payload limit changed. These cases require a dedicated X server and
 remain explicitly ignored in ordinary display-free test runs.
+
+The final follow-up also drains buffered native events before waiting on the
+socket again. A server reply barrier deliberately queues 160 native events in
+`RustConnection`; exhausting one bounded event batch reports remaining work so
+the worker revisits its jobs/stop flag and drains the next batch without waiting
+for another socket event. This prevents indefinite idle sleep with an existing
+user-space backlog. Final snapshot
+`1e11fbe3371ab2d8f2fec390486ee53fb97e45612656d926b30d60638f1386c0`
+passed denied desktop all-target Clippy, all 197 display-free library cases and
+all five dedicated native X11 cases. The final idle case again observed five
+voluntary context switches in 20.001 seconds. No earlier failure or threshold
+was removed.
