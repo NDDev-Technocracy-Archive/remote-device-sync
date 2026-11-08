@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "repository": "NDDev-Technocracy-OpenNetwork/nddev-opennetwork-design-system",
   "tag": "v0.0.1-alpha.9",
   "commit": "dbdf11b27fc6245b7942ad3e271f171602fce931",
@@ -7,37 +7,130 @@
   "git_tree": "609c3bc6a3308ab36bd35ba9f1f76e70a18cf776",
   "directory": "vendor/nddev-opennetwork-design-tokens",
   "directory_sha256": "20aed9da97d34f34e5b49aff5a54bbcb546061867dbc0b703aad808c407a7b21",
-  "files": {
-    "Cargo.toml": "db97d6472960ded6f32f8e40fc61361123547719b1ac57c017b71deec4391542",
-    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-    "NOTICE": "b6b34e96d0f0c918331d2f04cae70f49863a04f24a0fc0e90c8cc2742c50e78c",
-    "README.md": "026cf04ea27e8ed5fdc1e648a4855b0a121adb5bcf6da2deb45ec46969583714",
-    "THIRD_PARTY_NOTICES.md": "4374e24803c03aa3e54718e68d67366f6b65c37e6f4add506646a6e9761e831f",
-    "fonts/IBMPlexSans-Medium.ttf": "331c8639d7598b2cde62a911a71db195e30cb655cd6bdf2e324a7e984955f907",
-    "fonts/IBMPlexSans-Regular.ttf": "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5",
-    "fonts/IBMPlexSans-SemiBold.ttf": "a20caf8286023a6a7a85e40b1d2a4ae9fc3e3b1f9eda8f4c542dd4986af67bb1",
-    "fonts/IBMPlexSansArabic-Medium.ttf": "eef162792cf2a6ba5af7943af9f86843b1286ab67aaf615c18c07fd8e97a4a90",
-    "fonts/IBMPlexSansArabic-Regular.ttf": "8e0f1046c736bf939d4939ee3ae0116acf61cbcd6592deae7656761627080981",
-    "fonts/IBMPlexSansArabic-SemiBold.ttf": "1d4ab8b6ebadbb9d85f2ecdcb7cb0bb672420a8ff3388ab4f69d7b98056562aa",
-    "fonts/OFL-IBM-Plex.txt": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da",
-    "licenses/OFL-IBM-Plex.txt": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da",
-    "licenses/OFL-Noto-Sans-SC.txt": "18aabf190848725e2576eefb5c29ba06aac1029d02132252a7f312eac2e50cf3",
-    "licenses/W3C-BSD.txt": "e78e4e5606007539818c93696769a926d17d20bfc2750429f1049f0c7c4225f4",
-    "licenses/W3C-Software-and-Document.txt": "f3c7a0d6adc95fa05ea78f3445cd87c59d57d6aadbc4bd7f5ceb0466867146da",
-    "licenses/akar-icons.txt": "87500dbc60dd758dc91c72927a647ed4fdb162effc6dbc2073a2c9f51ba695c0",
-    "licenses/bootstrap.txt": "0fb3e11bd57e896c5a512afd64864d28a37de45d19835016c87ca1ad19ead969",
-    "licenses/carbon.txt": "037b3e9eaff51477b270e9082f54b99175e4dd893548654f00995045b68294b8",
-    "licenses/fluent.txt": "69bc45dc42b9acb96a69823adbc6ae538374e3c0bde169b855b32c48eaaef52f",
-    "licenses/gravity-ui.txt": "6c509237a13194071fcd99cfaae017e514204ba9493291ab6f87dec58dc2662b",
-    "licenses/heroicons-outline.txt": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
-    "licenses/icon-park-outline.txt": "81268f00802b1a9cffae4df43f78c3a0809845e03fef3da68f26ad2e4c49681e",
-    "licenses/material-symbols-light.txt": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
-    "licenses/mdi.txt": "3bae6305bcaa6d10219b999f65c342034c2d40b1c0e8567fa08605e73ccba829",
-    "licenses/mingcute.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-    "licenses/tabler.txt": "b740a1d46122672da62833e97f7e7c8a13fa85cbc7445b584b297cc00dde93db",
-    "rust-toolchain.toml": "abb0917537b607a751f404da0e42ed783aaa2b15ad46853fd8f3fb03dfdaed2c",
-    "src/lib.rs": "0166a0cd0763bb105b784dc41148ed65e22f08d4ad3a0677d73a286929934ab3",
-    "src/tokens.rs": "e2f0574c7925076898c1f4ce9ffccc91779d1e9dfb96e104e3c9a78bc6624017",
-    "tests/tokens.rs": "ec546fc968f1e4e44a29802f58fc2cf86aeec80496b07d951cc368bb849326f5"
-  }
+  "files": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "db97d6472960ded6f32f8e40fc61361123547719b1ac57c017b71deec4391542"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "b6b34e96d0f0c918331d2f04cae70f49863a04f24a0fc0e90c8cc2742c50e78c"
+    },
+    {
+      "path": "README.md",
+      "sha256": "026cf04ea27e8ed5fdc1e648a4855b0a121adb5bcf6da2deb45ec46969583714"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "sha256": "4374e24803c03aa3e54718e68d67366f6b65c37e6f4add506646a6e9761e831f"
+    },
+    {
+      "path": "fonts/IBMPlexSans-Medium.ttf",
+      "sha256": "331c8639d7598b2cde62a911a71db195e30cb655cd6bdf2e324a7e984955f907"
+    },
+    {
+      "path": "fonts/IBMPlexSans-Regular.ttf",
+      "sha256": "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5"
+    },
+    {
+      "path": "fonts/IBMPlexSans-SemiBold.ttf",
+      "sha256": "a20caf8286023a6a7a85e40b1d2a4ae9fc3e3b1f9eda8f4c542dd4986af67bb1"
+    },
+    {
+      "path": "fonts/IBMPlexSansArabic-Medium.ttf",
+      "sha256": "eef162792cf2a6ba5af7943af9f86843b1286ab67aaf615c18c07fd8e97a4a90"
+    },
+    {
+      "path": "fonts/IBMPlexSansArabic-Regular.ttf",
+      "sha256": "8e0f1046c736bf939d4939ee3ae0116acf61cbcd6592deae7656761627080981"
+    },
+    {
+      "path": "fonts/IBMPlexSansArabic-SemiBold.ttf",
+      "sha256": "1d4ab8b6ebadbb9d85f2ecdcb7cb0bb672420a8ff3388ab4f69d7b98056562aa"
+    },
+    {
+      "path": "fonts/OFL-IBM-Plex.txt",
+      "sha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+    },
+    {
+      "path": "licenses/OFL-IBM-Plex.txt",
+      "sha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+    },
+    {
+      "path": "licenses/OFL-Noto-Sans-SC.txt",
+      "sha256": "18aabf190848725e2576eefb5c29ba06aac1029d02132252a7f312eac2e50cf3"
+    },
+    {
+      "path": "licenses/W3C-BSD.txt",
+      "sha256": "e78e4e5606007539818c93696769a926d17d20bfc2750429f1049f0c7c4225f4"
+    },
+    {
+      "path": "licenses/W3C-Software-and-Document.txt",
+      "sha256": "f3c7a0d6adc95fa05ea78f3445cd87c59d57d6aadbc4bd7f5ceb0466867146da"
+    },
+    {
+      "path": "licenses/akar-icons.txt",
+      "sha256": "87500dbc60dd758dc91c72927a647ed4fdb162effc6dbc2073a2c9f51ba695c0"
+    },
+    {
+      "path": "licenses/bootstrap.txt",
+      "sha256": "0fb3e11bd57e896c5a512afd64864d28a37de45d19835016c87ca1ad19ead969"
+    },
+    {
+      "path": "licenses/carbon.txt",
+      "sha256": "037b3e9eaff51477b270e9082f54b99175e4dd893548654f00995045b68294b8"
+    },
+    {
+      "path": "licenses/fluent.txt",
+      "sha256": "69bc45dc42b9acb96a69823adbc6ae538374e3c0bde169b855b32c48eaaef52f"
+    },
+    {
+      "path": "licenses/gravity-ui.txt",
+      "sha256": "6c509237a13194071fcd99cfaae017e514204ba9493291ab6f87dec58dc2662b"
+    },
+    {
+      "path": "licenses/heroicons-outline.txt",
+      "sha256": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985"
+    },
+    {
+      "path": "licenses/icon-park-outline.txt",
+      "sha256": "81268f00802b1a9cffae4df43f78c3a0809845e03fef3da68f26ad2e4c49681e"
+    },
+    {
+      "path": "licenses/material-symbols-light.txt",
+      "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"
+    },
+    {
+      "path": "licenses/mdi.txt",
+      "sha256": "3bae6305bcaa6d10219b999f65c342034c2d40b1c0e8567fa08605e73ccba829"
+    },
+    {
+      "path": "licenses/mingcute.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "licenses/tabler.txt",
+      "sha256": "b740a1d46122672da62833e97f7e7c8a13fa85cbc7445b584b297cc00dde93db"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "abb0917537b607a751f404da0e42ed783aaa2b15ad46853fd8f3fb03dfdaed2c"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "0166a0cd0763bb105b784dc41148ed65e22f08d4ad3a0677d73a286929934ab3"
+    },
+    {
+      "path": "src/tokens.rs",
+      "sha256": "e2f0574c7925076898c1f4ce9ffccc91779d1e9dfb96e104e3c9a78bc6624017"
+    },
+    {
+      "path": "tests/tokens.rs",
+      "sha256": "ec546fc968f1e4e44a29802f58fc2cf86aeec80496b07d951cc368bb849326f5"
+    }
+  ]
 }

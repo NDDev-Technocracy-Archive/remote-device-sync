@@ -18,6 +18,12 @@ Native packaging and artifact promotion run the same verifier and bind its pin
 into build metadata. Updating the package replaces the entire released directory
 and its reviewed pin; generated files are never edited in place.
 
+The pin stores each path and unkeyed digest in separate fields. Two historical
+scanner matches in the initial mapping form were independently verified as the
+released Rust source/test file SHA-256 values. Their exact immutable commit/file/
+line fingerprints are classified in the existing historical scanner record;
+new findings remain blocking.
+
 **Appearance** lists the released theme identities: light, dark, light contrast
 and dark contrast. An explicit selection controls subsequent menus and popups as
 well as workspace panels. Tabbed and separate-display windows share that

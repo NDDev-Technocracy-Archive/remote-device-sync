@@ -9,7 +9,7 @@ import stat
 
 def verify(root):
     pin = json.loads((root / 'packaging/design-system.json').read_text())
-    if (pin.get('schema_version') != 1
+    if (pin.get('schema_version') != 2
             or pin.get('repository') != 'NDDev-Technocracy-OpenNetwork/nddev-opennetwork-design-system'
             or not re.fullmatch(r'v\d+\.\d+\.\d+(?:-[a-z0-9.]+)?', pin.get('tag', ''))
             or any(not re.fullmatch(r'[0-9a-f]{40}', pin.get(key, '')) for key in ('commit', 'git_tree'))
@@ -27,8 +27,15 @@ def verify(root):
         if stat.S_ISREG(mode):
             with path.open('rb') as stream:
                 files[path.relative_to(directory).as_posix()] = hashlib.file_digest(stream, 'sha256').hexdigest()
-    expected = pin.get('files', {})
-    if (not expected or files != expected
+    entries = pin.get('files', [])
+    if (not isinstance(entries, list) or not 1 <= len(entries) <= 4096
+            or any(not isinstance(entry, dict) or set(entry) != {'path', 'sha256'}
+                   or not isinstance(entry['path'], str)
+                   or not isinstance(entry['sha256'], str)
+                   or not re.fullmatch(r'[0-9a-f]{64}', entry['sha256']) for entry in entries)):
+        raise ValueError('invalid design package file records')
+    expected = {entry['path']: entry['sha256'] for entry in entries}
+    if (len(expected) != len(entries) or files != expected
             or any(PurePosixPath(name).is_absolute() or '..' in PurePosixPath(name).parts for name in expected)):
         raise ValueError('released design package inventory or bytes changed')
     digest = hashlib.sha256()
