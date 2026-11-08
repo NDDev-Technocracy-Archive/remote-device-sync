@@ -105,6 +105,14 @@ It claims before request metadata is sent and resets canceled partial sends.
 Outgoing selected-file admission reserves a body slot before native open, and
 passes that original reservation into every actual source syscall and final
 version check. Native readers retain it after their async sender is canceled.
+Representation responses use the same pre-read admission: `Streams::response`
+reserves before a native text, image or manifest read. The one-shot response
+passes `original()` into that read and consumes the admitted slot when sending
+the validated bytes. Incoming verified bytes retain their reservation through
+parsing and native publication; publication receives that same original owner.
+Canceling either waiter cannot free capacity while its native job still runs.
+Selected file capabilities keep their separate selection authority, rather than
+retaining a manifest body's transfer credit for the lifetime of a file promise.
 A forwarding source adds that owner to its upstream reader/proof; it never
 replaces the upstream or native paste authority.
 It neither opens an OS provider nor authorizes clipboard access by itself.
