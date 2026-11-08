@@ -189,6 +189,13 @@ pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
     crate::clipboard::macos::probe().map_err(clipboard_error)
 }
 #[doc(hidden)]
+#[cfg(all(target_os = "macos", feature = "host"))]
+pub async fn native_clipboard_owner_probe() -> Result<u32, crate::DesktopError> {
+    crate::clipboard::macos::owner_probe()
+        .await
+        .map_err(clipboard_error)
+}
+#[doc(hidden)]
 #[cfg(not(target_os = "macos"))]
 pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
     Err(crate::DesktopError::Input(

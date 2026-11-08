@@ -18,6 +18,7 @@ pub struct Policy {
     pub operation_timeout_ms: u64,
     pub native_uri_bytes: u64,
     pub native_types: usize,
+    pub pending_operations: usize,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -27,6 +28,7 @@ impl Default for Policy {
             operation_timeout_ms: 2000,
             native_uri_bytes: rds_core::clipboard::TEXT_BYTES,
             native_types: 64,
+            pending_operations: 8,
         }
     }
 }
@@ -37,6 +39,7 @@ impl Policy {
             || !(100..=30_000).contains(&self.operation_timeout_ms)
             || !(1..=16 * rds_core::clipboard::TEXT_BYTES).contains(&self.native_uri_bytes)
             || !(1..=4096).contains(&self.native_types)
+            || !(1..=64).contains(&self.pending_operations)
         {
             return Err(Error::Settings);
         }

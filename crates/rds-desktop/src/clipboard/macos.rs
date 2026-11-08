@@ -20,6 +20,13 @@ use super::{
     native::{Error, Policy, Publication, Snapshot, Text, Value},
 };
 
+#[cfg(feature = "host")]
+mod owner;
+#[cfg(feature = "host")]
+pub(crate) use owner::Group;
+#[cfg(all(feature = "host", feature = "viewer"))]
+pub(crate) use owner::probe as owner_probe;
+
 // NSPasteboard is not a concurrent mutable object. The asynchronous provider
 // uses a serialized native owner; the existing viewer adapter is being moved
 // onto that same provider before native clipboard mode is advertised.
@@ -51,6 +58,7 @@ impl Board {
         })
     }
 
+    #[cfg(feature = "viewer")]
     fn isolated() -> Self {
         Self {
             board: NSPasteboard::pasteboardWithUniqueName(),
@@ -61,7 +69,7 @@ impl Board {
 
     pub(crate) fn generation(&self) -> Result<u64, Error> {
         let _access = ACCESS.lock().map_err(|_| Error::Unavailable)?;
-        Ok(self.board.changeCount() as u64)
+        Ok(autoreleasepool(|_| self.board.changeCount() as u64))
     }
 
     pub(crate) fn snapshot(&self, policy: &Policy) -> Result<Snapshot, Error> {
@@ -256,6 +264,7 @@ impl Drop for Board {
 }
 
 /// Native named-board probe; never replaces the user's general clipboard.
+#[cfg(feature = "viewer")]
 pub(crate) fn probe() -> Result<u32, Error> {
     let mut board = Board::isolated();
     let policy = Policy::default();

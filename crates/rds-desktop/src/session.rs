@@ -339,6 +339,9 @@ pub trait FrameProducer: Send + 'static {
 /// Everything `serve_desktop` needs beyond the negotiated hello.
 #[derive(Default)]
 pub struct SessionConfig {
+    /// Original caller scope/key/budget retained by real native work, even when
+    /// the session future is canceled. This is lifetime, never authorization.
+    pub native_lifetime: Option<crate::clipboard::NativeLifetime>,
     /// Prepared, agent-owned backend; native types do not enter the wire.
     pub source: Option<Arc<dyn crate::DesktopSource>>,
     /// Explicit DesktopV4 payload proofs; legacy sessions keep FIN receipts.
@@ -684,6 +687,22 @@ pub async fn serve_desktop_with(
         .unwrap_or(8_000_000)
         .min(u64::from(u32::MAX));
     let controls = ProducerControls::new(4_000_000_u64.min(ceiling));
+    let native = crate::clipboard::ownership::Owner::new();
+    if let Some(context) = config.native_lifetime.clone()
+        && !native.retain(context)
+    {
+        return Err(DesktopError::Input(
+            "native session context unavailable".into(),
+        ));
+    }
+    struct CloseNative(Arc<crate::clipboard::ownership::Owner>);
+    impl Drop for CloseNative {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+    let _close_native = CloseNative(native.clone());
+    let native_closed = || DesktopError::Input("native session closed".into());
     // No backend is opened for a view-only session. Blocking platform calls
     // run on one bounded, session-owned worker, outside the async executor.
     let mut input = None;
@@ -726,6 +745,7 @@ pub async fn serve_desktop_with(
         let input_refresh_until_ms = Arc::clone(&controls.input_refresh_until_ms);
         let input_refresh_pending = Arc::clone(&controls.input_refresh_pending);
         let mut producer = config.producer;
+        let native_work = native.begin().ok_or_else(native_closed)?;
         let backend = config.source.clone();
         let repair = media_repair.clone();
         let latest_key_seq = latest_key_seq.clone();
@@ -733,7 +753,11 @@ pub async fn serve_desktop_with(
         let feedback = delivery_feedback.clone();
         let parent = tracing::Span::current();
         capture.spawn_blocking(move || {
+            let native_work = native_work;
             let _entered = parent.enter();
+            if native_work.closed() {
+                return;
+            }
             let producer_controls = ProducerControls {
                 bitrate,
                 idr,
@@ -762,7 +786,7 @@ pub async fn serve_desktop_with(
                 // The channel is the session's lifecycle: when the
                 // session ends the writer drops `rx` and this loop exits
                 // — abort() cannot interrupt spawn_blocking work.
-                if tx.is_closed() {
+                if native_work.closed() || tx.is_closed() {
                     return;
                 }
                 // Reserve capture cadence through the bounded producer queue
@@ -1277,6 +1301,17 @@ pub async fn serve_desktop_with(
     // not cancellation-safe.  Keep it in one reader task while the session
     // loop also waits for native clipboard changes; canceling a `select!`
     // branch must never discard a half-read control frame.
+    let mut watching = config.reverse_clipboard && !config.view_only && clipboard_supported;
+    let clipboard_lifetime: crate::clipboard::NativeLifetime =
+        Arc::new(native.begin().ok_or_else(native_closed)?);
+    let mut clipboard = watching.then(|| {
+        crate::clipboard::Worker::for_source(
+            config.source.as_deref(),
+            session_display,
+            true,
+            Some(clipboard_lifetime.clone()),
+        )
+    });
     let control = async {
         let (control_tx, mut control_rx) =
             mpsc::channel::<Result<DesktopControl, std::io::Error>>(16);
@@ -1291,10 +1326,6 @@ pub async fn serve_desktop_with(
             }
         });
         let mut assembly = crate::clipboard::Assembly::default();
-        let mut watching = config.reverse_clipboard && !config.view_only && clipboard_supported;
-        let mut clipboard = watching.then(|| {
-            crate::clipboard::Worker::for_source(config.source.as_deref(), session_display, true)
-        });
         let mut reverse = crate::clipboard::ReverseSender::default();
         loop {
             let read_started = Instant::now();
@@ -1347,9 +1378,15 @@ pub async fn serve_desktop_with(
                             );
                             continue;
                         }
-                        let mut worker = input.take().unwrap_or_else(|| {
-                            super::input::worker::InputWorker::new(input_sink.take())
-                        });
+                        let mut worker = if let Some(worker) = input.take() {
+                            worker
+                        } else {
+                            let Some(running) = native.begin() else { break };
+                            super::input::worker::InputWorker::new(
+                                input_sink.take(),
+                                Some(Arc::new(running)),
+                            )
+                        };
                         let seq = ev.seq;
                         let received_ms = send_clock.now_ms();
                         let input_started = Instant::now();
@@ -1361,14 +1398,11 @@ pub async fn serve_desktop_with(
                                 continue;
                             }
                             Err(_) => {
-                                // The platform input call never returned (a
-                                // wedged X server). Drop the worker — its
-                                // running syscall may still finish, per its
-                                // contract — so the next event probes a fresh
-                                // sink, and count this event unacked rather
-                                // than stalling the whole control plane.
-                                tracing::warn!("input injection timed out; dropping wedged worker");
-                                continue;
+                                // The admitted backend may still be running.
+                                // End this session instead of probing another
+                                // OS sink with the old operation in flight.
+                                tracing::warn!("input injection timed out; ending owning session");
+                                break;
                             }
                         }
                         controls.input_refresh_until_ms.store(
@@ -1524,6 +1558,7 @@ pub async fn serve_desktop_with(
                                             config.source.as_deref(),
                                             session_display,
                                             false,
+                                            Some(clipboard_lifetime.clone()),
                                         )
                                     })
                                     .publish(text),
@@ -1579,10 +1614,29 @@ pub async fn serve_desktop_with(
             Some(Err(e)) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
         },
     };
+    native.close();
+    let _ = send.0.reset(0u32.into());
     // Normal exit joins the asynchronous siblings. Cancellation during this
     // shutdown still drops the JoinSet and aborts its remaining children.
     workers.shutdown().await;
     capture.abort_all();
+    drop(input);
+    drop(input_sink);
+    if let Some(worker) = &mut clipboard {
+        worker.close().await;
+    }
+    drop(clipboard);
+    drop(clipboard_lifetime);
+    // A running spawn_blocking call cannot be aborted. Its guard keeps the
+    // original native authority reserved until the OS object is cleaned up.
+    native.drain().await;
+    while let Some(result) = capture.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "desktop capture worker failed during shutdown");
+        }
+    }
     result
 }
 

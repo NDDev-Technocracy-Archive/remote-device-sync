@@ -50,3 +50,37 @@ until in-flight operations drain; no network receipt substitutes for that.
 Native adapters, negotiated transport/manager channels, gesture ownership and
 actual text/image/file pastes across the OS matrix remain the next acceptance
 steps. The legacy text mode remains admitted during the coordinated upgrade.
+
+## Native ownership
+
+The serving session owns one sealed admission/drain lifetime. Capture, input
+and clipboard keep that original caller context until their real native work
+and OS objects are released. Normal serving completion drains these owners;
+canceling the Rust future still leaves the running native guard in place.
+Managed admission pins the original grant and service reservations through
+that cleanup. These guards grant no new permission. A timed-out input call ends
+its owning session rather than probing a replacement OS sink while the admitted
+backend is still executing.
+
+The macOS adapter shares one sleeping AppKit owner per process, a bounded queue
+and body permits. A watching lease polls only native generation metadata; text
+and image data are read on request. Each queued operation retains its original
+scope through native completion, even when its receiver times out. No watcher
+means the native owner sleeps on its queue. Consented Mac hosting uses this
+owner for the existing text mode. The current viewer wrappers still require
+migration to its asynchronous contract before native clipboard mode is offered.
+Native files remain unsupported until NSURL authority and paste promises are
+implemented; string URLs are not a substitute for native file authority.
+
+`native_clipboard` runs against private named pasteboards. The first seven
+AppKit cases passed on physical Apple Silicon hosts using the exact PR probe
+artifact. The queued owner adds five separately reported cases. These probes do
+not read the general clipboard, change OS grants or establish cross-device paste
+acceptance. PR probe bytes are bound to their source tree and artifact digest;
+release provenance is emitted only for successful main producers.
+
+Wayland consent-state ownership explicitly unlocks its file on teardown. A
+transient descriptor inherited by a concurrent spawn before CLOEXEC must not
+prolong the ended owner's lock or make immediate preparation fail. A regression
+holds that same open file description while the original owner ends and verifies
+that the retained consent state can be reopened without a delay or retry.

@@ -830,7 +830,7 @@ async fn serve_stream(
             send.finish()?;
             anyhow::bail!("service capacity reached");
         };
-        Some(slot)
+        Some(Arc::new(slot))
     } else {
         None
     };
@@ -968,6 +968,12 @@ async fn serve_stream(
                     #[cfg(feature = "desktop")]
                     match desktop.capabilities().await {
                         Ok(caps) => {
+                            let native_authority = authz.native_lifetime();
+                            if grant.is_some() && native_authority.is_none() {
+                                anyhow::bail!(
+                                    "desktop authorization closed before native admission"
+                                );
+                            }
                             if !caps
                                 .displays
                                 .iter()
@@ -1012,6 +1018,10 @@ async fn serve_stream(
                                 recv,
                                 hello,
                                 rds_desktop::SessionConfig {
+                                    native_lifetime: Some(Arc::new((
+                                        _service_slot.clone(),
+                                        native_authority,
+                                    ))),
                                     source: desktop.source.clone(),
                                     bitrate_ceiling: max_bps,
                                     view_only: grant

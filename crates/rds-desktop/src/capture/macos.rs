@@ -48,6 +48,7 @@ async fn wait_for_permission(
 /// ScreenCaptureKit capture and CGEvent input. Opening never requests OS
 /// permissions: the local application must obtain them explicitly beforehand.
 pub struct MacDesktop {
+    clipboard: Option<crate::clipboard::macos::Group>,
     geometries: Vec<Geometry>,
     slots: Vec<Arc<Slot>>,
     input: Arc<crate::input::macos::Group>,
@@ -86,6 +87,13 @@ impl MacDesktop {
         // Observe later local grants without repeating either permission API
         // or allocating a native worker while access is missing.
         wait_for_permission(Self::permission_status, &mut cancelled).await?;
+        let clipboard = match crate::clipboard::macos::Group::start(Default::default()) {
+            Ok(group) => Some(group),
+            Err(error) => {
+                tracing::warn!(%error,"native clipboard unavailable; screen preparation continues");
+                None
+            }
+        };
         static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let permit = WORKERS
             .get_or_init(|| Arc::new(Semaphore::new(4)))
@@ -116,7 +124,21 @@ impl MacDesktop {
             let _ = task.await;
             return Err(sck_native::error());
         };
+        if let Some(group) = &clipboard {
+            tokio::select! {
+                biased;
+                _ = &mut cancelled => {
+                    stop.store(true, Ordering::Release);
+                    let _ = task.await;
+                    return Err(sck_native::error());
+                },
+                result = group.ready() => if let Err(error) = result {
+                    tracing::warn!(%error,"native clipboard not ready; screen remains available");
+                },
+            }
+        }
         Ok(Self {
+            clipboard,
             geometries: prepared.geometries,
             slots: prepared.slots,
             input: prepared.input,
@@ -166,6 +188,22 @@ impl Drop for MacDesktop {
 }
 
 impl DesktopSource for MacDesktop {
+    fn clipboard_supported(&self) -> bool {
+        self.clipboard
+            .as_ref()
+            .is_some_and(|group| group.available())
+    }
+    fn clipboard(
+        &self,
+        display: u32,
+        watching: bool,
+    ) -> Result<Box<dyn crate::clipboard::ClipboardBackend>, DesktopError> {
+        self.selected(display)?;
+        self.clipboard
+            .as_ref()
+            .ok_or_else(|| DesktopError::Input("native clipboard unavailable".into()))?
+            .worker(watching)
+    }
     fn capabilities(&self) -> Result<rds_core::DesktopCaps, DesktopError> {
         let displays = self
             .geometries
