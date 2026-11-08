@@ -172,6 +172,16 @@ impl Group {
             owner: Owner::new(),
         }
     }
+    pub(crate) fn native(&self, original: NativeLifetime) -> Result<Arc<dyn Provider>, Error> {
+        if !self.available() {
+            return Err(Error::Unavailable);
+        }
+        let provider = self.provider();
+        if !provider.owner.retain(original) {
+            return Err(Error::Changed);
+        }
+        Ok(Arc::new(provider))
+    }
     pub(crate) fn worker(
         &self,
         watching: bool,
@@ -201,12 +211,9 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     let policy = Policy::default();
     let group = Group::spawn(policy.clone(), || Ok(Board::isolated()))?;
     group.ready().await?;
-    let provider = group.provider();
     let context = Arc::new(());
     let retained = Arc::downgrade(&context);
-    if !provider.owner.retain(context) {
-        return Err(Error::Unavailable);
-    }
+    let provider = group.native(context)?;
     let before = provider.current().await?;
     let text = Text::new(
         bytes::Bytes::from_static("Привет 🖥️\n".as_bytes()),
@@ -263,7 +270,7 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     if read.encoded() != &expected {
         return Err(Error::Publication);
     }
-    provider.owner.drain().await;
+    provider.close().await;
     if !matches!(provider.current().await, Err(Error::Changed)) || retained.upgrade().is_none() {
         return Err(Error::Publication);
     }
@@ -357,6 +364,10 @@ impl Lease {
     }
 }
 impl Provider for Lease {
+    fn close(&self) -> ClipboardFuture<'_, ()> {
+        self.owner.close();
+        Box::pin(self.owner.drain())
+    }
     fn capabilities(&self) -> Capabilities {
         let formats = if self.group.available() {
             vec![Format::TextUtf8, Format::ImagePng]
@@ -444,7 +455,7 @@ impl ClipboardBackend for Legacy {
         self.provider.owner.retain(context)
     }
     fn close(&mut self) -> ClipboardFuture<'_, ()> {
-        Box::pin(self.provider.owner.drain())
+        self.provider.close()
     }
     fn publish(&mut self, text: String) -> ClipboardFuture<'_, Result<(), crate::DesktopError>> {
         Box::pin(async move {

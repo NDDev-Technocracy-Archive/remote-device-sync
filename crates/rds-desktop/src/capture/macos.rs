@@ -188,6 +188,18 @@ impl Drop for MacDesktop {
 }
 
 impl DesktopSource for MacDesktop {
+    fn native_clipboard(
+        &self,
+        display: u32,
+        original: crate::clipboard::NativeLifetime,
+    ) -> Result<Arc<dyn crate::clipboard::native::Provider>, DesktopError> {
+        self.selected(display)?;
+        self.clipboard
+            .as_ref()
+            .ok_or_else(|| DesktopError::Input("native clipboard unavailable".into()))?
+            .native(original)
+            .map_err(|error| DesktopError::Input(error.to_string()))
+    }
     fn clipboard_supported(&self) -> bool {
         self.clipboard
             .as_ref()

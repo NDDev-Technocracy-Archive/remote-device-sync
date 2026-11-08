@@ -1,5 +1,5 @@
 //! Direct native destination writes keep the original transfer/paste owner.
-use std::{fs::File, sync::Arc};
+use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
 
 use super::Error;
 use crate::clipboard::NativeLifetime;
@@ -20,6 +20,34 @@ impl Destination {
             file,
             _lifetime: original,
         }))
+    }
+    pub(crate) async fn validate_empty(&self) -> Result<(), Error> {
+        self.run(|file| {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "file promise requires a new empty regular destination",
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+    /// Move the one body chunk into its actual native write and return it for
+    /// reuse. A canceled waiter cannot release the FD or original caller while
+    /// that syscall runs, and no Tokio file buffer copies it.
+    pub(crate) async fn write_chunk(
+        &self,
+        bytes: Vec<u8>,
+        length: usize,
+        offset: u64,
+    ) -> Result<Vec<u8>, Error> {
+        self.run(move |file| {
+            file.write_all_at(&bytes[..length], offset)?;
+            Ok(bytes)
+        })
+        .await
     }
     pub(super) async fn run<T: Send + 'static>(
         &self,

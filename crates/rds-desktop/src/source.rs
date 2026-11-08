@@ -52,6 +52,16 @@ pub trait DesktopSource: Send + Sync + 'static {
     ) -> Result<Box<dyn crate::clipboard::ClipboardBackend>, DesktopError> {
         Err(DesktopError::Input("clipboard backend unavailable".into()))
     }
+    /// Lease the existing native clipboard owner after the caller admits its
+    /// explicit clipboard scope. This in-memory factory grants no permission
+    /// and cannot open consent or probe a different operating-system backend.
+    fn native_clipboard(
+        &self,
+        _display: u32,
+        _original: crate::clipboard::NativeLifetime,
+    ) -> Result<std::sync::Arc<dyn crate::clipboard::native::Provider>, DesktopError> {
+        Err(DesktopError::Input("native clipboard unavailable".into()))
+    }
 }
 
 #[cfg(all(test, target_os = "linux", feature = "portal"))]

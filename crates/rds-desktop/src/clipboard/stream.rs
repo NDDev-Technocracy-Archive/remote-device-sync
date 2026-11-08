@@ -1,7 +1,7 @@
 //! One bounded body with an integrity trailer. Callers own authorization,
 //! native source/destination handles, stream priority and publication. This
 //! core never opens a path, retains a file cache or allocates the whole body.
-use rds_core::clipboard::{Limits, Receipt, Request, TransferHeader};
+use rds_core::clipboard::{Limits, PayloadKind, Receipt, Request, TransferHeader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +34,73 @@ where
     send_checked(source, wire, header, limits, async { Ok(()) }).await
 }
 
+/// Receive a selected file directly into the receiving application's newly
+/// opened native destination. The destination retains the original paste
+/// operation through actual native I/O, including a canceled waiting future.
+/// Its owner still controls publication and failure cleanup.
+pub async fn receive_file<R: AsyncRead + Unpin + Send>(
+    wire: &mut R,
+    destination: super::native::Destination,
+    expected: &Request,
+    limits: &Limits,
+) -> Result<Receipt, Error> {
+    expected.validate(limits)?;
+    if !matches!(expected.kind, PayloadKind::File(_)) {
+        return Err(rds_core::clipboard::Error::Identity.into());
+    }
+    receive_body(wire, &mut NativeFile(destination), expected, limits).await
+}
+
+trait Sink: Send {
+    fn begin(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn write(
+        &mut self,
+        chunk: Vec<u8>,
+        length: usize,
+        offset: u64,
+    ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send;
+    fn finish(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+struct Writer<'a, W>(&'a mut W);
+impl<W: AsyncWrite + Unpin + Send> Sink for Writer<'_, W> {
+    async fn begin(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+    async fn write(
+        &mut self,
+        chunk: Vec<u8>,
+        length: usize,
+        _offset: u64,
+    ) -> Result<Vec<u8>, Error> {
+        self.0.write_all(&chunk[..length]).await?;
+        Ok(chunk)
+    }
+    async fn finish(&mut self) -> Result<(), Error> {
+        self.0.flush().await?;
+        Ok(())
+    }
+}
+
+struct NativeFile(super::native::Destination);
+impl Sink for NativeFile {
+    async fn begin(&mut self) -> Result<(), Error> {
+        Ok(self.0.validate_empty().await?)
+    }
+    async fn write(
+        &mut self,
+        chunk: Vec<u8>,
+        length: usize,
+        offset: u64,
+    ) -> Result<Vec<u8>, Error> {
+        Ok(self.0.write_chunk(chunk, length, offset).await?)
+    }
+    async fn finish(&mut self) -> Result<(), Error> {
+        // Each native syscall has returned before its write future completes.
+        Ok(())
+    }
+}
+
 /// Forward a selected or remote-origin file without staging it. The source's
 /// own version/integrity proof must finish before this stream gets a trailer.
 pub async fn send_file<W: AsyncWrite + Unpin>(
@@ -47,7 +114,7 @@ pub async fn send_file<W: AsyncWrite + Unpin>(
         mut reader,
         complete,
     } = source;
-    if bytes != header.bytes || !matches!(header.kind, rds_core::clipboard::PayloadKind::File(_)) {
+    if bytes != header.bytes || !matches!(header.kind, PayloadKind::File(_)) {
         return Err(rds_core::clipboard::Error::Identity.into());
     }
     send_checked(&mut reader, wire, header, limits, complete).await
@@ -101,13 +168,23 @@ pub async fn receive<R, W>(
     limits: &Limits,
 ) -> Result<Receipt, Error>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
 {
+    receive_body(wire, &mut Writer(destination), expected, limits).await
+}
+
+async fn receive_body<R: AsyncRead + Unpin + Send>(
+    wire: &mut R,
+    destination: &mut impl Sink,
+    expected: &Request,
+    limits: &Limits,
+) -> Result<Receipt, Error> {
     // Validate the locally admitted request before reading any peer payload.
     expected.validate(limits)?;
     let header: TransferHeader = rds_net::read_frame(wire).await?;
     header.validate(expected, limits)?;
+    destination.begin().await?;
     let mut remaining = header.bytes;
     let mut chunk = vec![0; limits.chunk_bytes as usize];
     let mut hash = blake3::Hasher::new();
@@ -118,7 +195,9 @@ where
             return Err(Error::Length);
         }
         hash.update(&chunk[..length]);
-        destination.write_all(&chunk[..length]).await?;
+        chunk = destination
+            .write(chunk, length, header.bytes - remaining)
+            .await?;
         remaining -= length as u64;
     }
     let mut digest = [0u8; 32];
@@ -130,7 +209,7 @@ where
     if wire.read(&mut [0u8; 1]).await? != 0 {
         return Err(Error::Length);
     }
-    destination.flush().await?;
+    destination.finish().await?;
     Ok(Receipt {
         id: header.id,
         bytes: header.bytes,
@@ -205,6 +284,59 @@ mod tests {
             Err(Error::Contract(_))
         ));
         assert!(destination.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_selected_file_stream_writes_one_new_native_destination_and_refuses_overwrite() {
+        let root =
+            std::env::temp_dir().join(format!("rds-file-stream-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("pasted");
+        let limits = Limits {
+            chunk_bytes: 4096,
+            ..Limits::default()
+        };
+        let value = "Привет 🖥️\n".repeat(10000).into_bytes();
+        let mut expected = header(value.len() as u64);
+        expected.kind = PayloadKind::File([4; 16]);
+        let request = expected.request();
+        let output = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let destination = super::super::native::Destination::new(output, std::sync::Arc::new(()));
+        let (mut outgoing, mut incoming) = tokio::io::duplex(8192);
+        let sending = async {
+            let receipt = send(&mut value.as_slice(), &mut outgoing, &expected, &limits).await?;
+            outgoing.shutdown().await?;
+            Ok::<_, Error>(receipt)
+        };
+        let receiving = receive_file(&mut incoming, destination, &request, &limits);
+        let (sent, received) = tokio::join!(sending, receiving);
+        let receipt = received.unwrap();
+        assert_eq!(sent.unwrap(), receipt);
+        assert!(!receipt.published);
+        assert_eq!(std::fs::read(&path).unwrap(), value);
+
+        let mut wire = Vec::new();
+        send(&mut value.as_slice(), &mut wire, &expected, &limits)
+            .await
+            .unwrap();
+        let output = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert!(matches!(
+            receive_file(
+                &mut wire.as_slice(),
+                super::super::native::Destination::new(output, std::sync::Arc::new(())),
+                &request,
+                &limits,
+            )
+            .await,
+            Err(Error::Source(super::super::native::Error::Io(_)))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), value);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

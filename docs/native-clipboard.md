@@ -18,6 +18,11 @@ the destination and rejects truncation, corruption and trailing data. The
 caller owns authorization, cancellation/deadlines, concurrency, transport
 priority and the unpublished native destination. A verified receipt is distinct
 from native publication and from application consumption.
+`receive_file` uses that same framing/integrity path with the owned native file
+destination. It accepts only a selected-file request, validates the complete
+header before filesystem work, refuses a nonempty/nonregular destination and
+moves one reusable body chunk into each positional native write. The bounded
+duplex/native-file case passed on Linux and macOS without a staging copy.
 
 `rds-sync::selection` owns the selected-file capability, independently of sync
 roots and the chunk cache. Native adapters select absolute local paths or open
@@ -75,6 +80,11 @@ scope through native completion, even when its receiver times out. No watcher
 means the native owner sleeps on its queue. Consented Mac hosting uses this
 owner for the existing text mode. The current viewer wrappers still require
 migration to its asynchronous contract before native clipboard mode is offered.
+The prepared `DesktopSource` exposes an in-memory native-provider lease factory:
+the caller supplies its original admitted clipboard context before jobs begin.
+It does not open OS consent or fall back to an unrelated backend. Provider close
+seals new work and drains the retained native operations; offered file handles
+must be released before awaiting that boundary.
 File sources are read as native NSURL objects, with their resource scopes and
 original caller held by every selected descriptor and reader. Foundation's
 filesystem representation is bounded across the whole selection; a serialized

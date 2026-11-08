@@ -157,6 +157,9 @@ pub enum Publication {
 }
 
 pub trait Provider: Send + Sync {
+    /// Seal admission and drain actual native operations for this lease. The
+    /// owner drops offered file capabilities before awaiting this boundary.
+    fn close(&self) -> super::ClipboardFuture<'_, ()>;
     fn capabilities(&self) -> Capabilities;
     fn current(&self) -> Operation<'_, Snapshot>;
     fn read(&self, generation: u64, format: Format) -> Operation<'_, Value>;
@@ -204,18 +207,7 @@ async fn write_file<F: Files + ?Sized>(
         .find(|entry| entry.id == file)
         .ok_or(rds_sync::selection::Error::Unknown)?
         .bytes;
-    destination
-        .run(|file| {
-            let metadata = file.metadata()?;
-            if !metadata.is_file() || metadata.len() != 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "file promise requires a new empty regular destination",
-                ));
-            }
-            Ok(())
-        })
-        .await?;
+    destination.validate_empty().await?;
     let mut read = source.open(file).await?;
     if read.bytes != expected {
         return Err(rds_sync::selection::Error::Changed.into());
@@ -223,7 +215,6 @@ async fn write_file<F: Files + ?Sized>(
     let mut bytes = vec![0; limits.chunk_bytes as usize];
     let mut total = 0u64;
     let mut hash = blake3::Hasher::new();
-    use std::os::unix::fs::FileExt;
     use tokio::io::AsyncReadExt;
     while total < expected {
         let maximum = (expected - total).min(bytes.len() as u64) as usize;
@@ -232,16 +223,7 @@ async fn write_file<F: Files + ?Sized>(
             return Err(rds_sync::selection::Error::Changed.into());
         }
         hash.update(&bytes[..length]);
-        let offset = total;
-        // Move the one chunk into its native write and get it back. A
-        // canceled waiter cannot release the FD or original purpose while
-        // that syscall still runs, and no Tokio file buffer copies it.
-        bytes = destination
-            .run(move |file| {
-                file.write_all_at(&bytes[..length], offset)?;
-                Ok(bytes)
-            })
-            .await?;
+        bytes = destination.write_chunk(bytes, length, total).await?;
         total += length as u64;
     }
     if read.reader.read(&mut [0u8; 1]).await? != 0 {
