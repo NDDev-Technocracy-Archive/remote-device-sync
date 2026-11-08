@@ -259,22 +259,10 @@ mod native {
         handle.display_extent(screen.width, screen.height);
         Ok(())
     }
-    pub(super) async fn run(source: Source, options: Options) -> anyhow::Result<()> {
-        if options.headless {
-            let duration = options.duration;
-            return tokio::select! {
-                result = headless(source, options) => result,
-                _ = async { match duration { Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds.get())).await, None => std::future::pending().await } } => Ok(()),
-            };
-        }
-        let (viewer, handle, mut input) = Viewer::new(options.display)?;
-        let device = match &source {
-            Source::Managed { peer, .. } => rds_net::parse_target(peer)
-                .map(|address| format!("Device {}", &address.id.to_string()[..8]))
-                .unwrap_or_else(|_| peer.chars().take(80).collect()),
-            Source::Direct { target, .. } => format!("Device {}", &target.id.to_string()[..8]),
-        };
-        handle.label(format!("RDS · {device} · Display {}", options.display));
+    pub(super) fn configure_visual_probe(
+        handle: &ViewerHandle,
+        options: &Options,
+    ) -> anyhow::Result<()> {
         if let Some(path) = &options.diagnostic_visual_probe {
             use std::io::Read;
             let file = std::fs::File::from(rustix::fs::open(
@@ -295,6 +283,25 @@ mod native {
             let spec: rds_desktop::render::VisualProbeSpec = serde_json::from_slice(&bytes)?;
             handle.visual_probe(spec)?;
         }
+        Ok(())
+    }
+    pub(super) async fn run(source: Source, options: Options) -> anyhow::Result<()> {
+        if options.headless {
+            let duration = options.duration;
+            return tokio::select! {
+                result = headless(source, options) => result,
+                _ = async { match duration { Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds.get())).await, None => std::future::pending().await } } => Ok(()),
+            };
+        }
+        let (viewer, handle, mut input) = Viewer::new(options.display)?;
+        let device = match &source {
+            Source::Managed { peer, .. } => rds_net::parse_target(peer)
+                .map(|address| format!("Device {}", &address.id.to_string()[..8]))
+                .unwrap_or_else(|_| peer.chars().take(80).collect()),
+            Source::Direct { target, .. } => format!("Device {}", &target.id.to_string()[..8]),
+        };
+        handle.label(format!("RDS · {device} · Display {}", options.display));
+        configure_visual_probe(&handle, &options)?;
         let stop = CancellationToken::new();
         let mut workers = tokio::task::JoinSet::new();
         let worker_stop = stop.clone();

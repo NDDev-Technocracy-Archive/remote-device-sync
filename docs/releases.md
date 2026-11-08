@@ -1,6 +1,6 @@
 # Engineering preview releases
 
-NDDev Remote `0.1.1` packages the standalone remote-screen product. The native
+NDDev Remote packages the standalone remote-screen product. The native
 client is `nddev-remote`, with `rds` for automation and `rds-agent` for the resident
 endpoint. NDS accounts, synchronization, telemetry and build caches are independent
 of screen connections. Current acceptance is recorded separately from build
@@ -16,7 +16,7 @@ commit in `release-manifest.json`.
 | `nddev-remote-x86_64-unknown-linux-gnu-<source>.tar.gz` | Three desktop-enabled executables, notices and `build-info.json`; native Ubuntu 24.04 x86_64 build, X11 and consented Wayland host |
 | `nddev-remote-aarch64-apple-darwin-<source>.tar.gz` | The same three executables, notices and metadata; native macOS arm64 build, ScreenCaptureKit/CGEvent host |
 | `nddev-remote-macos-apps-<source>.tar.gz` | `NDDev Remote.app`, `NDDev Remote Host.app` and signed-file receipts |
-| `nddev-remote-0.1.1-source.tar.gz` | All tracked source, including vendored build dependencies, lockfile, packaging, tests, documentation, deployment and observability configuration |
+| `nddev-remote-<version>-source.tar.gz` | All tracked source, including vendored build dependencies, lockfile, packaging, tests, documentation, deployment and observability configuration |
 | `source-sbom.spdx.json` | SPDX inventory of the source archive, not an OS or complete binary SBOM |
 | `release-notes.md` | Compatibility and readiness notes |
 | `release-manifest.json` | Exact source/tag object, native producer, binary hashes and asset inventory |
@@ -35,10 +35,11 @@ Deterministic packaging does not claim bit-for-bit Rust rebuilds across hosts.
 
 ## Verify and install
 
-Download into a new empty directory. GitHub CLI is needed for verification only.
+Download into a new empty directory. Choose a numeric tag from Releases and
+replace `<version>` below. GitHub CLI is needed for verification only.
 
 ```sh
-version=0.1.1
+version='<version>'
 repo=NDDev-Technocracy-OpenNetwork/nddev-remote
 target=x86_64-unknown-linux-gnu
 # Apple Silicon: target=aarch64-apple-darwin
