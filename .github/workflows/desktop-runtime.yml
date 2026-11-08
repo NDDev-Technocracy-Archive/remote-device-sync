@@ -72,6 +72,7 @@ jobs:
         run: |
           cargo build --locked --release --target "$TARGET" -p rds-cli --example workspace_managed_preview --features rds-cli/desktop,rds-cli/transport-noq
       - name: Check native entrypoints and package exact bytes
+        # Packaging consumes only product binaries, independently of probe tools.
         env:
           TARGET: ${{ matrix.target }}
           FEATURES: ${{ matrix.features }}
@@ -92,6 +93,22 @@ jobs:
         with:
           name: desktop-${{ matrix.target }}
           path: ${{ runner.temp }}/desktop-runtime/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Build the isolated AppKit clipboard probe
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --locked --release --target "$TARGET" -p rds-desktop --example native_clipboard --features viewer,x11
+      - name: Retain the exact isolated AppKit clipboard probe
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-clipboard-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/examples/native_clipboard
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -131,3 +148,6 @@ jobs:
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/desktop-qualification/**/workspace_managed_preview
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/desktop-qualification/**/native_clipboard

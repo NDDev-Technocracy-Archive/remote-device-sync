@@ -98,6 +98,9 @@ impl Board {
                     }
                 }
             }
+            if self.board.changeCount() as u64 != generation {
+                return Err(Error::Changed);
+            }
             Ok(Snapshot {
                 generation,
                 owned: self.published == Some(generation),
@@ -234,7 +237,11 @@ impl Board {
                 Ok(())
             })?;
         }
-        self.snapshot(policy)
+        let snapshot = self.snapshot(policy)?;
+        if !snapshot.owned {
+            return Err(Error::Changed);
+        }
+        Ok(snapshot)
     }
 }
 
