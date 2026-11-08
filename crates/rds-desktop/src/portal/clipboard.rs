@@ -123,6 +123,7 @@ fn invalidate_selection(changes: &watch::Sender<Snapshot>, generation: &mut u64)
 struct Job {
     text: String,
     reply: oneshot::Sender<Result<(), DesktopError>>,
+    running: crate::clipboard::ownership::Running,
 }
 pub(super) struct Group {
     jobs: mpsc::Sender<Job>,
@@ -259,7 +260,7 @@ impl Group {
                     },
                     job = requests.recv() => {
                         let Some(job) = job else { break; };
-                        if job.reply.is_closed() { continue; }
+                        if job.reply.is_closed() || job.running.closed() { continue; }
                         if job.text.len() > MAX_TEXT_BYTES { let _ = job.reply.send(Err(error())); continue; }
                         let previous = offered.take();
                         offered = Some(Arc::from(job.text));
@@ -311,6 +312,7 @@ impl Group {
             seen,
             watchers: self.watchers.clone(),
             _permit: permit,
+            owner: crate::clipboard::ownership::Owner::new(),
         }))
     }
     pub(super) async fn close(&self) {
@@ -336,6 +338,7 @@ impl Drop for Group {
     }
 }
 struct Lease {
+    owner: Arc<crate::clipboard::ownership::Owner>,
     jobs: mpsc::Sender<Job>,
     changes: watch::Receiver<Snapshot>,
     watching: bool,
@@ -345,20 +348,36 @@ struct Lease {
 }
 impl Drop for Lease {
     fn drop(&mut self) {
+        self.owner.close();
         if self.watching {
             self.watchers.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
 impl ClipboardBackend for Lease {
+    fn retain(&mut self, context: crate::clipboard::NativeLifetime) -> bool {
+        self.owner.retain(context)
+    }
+    fn close(&mut self) -> ClipboardFuture<'_, ()> {
+        if self.watching {
+            self.watching = false;
+            self.watchers.fetch_sub(1, Ordering::AcqRel);
+        }
+        Box::pin(self.owner.drain())
+    }
     fn publish(&mut self, text: String) -> ClipboardFuture<'_, Result<(), DesktopError>> {
         Box::pin(async move {
             if self.changes.borrow().closed || text.len() > MAX_TEXT_BYTES {
                 return Err(error());
             }
             let (reply, outcome) = oneshot::channel();
+            let running = self.owner.begin().ok_or_else(error)?;
             self.jobs
-                .try_send(Job { text, reply })
+                .try_send(Job {
+                    text,
+                    reply,
+                    running,
+                })
                 .map_err(|_| error())?;
             tokio::time::timeout(TIMEOUT, outcome)
                 .await
@@ -369,10 +388,14 @@ impl ClipboardBackend for Lease {
     fn next_change(&mut self) -> ClipboardFuture<'_, Option<String>> {
         Box::pin(async move {
             if !self.watching {
-                return std::future::pending().await;
+                self.owner.closed_signal().await;
+                return None;
             }
             loop {
-                self.changes.changed().await.ok()?;
+                tokio::select! {
+                    _ = self.owner.closed_signal() => return None,
+                    result = self.changes.changed() => result.ok()?,
+                };
                 let snapshot = self.changes.borrow_and_update().clone();
                 if snapshot.closed {
                     return None;

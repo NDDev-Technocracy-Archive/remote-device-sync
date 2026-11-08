@@ -932,7 +932,7 @@ impl SessionView {
         let text = lock(&self.handle.state).clipboard.publish(generation);
         let mut published = false;
         if let Some(text) = text {
-            match super::platform::publish_text(&text) {
+            match super::platform::publish_text(generation, &text) {
                 Ok(()) => published = true,
                 Err(error) => {
                     lock(&self.handle.state).clipboard.publication_failed();

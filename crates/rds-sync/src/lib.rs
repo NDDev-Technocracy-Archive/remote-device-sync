@@ -16,6 +16,7 @@ pub mod directory;
 pub mod engine;
 pub mod journal;
 pub mod proto;
+pub mod selection;
 
 mod confined;
 mod fault;

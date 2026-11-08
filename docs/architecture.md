@@ -394,6 +394,12 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
    rds-server — GDS services host: relay + discovery + registry
 ```
 
+The native clipboard adds one narrow dependency from `rds-desktop` to
+`rds-sync::selection`: shared selected-file descriptors and bounded positional
+I/O. It does not enter sync roots, journals or chunk caches. Protocol and
+representation types remain in the runtime-free `rds-core` leaf. See
+[the clipboard contract](native-clipboard.md).
+
 - **`rds-server`** — runs on the GDS services host: the packet relay and
   the signed-record discovery directory; later the registry bridge into
   estate state, presence and audit. The relay forwards encrypted application

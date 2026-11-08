@@ -5,7 +5,7 @@ use crate::DesktopError;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -31,6 +31,8 @@ pub(crate) struct Worker {
     wake: Option<UnixStream>,
     initialized: Option<oneshot::Receiver<bool>>,
     task: tokio::task::JoinHandle<()>,
+    joined: bool,
+    lifetime: Arc<OnceLock<super::NativeLifetime>>,
 }
 impl Worker {
     pub(crate) fn new(display: u32) -> Self {
@@ -40,6 +42,8 @@ impl Worker {
         Self::spawn(display, true)
     }
     fn spawn(display: u32, watch: bool) -> Self {
+        let lifetime = Arc::new(OnceLock::new());
+        let retained = lifetime.clone();
         let (jobs, mut rx) = mpsc::channel::<Job>(1);
         let (changes, change_rx) = crate::mailbox::channel(1);
         let (initialized, ready) = oneshot::channel();
@@ -54,6 +58,7 @@ impl Worker {
             .ok();
         let (wake, receiver) = pair.map_or((None, None), |(a, b)| (Some(a), Some(b)));
         let task = tokio::task::spawn_blocking(move || {
+            let _retained = retained;
             let Ok(_permit) = WORKERS.try_acquire() else {
                 return;
             };
@@ -121,6 +126,8 @@ impl Worker {
             wake,
             initialized: Some(ready),
             task,
+            joined: false,
+            lifetime,
         }
     }
     pub(crate) async fn ready(&mut self) -> Result<(), DesktopError> {
@@ -147,6 +154,25 @@ impl Worker {
     }
     pub(crate) async fn next_change(&mut self) -> Option<ClipboardChange> {
         self.changes.recv().await
+    }
+    pub(crate) fn retain(&mut self, context: super::NativeLifetime) -> bool {
+        match self.lifetime.set(context) {
+            Ok(()) => true,
+            Err(context) => self
+                .lifetime
+                .get()
+                .is_some_and(|old| Arc::ptr_eq(old, &context)),
+        }
+    }
+    pub(crate) async fn close(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(wake) = &mut self.wake {
+            let _ = wake.write(&[1]);
+        }
+        if !self.joined {
+            let _ = (&mut self.task).await;
+            self.joined = true;
+        }
     }
 }
 impl Drop for Worker {

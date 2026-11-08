@@ -16,6 +16,8 @@ pub use observation::{RenderStageTiming, RenderTimings, RendererInfo};
 mod input;
 #[cfg(feature = "viewer")]
 mod platform;
+#[cfg(all(feature = "viewer", feature = "host", target_os = "macos"))]
+pub use platform::native_clipboard_owner_probe;
 #[cfg(feature = "viewer")]
 pub use platform::{NativeWindowState, choose_resolution, native_clipboard_probe};
 #[cfg(feature = "viewer")]
