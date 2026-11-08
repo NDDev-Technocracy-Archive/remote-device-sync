@@ -62,3 +62,25 @@ skipped native draws, not visible presentation on M1. No acquisition stall or
 rendering correction is inferred from it. Owned fixture processes closed and
 the installed host retained its PID. Neither Mac result closes the earlier
 unexplained X11 cohort or establishes hardware-codec/input-to-photon acceptance.
+
+## Minimize/restore attribution follow-up
+
+The subsequent decode-demand comparison in #218 reproduced a narrower X11
+failure class under the same synthetic 640×360/30 FPS workload. During a
+4.001-second visible post-restore sample, 120 frames decoded but only 58 were
+submitted. Returned acquisition spans accounted for 2.36 seconds and included
+approximately one-second calls. The unchanged baseline submitted 120 frames in
+its corresponding sample. Reconfiguring on resume did not resolve it and was
+removed; no driver/WSI mechanism was established.
+
+The follow-up source moves configuration/acquisition off the UI while retaining
+one bounded native owner/result per window. Its source-bound native cohort
+submitted 120 frames over 4.001 seconds after restoration; acquisition accounted
+for 3,402 µs, with no incidents or attributed process writes. Own concurrent
+checks overlapped the first resource comparison, so its CPU ratio is not accepted
+as an isolated performance result. The separate keyboard-injection cohort failed
+on the unchanged baseline before candidate evaluation and remains unqualified.
+
+These are returned native API spans and one specific reproduction. They neither
+close the older unlabelled X11 cohort nor prove input-to-photon latency, isolated
+CPU reduction, hardware codecs or acceptance on another compositor/platform.
