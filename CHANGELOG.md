@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-08
+
+**Engineering preview.** The standalone viewer now honors an explicitly selected
+private directory for its live diagnostics and incident snapshots. Omitting the
+option retains the existing automatic private directory. File ownership,
+permissions, size and rotation protections remain enforced by the same storage
+owner. Native capture and wire formats retain the 0.1.2 implementation.
+
 ## [0.1.2] - 2026-11-08
 
 **Engineering preview.** This patch corrects the first image of a newly opened
