@@ -8,7 +8,9 @@
 private directory for its live diagnostics and incident snapshots. Omitting the
 option retains the existing automatic private directory. File ownership,
 permissions, size and rotation protections remain enforced by the same storage
-owner. Native capture and wire formats retain the 0.1.2 implementation.
+owner. Controlled visual-marker diagnostics now also initialize for each native
+workspace tab through the same validated descriptor path as a single view. Native
+capture and wire formats retain the 0.1.2 implementation.
 
 ## [0.1.2] - 2026-11-08
 

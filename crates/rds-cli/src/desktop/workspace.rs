@@ -358,6 +358,7 @@ async fn actor(
                                 selected.diagnostic_health.clone(), diagnostic_stop.clone(), Some((tab.id.value(), tab.revision)));
                             let running = async {
                                 let result = async {
+                                native::configure_visual_probe(&display, &selected)?;
                                 let grant = read_grant(device.grant_file).await?;
                                 native::network(native::Source::Managed { client: peer_client, session: None,
                                     peer: device.target, grant, binding, local_addresses: device.local_addresses }, &selected, &display, &mut input, worker_stop).await
