@@ -3,6 +3,8 @@
 //! core never opens a path, retains a file cache or allocates the whole body.
 use rds_core::clipboard::{Limits, PayloadKind, Receipt, Request, TransferHeader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+mod reader;
+pub use reader::receive_reader;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -185,30 +187,21 @@ async fn receive_body<R: AsyncRead + Unpin + Send>(
     let header: TransferHeader = rds_net::read_frame(wire).await?;
     header.validate(expected, limits)?;
     destination.begin().await?;
+    let (mut body, proof) = reader::body(wire, header.bytes, None);
     let mut remaining = header.bytes;
     let mut chunk = vec![0; limits.chunk_bytes as usize];
-    let mut hash = blake3::Hasher::new();
     while remaining > 0 {
         let maximum = remaining.min(chunk.len() as u64) as usize;
-        let length = wire.read(&mut chunk[..maximum]).await?;
+        let length = body.read(&mut chunk[..maximum]).await?;
         if length == 0 {
             return Err(Error::Length);
         }
-        hash.update(&chunk[..length]);
         chunk = destination
             .write(chunk, length, header.bytes - remaining)
             .await?;
         remaining -= length as u64;
     }
-    let mut digest = [0u8; 32];
-    wire.read_exact(&mut digest).await?;
-    if hash.finalize().as_bytes() != &digest {
-        return Err(Error::Integrity);
-    }
-    // Reject a valid prefix followed by an unrelated body on the same stream.
-    if wire.read(&mut [0u8; 1]).await? != 0 {
-        return Err(Error::Length);
-    }
+    let digest = proof.await?;
     destination.finish().await?;
     Ok(Receipt {
         id: header.id,
@@ -393,5 +386,74 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn remote_files_forward_without_staging_and_cannot_hide_a_bad_upstream_proof() {
+        let root = std::env::temp_dir().join(format!(
+            "rds-forwarded-file-{:032x}",
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let limits = Limits {
+            chunk_bytes: 4096,
+            ..Limits::default()
+        };
+        let value = "Привет 🖥️\n".repeat(10000).into_bytes();
+        let mut upstream = header(value.len() as u64);
+        upstream.kind = PayloadKind::File([4; 16]);
+        let mut downstream = upstream.clone();
+        downstream.id.desktop = [5; 16];
+        downstream.id.request += 1;
+        for corrupt in [false, true] {
+            let mut wire = Vec::new();
+            send(&mut value.as_slice(), &mut wire, &upstream, &limits)
+                .await
+                .unwrap();
+            if corrupt {
+                *wire.last_mut().unwrap() ^= 1;
+            }
+            let context = std::sync::Arc::new(());
+            let original = std::sync::Arc::downgrade(&context);
+            let source = receive_reader(
+                std::io::Cursor::new(wire),
+                &upstream.request(),
+                &limits,
+                context,
+            )
+            .await
+            .unwrap();
+            assert!(original.upgrade().is_some());
+            let path = root.join(if corrupt { "unpublished" } else { "pasted" });
+            let output = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let destination =
+                super::super::native::Destination::new(output, std::sync::Arc::new(()));
+            let (mut outgoing, mut incoming) = tokio::io::duplex(8192);
+            let sending = async {
+                let result = send_file(source, &mut outgoing, &downstream, &limits).await;
+                outgoing.shutdown().await.unwrap();
+                result
+            };
+            let request = downstream.request();
+            let receiving = receive_file(&mut incoming, destination, &request, &limits);
+            let (sent, received) = tokio::join!(sending, receiving);
+            if corrupt {
+                assert!(matches!(
+                    sent,
+                    Err(Error::Source(super::super::native::Error::Integrity))
+                ));
+                assert!(received.is_err());
+            } else {
+                assert_eq!(sent.unwrap(), received.unwrap());
+            }
+            assert!(original.upgrade().is_none());
+            assert_eq!(std::fs::read(&path).unwrap(), value);
+        }
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

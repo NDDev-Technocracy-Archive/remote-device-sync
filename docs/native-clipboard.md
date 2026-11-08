@@ -23,6 +23,13 @@ destination. It accepts only a selected-file request, validates the complete
 header before filesystem work, refuses a nonempty/nonregular destination and
 moves one reusable body chunk into each positional native write. The bounded
 duplex/native-file case passed on Linux and macOS without a staging copy.
+`receive_reader` retains a remote selected file as a bounded reader and a
+completion proof. Native destinations and remote-to-remote forwarding consume
+that capability directly, without a local file, pump task or second chunk
+queue. The generic receiver and remote reader share one incremental
+length/trailer/EOF verifier. A corrupted upstream proof prevents a successful
+downstream trailer even after all body bytes were forwarded. Linux/macOS cases
+verify both the actual destination bytes and this failed-completion behavior.
 
 `rds-sync::selection` owns the selected-file capability, independently of sync
 roots and the chunk cache. Native adapters select absolute local paths or open

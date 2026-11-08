@@ -61,6 +61,8 @@ pub enum Error {
     Unsupported,
     #[error("native clipboard publication was refused")]
     Publication,
+    #[error("clipboard source integrity proof failed")]
+    Integrity,
     #[error(transparent)]
     Contract(#[from] rds_core::clipboard::Error),
     #[error(transparent)]
