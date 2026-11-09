@@ -317,7 +317,7 @@ async fn serve(
             let instance = state::lock(&shared)?.instance;
             return Ok(Output::reply(Reply::Capabilities(ManagerCapabilities {
                 instance,
-                native_clipboard: false,
+                native_clipboard_proxy: false,
             })));
         }
         execute(

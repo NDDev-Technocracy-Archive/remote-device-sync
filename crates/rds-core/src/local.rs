@@ -266,7 +266,7 @@ pub struct Response {
 pub struct ManagerCapabilities {
     pub instance: SessionId,
     /// True only once the native provider proxy/lease RPC is implemented.
-    pub native_clipboard: bool,
+    pub native_clipboard_proxy: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -590,7 +590,7 @@ mod tests {
             (
                 Reply::Capabilities(ManagerCapabilities {
                     instance: id,
-                    native_clipboard: false,
+                    native_clipboard_proxy: false,
                 }),
                 11,
             ),

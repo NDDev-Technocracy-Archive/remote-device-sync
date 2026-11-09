@@ -119,7 +119,7 @@ pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
                 match capabilities {
                     Some(capabilities) => println!(
                         "Native clipboard proxy: {}",
-                        if capabilities.native_clipboard {
+                        if capabilities.native_clipboard_proxy {
                             "supported"
                         } else {
                             "not implemented"

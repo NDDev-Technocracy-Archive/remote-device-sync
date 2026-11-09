@@ -16,7 +16,7 @@ The keyless `rds session capabilities --json` command exposes this result with
 schema version 1 for native device/adapter qualification.
 
 The profile-6 reply reports the existing manager instance handle and implemented
-code support. `native_clipboard` remains false until its provider proxy/lease
+code support. `native_clipboard_proxy` remains false until its provider proxy/lease
 RPC is implemented. This is neither peer authorization nor OS clipboard consent.
 Profile 6 currently admits only discovery; a mutating command in that profile
 is refused. Profile-5 requests, replies and selection behavior retain their

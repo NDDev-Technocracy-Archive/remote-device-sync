@@ -127,7 +127,7 @@ async fn unavailable_transport_and_incompatible_replies_are_not_version_negotiat
             version: CAPABILITIES_VERSION,
             result: Ok(Reply::Capabilities(ManagerCapabilities {
                 instance: SessionId([0x5a; 16]),
-                native_clipboard: false,
+                native_clipboard_proxy: false,
             })),
         }),
         true,
@@ -177,7 +177,7 @@ async fn profile_discovery_preserves_a_selected_session_and_v5_operations() {
         let capabilities = client.capabilities().await.unwrap().unwrap();
         assert_eq!(capabilities.instance, before.instance);
         assert!(
-            !capabilities.native_clipboard,
+            !capabilities.native_clipboard_proxy,
             "unfinished native proxy must not be advertised"
         );
         // A read-only v6 profile cannot be repurposed to mutate selection.
