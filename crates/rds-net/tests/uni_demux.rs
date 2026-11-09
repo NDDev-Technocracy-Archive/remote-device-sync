@@ -3,10 +3,9 @@
 //! desktop frame task both rely on end-of-stream to exit instead of
 //! parking forever on a dead peer.
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
-use rds_net::{EndpointAddr, EndpointConfig, TransportAddr, bind_endpoint};
+use rds_net::{EndpointConfig, bind_endpoint};
 
 /// Connected pair over the default (iroh) backend, discovery off —
 /// returns both connections and both endpoints.
@@ -16,29 +15,20 @@ async fn connected_pair() -> (
     rds_net::Endpoint,
     rds_net::Endpoint,
 ) {
-    let cfg = || EndpointConfig::default().without_discovery();
+    // Router lifecycle is local to this pair. Wildcard binding advertises
+    // unrelated network interfaces, making this fixture depend on their routes.
+    let cfg = || EndpointConfig {
+        discovery: false,
+        bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+        ..Default::default()
+    };
     let server = bind_endpoint(cfg()).await.unwrap();
     let client = bind_endpoint(cfg()).await.unwrap();
 
     let server_ep = server.clone();
     let accept = tokio::spawn(async move { server_ep.accept().await.unwrap().await.unwrap() });
 
-    let mut addrs = BTreeSet::new();
-    for a in server.addr().addrs {
-        if let TransportAddr::Ip(sa) = a {
-            addrs.insert(TransportAddr::Ip(sa));
-        }
-    }
-    let conn = client
-        .connect(
-            EndpointAddr {
-                id: server.id(),
-                addrs,
-            },
-            rds_core::ALPN,
-        )
-        .await
-        .unwrap();
+    let conn = client.connect(server.addr(), rds_core::ALPN).await.unwrap();
     let server_conn = accept.await.unwrap();
     (conn, server_conn, server, client)
 }
@@ -81,30 +71,7 @@ async fn uni_streams_on_dead_connection_end() {
 /// stream gets its own tag-read task.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stalled_tag_does_not_block_routing() {
-    let cfg = || EndpointConfig::default().without_discovery();
-    let server = bind_endpoint(cfg()).await.unwrap();
-    let client = bind_endpoint(cfg()).await.unwrap();
-
-    let server_ep = server.clone();
-    let accept = tokio::spawn(async move { server_ep.accept().await.unwrap().await.unwrap() });
-
-    let mut addrs = BTreeSet::new();
-    for a in server.addr().addrs {
-        if let TransportAddr::Ip(sa) = a {
-            addrs.insert(TransportAddr::Ip(sa));
-        }
-    }
-    let conn = client
-        .connect(
-            EndpointAddr {
-                id: server.id(),
-                addrs,
-            },
-            rds_core::ALPN,
-        )
-        .await
-        .unwrap();
-    let server_conn = accept.await.unwrap();
+    let (conn, server_conn, _server, _client) = connected_pair().await;
 
     let mut uni = conn.uni_streams(rds_core::UniHello::Desktop).unwrap();
 
