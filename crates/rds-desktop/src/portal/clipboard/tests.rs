@@ -1,4 +1,35 @@
 use super::*;
+use std::{os::fd::AsRawFd, path::PathBuf};
+
+/// Observe this process's exact descriptor, not the lifetime of its shared
+/// kernel object. A concurrent fork can temporarily retain that object before
+/// exec closes CLOEXEC descriptors. Keeping a duplicate makes that distinction
+/// deterministic, and its retained inode also protects against FD-number reuse.
+struct ClosedDescriptor {
+    path: PathBuf,
+    identity: PathBuf,
+    closed: Arc<AtomicBool>,
+}
+impl ClosedDescriptor {
+    fn new(fd: &impl AsRawFd, closed: Arc<AtomicBool>) -> Self {
+        let path = PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()));
+        let identity = std::fs::read_link(&path).unwrap();
+        Self {
+            path,
+            identity,
+            closed,
+        }
+    }
+}
+impl Drop for ClosedDescriptor {
+    fn drop(&mut self) {
+        assert_ne!(
+            std::fs::read_link(&self.path).ok(),
+            Some(self.identity.clone())
+        );
+        self.closed.store(true, Ordering::Release);
+    }
+}
 
 fn guard(original: NativeLifetime) -> Guard {
     Guard {
@@ -35,17 +66,21 @@ async fn scoped_native_pipe_validates_utf8_limits_and_closes_before_its_original
     assert!(weak.upgrade().is_none());
 
     let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
-    let io = NativeIo::new(read.into(), guard(Arc::new(())), Direction::Read).unwrap();
+    let duplicate = read.try_clone().unwrap();
+    let closed = Arc::new(AtomicBool::new(false));
+    let original = ClosedDescriptor::new(&read, closed.clone());
+    let io = NativeIo::new(read.into(), guard(Arc::new(original)), Direction::Read).unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(20), io.read(8, &policy))
             .await
             .is_err()
     );
     drop(io);
-    assert_eq!(
-        rustix::io::write(&write, b"x"),
-        Err(rustix::io::Errno::PIPE)
-    );
+    assert!(closed.load(Ordering::Acquire));
+    // The original local FD is closed before its authority, although another
+    // reference still makes a peer write succeed. EPIPE cannot prove that order.
+    assert_eq!(rustix::io::write(&write, b"x"), Ok(1));
+    drop(duplicate);
 }
 
 #[tokio::test]
@@ -94,46 +129,25 @@ async fn actual_pipe_uses_safe_directional_registration_and_drops_fd_before_auth
     assert_eq!(value.unwrap(), expected);
     drop(read);
 
-    struct Original {
-        peer: OwnedFd,
-        closed: Arc<AtomicBool>,
-    }
-    impl Drop for Original {
-        fn drop(&mut self) {
-            assert_eq!(
-                rustix::io::write(&self.peer, b"x"),
-                Err(rustix::io::Errno::PIPE)
-            );
-            self.closed.store(true, Ordering::Release);
-        }
-    }
     let (sender, receiver) = pipe::pipe().unwrap();
+    let fd = receiver.into_nonblocking_fd().unwrap();
+    let duplicate = fd.try_clone().unwrap();
     let closed = Arc::new(AtomicBool::new(false));
-    let io = NativeIo::new(
-        receiver.into_nonblocking_fd().unwrap(),
-        guard(Arc::new(Original {
-            peer: sender.into_nonblocking_fd().unwrap(),
-            closed: closed.clone(),
-        })),
-        Direction::Read,
-    )
-    .unwrap();
+    let original = ClosedDescriptor::new(&fd, closed.clone());
+    let io = NativeIo::new(fd, guard(Arc::new(original)), Direction::Read).unwrap();
     assert!(!closed.load(Ordering::Acquire));
     drop(io);
     assert!(closed.load(Ordering::Acquire));
+    assert_eq!(rustix::io::write(&sender, b"x"), Ok(1));
+    drop(duplicate);
 
-    let (sender, receiver) = pipe::pipe().unwrap();
-    assert!(
-        NativeIo::new(
-            receiver.into_nonblocking_fd().unwrap(),
-            guard(Arc::new(Original {
-                peer: sender.into_nonblocking_fd().unwrap(),
-                closed: Arc::new(AtomicBool::new(false)),
-            })),
-            Direction::Write,
-        )
-        .is_err()
-    );
+    let (_sender, receiver) = pipe::pipe().unwrap();
+    let fd = receiver.into_nonblocking_fd().unwrap();
+    let _duplicate = fd.try_clone().unwrap();
+    let closed = Arc::new(AtomicBool::new(false));
+    let original = ClosedDescriptor::new(&fd, closed.clone());
+    assert!(NativeIo::new(fd, guard(Arc::new(original)), Direction::Write,).is_err());
+    assert!(closed.load(Ordering::Acquire));
 }
 
 #[test]
