@@ -95,6 +95,12 @@ impl Drop for Running {
     }
 }
 
+#[cfg(any(
+    all(test, target_os = "linux", feature = "x11"),
+    all(target_os = "macos", feature = "host", feature = "viewer")
+))]
+pub(crate) mod probe;
+
 #[cfg(test)]
 mod tests {
     use super::*;

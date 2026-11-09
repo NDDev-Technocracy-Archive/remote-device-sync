@@ -28,10 +28,11 @@ struct Core {
 }
 struct Job {
     command: Command,
-    running: Running,
-    _core: Arc<Core>,
-    _body: Option<OwnedSemaphorePermit>,
     _original: Option<NativeLifetime>,
+    _body: Option<OwnedSemaphorePermit>,
+    _core: Arc<Core>,
+    // Acknowledge drain only after the original purpose and body credit drop.
+    running: Running,
 }
 enum Command {
     Current(oneshot::Sender<Result<Snapshot, Error>>),

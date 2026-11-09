@@ -1,10 +1,50 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires dedicated Xvfb; owns its text clipboard"]
+async fn native_close_waits_for_original_cleanup_before_returning_body_credit() {
+    let policy = Policy::shipped().unwrap();
+    let prepared = prepare(policy.clone(), Arc::new(())).await.unwrap();
+    let provider = prepared.provider(Arc::new(())).unwrap();
+    let (source, _, _) = Source::start(Bytes::from_static(b"native cleanup"), false, false).await;
+    let current = provider.current().await.unwrap();
+    let (original, mut cleanup) = crate::clipboard::ownership::probe::Cleanup::held();
+    let Value::Text(value) = provider
+        .read(current.generation, Format::TextUtf8, original)
+        .await
+        .unwrap()
+    else {
+        panic!("native read changed its representation");
+    };
+    assert_eq!(value.as_str(), "native cleanup");
+    cleanup.entered().await.unwrap();
+    let mut closing = provider.close();
+    let pending =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(closing.as_mut().poll(cx).is_pending()))
+            .await;
+    let held = prepared.0.bodies.available_permits() == policy.native_body_operations - 1;
+    cleanup.release().await.unwrap();
+    if pending {
+        closing.await;
+    } else {
+        drop(closing);
+    }
+    let returned = prepared.0.bodies.available_permits();
+    drop(provider);
+    source.close().await;
+    prepared.close().await;
+    // Stop the fixture's real native workers before reporting a baseline
+    // failure; an assertion must not leave their blocking loops alive.
+    assert!(pending, "native close acknowledged before original cleanup");
+    assert!(held, "native body credit returned before original cleanup");
+    assert_eq!(returned, policy.native_body_operations);
+}
+
 struct Source {
     wake: UnixStream,
     stopped: Arc<AtomicBool>,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
     bodies: Arc<AtomicUsize>,
 }
 impl Source {
@@ -71,17 +111,27 @@ impl Source {
             Self {
                 wake,
                 stopped,
-                task,
+                task: Some(task),
                 bodies,
             },
             started,
             release,
         )
     }
-    async fn close(mut self) {
+    fn stop(&mut self) {
         self.stopped.store(true, Ordering::Release);
         let _ = self.wake.write(&[1]);
-        self.task.await.unwrap();
+    }
+    async fn close(mut self) {
+        self.stop();
+        if let Some(task) = self.task.take() {
+            task.await.unwrap();
+        }
+    }
+}
+impl Drop for Source {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
