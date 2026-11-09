@@ -82,9 +82,21 @@ probe, SHA-256
 `9bf9f0f31aca7a880e5a4df859cb49047d30cb3794ac5e99a09f7bd00133c7a8`,
 passed strict native signature verification and all 17 cases on physical M1 and
 M2. It used the ordinary development toolchain. These are debug functional
-results; an exact optimized CI probe remains the release-qualification step.
+results, qualified separately from the optimized CI artifact below.
 Both hosts retained the `sandbox_extension_consume` permission warning; sandbox
 and operating-system consent acceptance are not inferred from these probes.
+
+The optimized probe from CI run `42536864421`, artifact `13639624891`,
+was built at checkout `00cbcdf8beb2531a5238f05128167d3833061cc9`.
+Its Git tree `50a2e98fca2523cf4c0b937f16739a5af4171fb9` equals the
+reviewed implementation head `ce7ed01b0bd1e195f6cbd572d443da5122843cef`.
+The downloaded ZIP matched SHA-256
+`7848928977061e01640af7f70e54dd7e6c9b78a0d8c4d502420643a8d63e627a`.
+The exact executable, SHA-256
+`c6fd986aed915f51eddb070f77568e73a3acfa26b762ddf1c90960dd7426a709`
+(2,101,872 bytes), passed strict native signature verification and all 17 cases
+on both physical Apple Silicon hosts. The same permission warning was retained;
+this does not qualify sandboxed file access or operating-system consent.
 
 ## Acceptance boundary
 
