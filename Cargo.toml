@@ -2,6 +2,7 @@
 exclude = ["vendor/iroh", "vendor/noq", "vendor/noq-proto", "vendor/nddev-opennetwork-design-tokens"]
 resolver = "3"
 members = [
+    "tools/remote-release",
     "crates/rds-agent",
     "crates/rds-bench",
     "crates/rds-audio",
