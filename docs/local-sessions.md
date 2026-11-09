@@ -4,6 +4,12 @@ Status: manager enabled by default for connectivity commands, **W2.4 partial**.
 This does not close W2, W5 or W6. See the [initial Linux receipt](reports/rds-local-sessions-20260925.md)
 and [ownership/migration receipt](reports/rds-identity-migration-20260925.md).
 
+`rds session capabilities --json` reads the local manager's explicit capability
+profile without changing connections or reading identity material. It distinguishes
+an unsupported discovery profile from a supported interface whose native clipboard
+proxy is still unimplemented. It does not report OS consent or end-to-end clipboard
+acceptance; see [the protocol and qualification scope](reports/local-capabilities.md).
+
 ## Ownership and use
 
 `rds-agent` hosts outgoing sessions

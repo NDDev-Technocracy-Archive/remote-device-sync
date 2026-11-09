@@ -20,6 +20,11 @@ impl Options {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Read explicit local manager interface support without changing sessions.
+    Capabilities {
+        #[arg(long)]
+        json: bool,
+    },
     /// List live connections, pending dials and the selected device.
     List {
         #[arg(long)]
@@ -99,6 +104,32 @@ enum Action {
 pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
     let client = Client::new(directory);
     let command = match options.command {
+        Action::Capabilities { json } => {
+            let capabilities = client.capabilities().await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema_version": 1,
+                        "supported": capabilities.is_some(),
+                        "capabilities": capabilities,
+                    }))?
+                );
+            } else {
+                match capabilities {
+                    Some(capabilities) => println!(
+                        "Native clipboard proxy: {}",
+                        if capabilities.native_clipboard {
+                            "supported"
+                        } else {
+                            "not implemented"
+                        }
+                    ),
+                    None => println!("Manager capability profile is not supported"),
+                }
+            }
+            return Ok(());
+        }
         Action::List { json } => {
             let snapshot = client.snapshot().await?;
             if json {
