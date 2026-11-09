@@ -10,6 +10,10 @@ The [native functional receipt](reports/rds-wayland-native-20261011.md) records
 two-monitor capture/decode, restored permission and non-mutating EI sync ACKs.
 Physical input/presentation, revocation and installed acceptance remain separate.
 
+The prepared host now uses native [failure and stop notifications](reports/wayland-idle-notifications.md)
+for its coordinator, PipeWire owner and EI request actor. The report keeps their
+qualification separate from startup readiness and physical resource acceptance.
+
 Build with PipeWire/SPA development headers and libclang installed:
 
 ```sh

@@ -368,4 +368,98 @@ async fn device_pause_during_flushed_sync_rejects_old_lease_and_admits_fresh_inp
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_real_sync_after_caller_deadline_does_not_kill_or_replay_native_input() {
     canceled_flushed_sync_preserves_the_native_actor(false).await;
+    // Keep this additional native fixture in the same sequential lane instead
+    // of raising the production limit on simultaneously prepared EI owners.
+    expired_queued_request_does_not_strand_fresh_input().await;
+}
+
+async fn expired_queued_request_does_not_strand_fresh_input() {
+    let (client, socket) = UnixStream::pair().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let control = Arc::new(SyncControl::default());
+    let (_pause, commands) = mpsc::sync_channel(1);
+    let (recording, stopping, controlling) = (seen.clone(), stop.clone(), control.clone());
+    let fixture = tokio::task::spawn_blocking(move || {
+        server(socket, recording, commands, stopping, Some(controlling))
+    });
+    let group = Group::start(
+        client.into(),
+        BTreeMap::from([(
+            10,
+            (
+                "4k-region".into(),
+                super::capture::Slot::fixture(10, (3840, 2160)),
+            ),
+        )]),
+    )
+    .unwrap();
+    until(|| group.ready.load(Ordering::Acquire)).await;
+    control.hold_next.store(true, Ordering::Release);
+    let mut first = group.sink(10, (3840, 2160)).unwrap();
+    let first = tokio::task::spawn_blocking(move || {
+        first.inject(&event(10, InputKind::KeyDown { code: 44 }))
+    });
+    until(|| control.blocked.load(Ordering::Acquire)).await;
+    let mut expired = group.sink(10, (3840, 2160)).unwrap();
+    let expired = tokio::task::spawn_blocking(move || {
+        let started = Instant::now();
+        let result = expired.inject(&event(10, InputKind::KeyDown { code: 45 }));
+        (result, started.elapsed())
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    let (result, elapsed) = tokio::time::timeout(Duration::from_secs(3), expired)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_err());
+    assert!(
+        elapsed >= super::input::INPUT_TIMEOUT,
+        "queued request must actually reach its caller deadline"
+    );
+    assert!(!group.stopped());
+    assert!(control.blocked.load(Ordering::Acquire));
+    let mut fresh = group.sink(10, (3840, 2160)).unwrap();
+    let (started, running) = tokio::sync::oneshot::channel();
+    let fresh = tokio::task::spawn_blocking(move || {
+        started.send(()).unwrap();
+        let result = fresh.inject(&event(10, InputKind::KeyDown { code: 46 }));
+        (fresh, result)
+    });
+    running.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !fresh.is_finished(),
+        "fresh input remains behind the original native sync"
+    );
+    control.release.store(true, Ordering::Release);
+    let (fresh, result) = tokio::time::timeout(Duration::from_secs(3), fresh)
+        .await
+        .unwrap()
+        .unwrap();
+    result.unwrap();
+    drop(fresh);
+    until(|| seen.lock().unwrap().last() == Some(&Seen::Key(46, false))).await;
+    let events = seen.lock().unwrap().clone();
+    assert!(
+        !events.contains(&Seen::Key(45, true)),
+        "expired queue entry replayed"
+    );
+    assert_eq!(
+        events.iter().filter(|e| **e == Seen::Key(44, true)).count(),
+        1
+    );
+    assert_eq!(
+        events.iter().filter(|e| **e == Seen::Key(46, true)).count(),
+        1
+    );
+    group.close().await.unwrap();
+    stop.store(true, Ordering::Release);
+    fixture.await.unwrap();
 }
