@@ -37,12 +37,19 @@ net/client/sync/SSH cargo-test set, desktop/CLI/agent cases and the Python scrip
 cases. The independent vendored Noq-proto test target also passed its 455 cases;
 its own lock is unchanged and is distinct from the refreshed workspace graph.
 
-Later HTTP/UUID, ML-KEM/module-lattice/shake and build-helper changes require
-their final combined CI/native qualification. New physical builds were stopped
-after explicit capacity failures; no shared build cache eviction or toolchain
-override was used. Source checks and draft CI continue on the source host and
-hosted runners respectively. The final selected set is not yet claimed as a
-completed native runtime or performance acceptance.
+The complete selected lock at
+`5c93e903ccd9e219a1f765965e28a0b0de5660e5` passed all six PR workflows.
+Native desktop run `42564000600` qualified Linux and macOS adapter Clippy and
+the desktop/CLI/agent tests. Its optimized AppKit artifact `13651293673`
+passed strict signature verification and all 18 isolated native cases on both
+physical Apple Silicon devices. Exact checkout/tree/archive/executable receipts
+are recorded in the PR discussion. These cases do not establish application
+paste, file receiving or a latency/CPU improvement.
+
+The independently qualified native handshake is integrated from main with a
+signed normal merge; the resulting combined tree requires fresh CI before
+review readiness. New physical builds remain stopped after explicit capacity
+failures. No shared build cache eviction or toolchain override was used.
 
 Other inherited API-family/catalog questions are tracked separately. Their
 existence is not treated as approval of an old lock or an undocumented exception.
