@@ -36,6 +36,9 @@ unavailability, legacy-worker exclusion and view-only factory/input exclusion
 on Iroh and Noq. It establishes no OS clipboard or application-paste acceptance.
 The native Linux/macOS CI lanes explicitly run this feature-gated integration
 target; those results are required before review readiness.
+An additional real-stream case holds an existing route through a rejected
+duplicate claim, then cancels an unacknowledged native greeting. It requires
+the new lease to close and only its own frame/metadata routes to be released.
 
 The manager's bulk native IPC/proxy, explicit focus/gesture ownership, paste
 publication-before-input barriers, remote-to-remote clipboard forwarding and

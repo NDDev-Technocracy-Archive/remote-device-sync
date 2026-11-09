@@ -369,3 +369,53 @@ async fn native_desktop_negotiates_the_real_agent_without_opening_a_legacy_worke
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn native_handshake_rejection_and_cancellation_release_only_their_own_routes_and_lease() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for backend in backends() {
+            let client = endpoint(backend).await;
+            let server = endpoint(backend).await;
+            let (local, remote) = tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
+                server.accept().await.unwrap().await
+            });
+            let local = local.unwrap();
+            let remote = remote.unwrap();
+            let hello = || DesktopHello { display:0, max_fps:5, codec:Codec::H264, input_acks:false };
+
+            // A duplicate claim is refused before greeting I/O. The failed
+            // caller may release only its new native inbox, not this owner.
+            let id = rand::random();
+            let original_route = local.uni_streams(rds_core::UniHello::DesktopFrames { id }).unwrap();
+            let rejected = Memory::new(State::new("rejected"), ShortcutModifier::Control, Arc::new(()));
+            let mut selected = options(rejected.clone());
+            selected.session = Some(id);
+            assert!(DesktopSession::connect_opts(&local, hello(), selected).await.is_err());
+            assert!(*rejected.closed.borrow());
+            assert_eq!(local.uni_routing_stats().routes, 1);
+            drop(original_route);
+            assert_eq!(local.uni_routing_stats().routes, 0);
+
+            let canceled = Memory::new(State::new("canceled"), ShortcutModifier::Control, Arc::new(()));
+            let mut opening = Box::pin(DesktopSession::connect_opts(&local, hello(), options(canceled.clone())));
+            let control = tokio::select! {
+                control = async {
+                    let (send, mut recv) = remote.accept_bi().await.unwrap();
+                    let greeting: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
+                    assert!(matches!(greeting, rds_core::StreamHello::DesktopV6 { .. }));
+                    (send, recv)
+                } => control,
+                _ = &mut opening => panic!("native handshake completed without an acknowledgement"),
+            };
+            assert_eq!(local.uni_routing_stats().routes, 2);
+            assert!(!*canceled.closed.borrow());
+            assert_eq!(canceled.state.reads.load(Ordering::Relaxed), 0);
+            drop(opening);
+            assert!(*canceled.closed.borrow());
+            assert_eq!(local.uni_routing_stats().routes, 0);
+            drop(control);
+            client.close().await;
+            server.close().await;
+        }
+    }).await.unwrap();
+}
