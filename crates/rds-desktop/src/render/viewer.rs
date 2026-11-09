@@ -417,6 +417,16 @@ impl ClipboardLatency {
         sample(&mut self.acknowledged, latency);
         Some(latency)
     }
+    fn failed(&mut self, id: u64) -> bool {
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|(pending, _, _)| *pending == id)
+        else {
+            return false;
+        };
+        self.pending.remove(index).is_some()
+    }
 }
 impl InputLatency {
     fn sent(&mut self, seq: u64, created_ms: u64, now_ms: u64, class: InputClass) {
@@ -652,6 +662,29 @@ impl ViewerHandle {
             }
             rds_core::DesktopEvent::ClipboardError { id, code } => {
                 state.clipboard.failed(id);
+                if state.clipboard_latency.failed(id) {
+                    state.report.clipboard_transfers_canceled += 1;
+                }
+                state.notice = Some(
+                    match code {
+                        rds_core::ClipboardErrorCode::Unavailable => {
+                            "Clipboard sharing is unavailable on the remote device"
+                        }
+                        rds_core::ClipboardErrorCode::UnsupportedFormat => {
+                            "The remote clipboard does not support this format"
+                        }
+                        rds_core::ClipboardErrorCode::TooLarge => {
+                            "Copied content exceeds the remote clipboard limit"
+                        }
+                        rds_core::ClipboardErrorCode::Expired => {
+                            "Copied content expired; copy it again"
+                        }
+                        rds_core::ClipboardErrorCode::InvalidRequest => {
+                            "The remote clipboard rejected this transfer"
+                        }
+                    }
+                    .into(),
+                );
                 tracing::warn!(?code, "remote clipboard unavailable");
             }
             _ => return,
@@ -1956,6 +1989,23 @@ mod tests {
         assert_eq!(latency.ack(10, 4096, 400), None);
         latency.pending.clear(); // An old epoch cannot complete a fresh paste.
         assert_eq!(latency.ack(29, 4096, 500), None);
+    }
+    #[test]
+    fn a_refused_paste_is_terminal_without_canceling_another_transfer_or_reporting_success() {
+        let mut latency = ClipboardLatency::default();
+        latency.sent(7, 80, 100);
+        latency.sent(8, 4096, 150);
+        assert!(!latency.failed(9)); // A reverse or unknown error is not this paste.
+        assert_eq!(latency.pending.len(), 2);
+        assert!(latency.failed(7));
+        assert!(!latency.failed(7)); // Repeated refusal cannot count twice.
+        assert_eq!(latency.pending.front(), Some(&(8, 4096, 150)));
+        assert_eq!(latency.ack(7, 80, 200), None);
+        assert!(latency.acknowledged.is_empty());
+        assert_eq!(latency.ack(8, 4096, 210), Some(60.));
+        assert!(latency.pending.is_empty()); // No phantom ready-pending incident.
+        assert_eq!(latency.acknowledged, vec![60.]);
+        assert_eq!(latency.evicted, 0);
     }
     #[test]
     fn submission_debt_distinguishes_idle_replacement_and_concurrent_arrival() {
