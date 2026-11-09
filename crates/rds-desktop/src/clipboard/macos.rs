@@ -22,9 +22,9 @@ use super::{
 };
 mod files;
 
-#[cfg(feature = "host")]
+#[cfg(any(feature = "viewer", feature = "host"))]
 mod owner;
-#[cfg(feature = "host")]
+#[cfg(any(feature = "viewer", feature = "host"))]
 pub(crate) use owner::Group;
 #[cfg(all(feature = "host", feature = "viewer"))]
 pub(crate) use owner::probe as owner_probe;

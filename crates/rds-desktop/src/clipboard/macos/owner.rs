@@ -12,12 +12,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 
 use super::Board;
 use crate::clipboard::{
-    ClipboardBackend, ClipboardFuture, NativeLifetime,
+    ClipboardFuture, NativeLifetime,
     native::{Error, Operation, Policy, Provider, Publication, Snapshot, Value},
     ownership::{Owner, Running},
 };
 
-#[cfg(feature = "viewer")]
+#[cfg(feature = "host")]
+use crate::clipboard::ClipboardBackend;
+#[cfg(all(feature = "viewer", feature = "host"))]
 use crate::clipboard::native::Text;
 
 static POOL: OnceLock<Mutex<Weak<Core>>> = OnceLock::new();
@@ -193,6 +195,7 @@ impl Group {
         }
         Ok(Arc::new(provider))
     }
+    #[cfg(feature = "host")]
     pub(crate) fn worker(
         &self,
         watching: bool,
@@ -219,12 +222,12 @@ impl Group {
 
 /// The qualification binary uses the same queued owner with a private native
 /// pasteboard. It does not read or replace the user's general selection.
-#[cfg(feature = "viewer")]
+#[cfg(all(feature = "viewer", feature = "host"))]
 struct Paused {
     release: mpsc::Sender<()>,
     task: tokio::task::JoinHandle<Result<(), Error>>,
 }
-#[cfg(feature = "viewer")]
+#[cfg(all(feature = "viewer", feature = "host"))]
 impl Paused {
     async fn new() -> Result<Self, Error> {
         let (entered, blocked) = oneshot::channel();
@@ -243,7 +246,7 @@ impl Paused {
         self.task.await.map_err(|_| Error::Unavailable)?
     }
 }
-#[cfg(feature = "viewer")]
+#[cfg(all(feature = "viewer", feature = "host"))]
 struct GatedRead {
     provider: Arc<dyn Provider>,
     group: Group,
@@ -251,7 +254,7 @@ struct GatedRead {
     release: tokio::sync::Notify,
     reads: AtomicUsize,
 }
-#[cfg(feature = "viewer")]
+#[cfg(all(feature = "viewer", feature = "host"))]
 impl Provider for GatedRead {
     fn close(&self) -> ClipboardFuture<'_, ()> {
         self.provider.close()
@@ -302,7 +305,7 @@ impl Provider for GatedRead {
         })
     }
 }
-#[cfg(feature = "viewer")]
+#[cfg(all(feature = "viewer", feature = "host"))]
 pub(crate) async fn probe() -> Result<u32, Error> {
     let file_cases = super::files::probe().await?;
     let policy = Policy::shipped()?;
@@ -476,7 +479,7 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     Ok(9 + file_cases)
 }
 
-#[cfg(feature = "viewer")]
+#[cfg(all(feature = "viewer", feature = "host"))]
 async fn cleanup_order(group: &Group) -> Result<(), Error> {
     let provider = group.native(Arc::new(()))?;
     let current = provider.current().await?;
@@ -682,6 +685,7 @@ impl Provider for Lease {
     }
 }
 
+#[cfg(feature = "host")]
 fn desktop_error(error: Error) -> crate::DesktopError {
     crate::DesktopError::Input(error.to_string())
 }

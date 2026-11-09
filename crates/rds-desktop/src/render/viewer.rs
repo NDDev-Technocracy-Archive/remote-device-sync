@@ -25,6 +25,7 @@ use super::{
 use crate::{DesktopError, RawFrame};
 
 mod frame;
+mod native_clipboard;
 use frame::{FrameMailbox, Pending};
 
 mod spaces;
@@ -416,6 +417,16 @@ impl ClipboardLatency {
         sample(&mut self.acknowledged, latency);
         Some(latency)
     }
+    fn failed(&mut self, id: u64) -> bool {
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|(pending, _, _)| *pending == id)
+        else {
+            return false;
+        };
+        self.pending.remove(index).is_some()
+    }
 }
 impl InputLatency {
     fn sent(&mut self, seq: u64, created_ms: u64, now_ms: u64, class: InputClass) {
@@ -651,6 +662,29 @@ impl ViewerHandle {
             }
             rds_core::DesktopEvent::ClipboardError { id, code } => {
                 state.clipboard.failed(id);
+                if state.clipboard_latency.failed(id) {
+                    state.report.clipboard_transfers_canceled += 1;
+                }
+                state.notice = Some(
+                    match code {
+                        rds_core::ClipboardErrorCode::Unavailable => {
+                            "Clipboard sharing is unavailable on the remote device"
+                        }
+                        rds_core::ClipboardErrorCode::UnsupportedFormat => {
+                            "The remote clipboard does not support this format"
+                        }
+                        rds_core::ClipboardErrorCode::TooLarge => {
+                            "Copied content exceeds the remote clipboard limit"
+                        }
+                        rds_core::ClipboardErrorCode::Expired => {
+                            "Copied content expired; copy it again"
+                        }
+                        rds_core::ClipboardErrorCode::InvalidRequest => {
+                            "The remote clipboard rejected this transfer"
+                        }
+                    }
+                    .into(),
+                );
                 tracing::warn!(?code, "remote clipboard unavailable");
             }
             _ => return,
@@ -878,7 +912,16 @@ impl Viewer {
     pub fn new(display: u32) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
         let event_loop =
             super::platform::event_loop().map_err(|e| DesktopError::Capture(e.to_string()))?;
-        let (session, handle, receiver) = SessionView::new(display, event_loop.create_proxy());
+        let proxy = event_loop.create_proxy();
+        let arbiter = Arc::new(super::clipboard::CopyFence::default());
+        let native = super::native_clipboard::Clipboard::new(
+            event_loop.owned_display_handle(),
+            proxy.clone(),
+            arbiter.clone(),
+        )
+        .map_err(|error| tracing::info!(%error, "native clipboard preparation unavailable"))
+        .ok();
+        let (session, handle, receiver) = SessionView::new(display, proxy, native, arbiter);
         let app = App {
             window: None,
             gpu: None,
@@ -893,6 +936,7 @@ impl Viewer {
             fullscreen: false,
             native_input: NativeInputPolicy::default(),
             shortcuts: None,
+            native_gesture: None,
         };
         Ok((
             Self {
@@ -936,48 +980,135 @@ struct SessionView {
     buttons: BTreeSet<i32>,
     pointer: bool,
     pointer_point: Option<(f64, f64)>,
+    native: Option<Arc<super::native_clipboard::Clipboard>>,
+    publication: Option<(u64, super::native_clipboard::Pending<i64>)>,
+    request_generation: Option<super::native_clipboard::Pending<i64>>,
+}
+impl Drop for SessionView {
+    fn drop(&mut self) {
+        lock(&self.handle.state).clipboard.reset();
+    }
 }
 impl SessionView {
-    fn clipboard_work(&mut self) -> bool {
-        if !lock(&self.handle.state).clipboard.needs_work() {
-            return false;
-        }
-        let Ok(generation) = super::platform::clipboard_generation() else {
+    fn native_generation(&self) -> Option<i64> {
+        self.native.as_ref().and_then(|native| native.generation())
+    }
+    fn poll_publication(&mut self) -> bool {
+        let result = self
+            .publication
+            .as_mut()
+            .and_then(|(_, pending)| pending.poll());
+        let Some(result) = result else {
             return false;
         };
-        let text = lock(&self.handle.state).clipboard.publish(generation);
-        let mut published = false;
-        if let Some(text) = text {
-            match super::platform::publish_text(generation, &text) {
-                Ok(()) => published = true,
+        let (claim, _) = self
+            .publication
+            .take()
+            .expect("completed publication exists");
+        let mut state = lock(&self.handle.state);
+        let current = state.clipboard.owns_publication(claim);
+        let published = state
+            .clipboard
+            .publication_finished(claim, result.as_ref().ok().copied());
+        drop(state);
+        if let Err(error) = result
+            && current
+        {
+            self.handle
+                .notice(format!("Clipboard unavailable: {error}"));
+        }
+        published
+    }
+    fn clipboard_work(&mut self) -> bool {
+        let published = self.poll_publication();
+        if self.publication.is_some()
+            || (self.request_generation.is_none()
+                && !lock(&self.handle.state).clipboard.needs_work())
+        {
+            return published;
+        }
+        let Some(native) = &self.native else {
+            return published;
+        };
+        let Some(generation) = native.generation() else {
+            return published;
+        };
+        let prepared = {
+            let mut state = lock(&self.handle.state);
+            let epoch = state.report.session_epoch;
+            state
+                .clipboard
+                .prepare_publication(generation)
+                .map(|publication| {
+                    let purpose: crate::clipboard::NativeLifetime =
+                        Arc::new((self.handle.clone(), epoch, self.tab));
+                    (publication, purpose)
+                })
+        };
+        if let Some((publication, purpose)) = prepared {
+            let claim = publication.claim;
+            match native.publish(
+                publication.generation,
+                publication.text,
+                publication.scope,
+                purpose,
+            ) {
+                Ok(pending) => self.publication = Some((claim, pending)),
                 Err(error) => {
-                    lock(&self.handle.state).clipboard.publication_failed();
+                    lock(&self.handle.state)
+                        .clipboard
+                        .publication_finished(claim, None);
+                    self.handle
+                        .notice(format!("Clipboard unavailable: {error}"));
+                }
+            }
+            return published;
+        }
+        let fresh = self
+            .request_generation
+            .as_mut()
+            .and_then(|pending| pending.poll());
+        if let Some(result) = fresh {
+            self.request_generation = None;
+            match result {
+                Ok(generation) => {
+                    let request = lock(&self.handle.state).clipboard.request(generation);
+                    if let Some(control) = request {
+                        let DesktopControl::ClipboardRequest { id, .. } = control else {
+                            unreachable!("clipboard arbiter returns only requests");
+                        };
+                        if self.input.clipboard(std::iter::once(control), 0).is_err() {
+                            lock(&self.handle.state).clipboard.failed(id);
+                            self.handle.notice("Clipboard is busy; try copying again");
+                        }
+                    }
+                }
+                Err(error) => {
+                    lock(&self.handle.state).clipboard.reset();
+                    self.handle
+                        .notice(format!("Clipboard unavailable: {error}"));
+                }
+            }
+        } else if self.request_generation.is_none()
+            && lock(&self.handle.state).clipboard.wants_request()
+        {
+            match native.refresh() {
+                Ok(pending) => self.request_generation = Some(pending),
+                Err(error) => {
+                    lock(&self.handle.state).clipboard.reset();
                     self.handle
                         .notice(format!("Clipboard unavailable: {error}"));
                 }
             }
         }
-        // Publication changes native ownership; observe it before the next request.
-        let Ok(generation) = super::platform::clipboard_generation() else {
-            lock(&self.handle.state).clipboard.publication_failed();
-            return published;
-        };
-        if published {
-            lock(&self.handle.state).clipboard.published(generation);
-        }
-        let request = lock(&self.handle.state).clipboard.request(generation);
-        if let Some(control) = request {
-            let DesktopControl::ClipboardRequest { id, .. } = control else {
-                unreachable!("clipboard arbiter returns only requests");
-            };
-            if self.input.clipboard(std::iter::once(control), 0).is_err() {
-                lock(&self.handle.state).clipboard.failed(id);
-                self.handle.notice("Clipboard is busy; try copying again");
-            }
-        }
         published
     }
-    fn new(display: u32, proxy: EventLoopProxy<()>) -> (Self, ViewerHandle, InputReceiver) {
+    fn new(
+        display: u32,
+        proxy: EventLoopProxy<()>,
+        native: Option<Arc<super::native_clipboard::Clipboard>>,
+        arbiter: Arc<super::clipboard::CopyFence>,
+    ) -> (Self, ViewerHandle, InputReceiver) {
         let input_state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
             pointer_in_flight: Mutex::new(VecDeque::new()),
@@ -1007,7 +1138,7 @@ impl SessionView {
                 sending: Vec::new(),
                 input_latency: InputLatency::default(),
                 clipboard_latency: ClipboardLatency::default(),
-                clipboard: super::clipboard::Clipboard::default(),
+                clipboard: super::clipboard::Clipboard::with_arbiter(arbiter),
                 close: false,
                 interrupted: None,
                 network_stage: "starting".into(),
@@ -1034,6 +1165,9 @@ impl SessionView {
             buttons: BTreeSet::new(),
             pointer: false,
             pointer_point: None,
+            native,
+            publication: None,
+            request_generation: None,
         };
         (session, handle, receiver)
     }
@@ -1089,6 +1223,7 @@ struct App {
     fullscreen: bool,
     native_input: NativeInputPolicy,
     shortcuts: Option<super::platform::KeyboardShortcuts>,
+    native_gesture: Option<native_clipboard::Gesture>,
 }
 impl App {
     fn sync_native_input(&mut self, after_ui_output: bool) {
@@ -1131,57 +1266,14 @@ impl App {
         self.native_input = policy;
     }
     fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {
+        self.native_gesture_work(event_loop);
         if self.workspace_clipboard_work(event_loop) {
             return;
         }
         self.session.clipboard_work();
     }
-    fn paste_text(&mut self, command_paste: bool, following_input: usize) -> bool {
-        match super::platform::paste_text() {
-            Ok(Some(text)) => {
-                if text.len() > crate::clipboard::MAX_TEXT_BYTES {
-                    self.session
-                        .handle
-                        .notice("Copied text exceeds the clipboard limit");
-                    return false;
-                }
-                let id = rand::random();
-                let total = text.len() as u32;
-                let admitted = self
-                    .session
-                    .input
-                    .clipboard(clipboard_text(id, &text), following_input);
-                if admitted.is_err() {
-                    self.session
-                        .handle
-                        .notice("Clipboard is busy; try pasting again");
-                    return false;
-                }
-                lock(&self.session.handle.state).clipboard_latency.sent(
-                    id,
-                    total,
-                    self.session.handle.started.elapsed().as_millis() as u64,
-                );
-                tracing::info!(
-                    transfer_id = id,
-                    bytes = total,
-                    command_paste,
-                    "explicit local clipboard text queued"
-                );
-            }
-            Ok(None) if command_paste => {
-                tracing::info!("explicit local clipboard paste has no text");
-                return false;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                self.session
-                    .handle
-                    .notice(format!("Clipboard unavailable: {error}"));
-                return false;
-            }
-        }
-        true
+    fn paste_text(&mut self, _command_paste: bool, _following_input: usize) -> bool {
+        self.native_paste()
     }
     fn sample_window(&self) {
         if let Some(window) = &self.window {
@@ -1238,6 +1330,16 @@ impl App {
         }
     }
     fn input(&mut self, event_loop: &ActiveEventLoop, kind: InputKind) {
+        let kind = match self.defer_native_input(kind) {
+            Ok(Some(kind)) => kind,
+            Ok(None) => return,
+            Err(error) => {
+                self.native_gesture = None;
+                lock(&self.session.handle.state).clipboard.reset();
+                self.fail_input(event_loop, error);
+                return;
+            }
+        };
         let Some(next) = self.session.seq.checked_add(1) else {
             self.fail_input(
                 event_loop,
@@ -1321,6 +1423,7 @@ impl App {
         }
     }
     fn release(&mut self, event_loop: &ActiveEventLoop) {
+        self.cancel_native_gesture(event_loop);
         for code in std::mem::take(&mut self.session.keys) {
             self.input(event_loop, InputKind::KeyUp { code });
         }
@@ -1704,7 +1807,7 @@ impl ApplicationHandler<()> for App {
                                 || self.session.keys.contains(&97))
                             && self.workspace_clipboard_enabled()
                         {
-                            self.workspace_copying();
+                            self.native_copy();
                         }
                         if cfg!(target_os = "macos")
                             && matches!(code, 45 | 46)
@@ -1886,6 +1989,23 @@ mod tests {
         assert_eq!(latency.ack(10, 4096, 400), None);
         latency.pending.clear(); // An old epoch cannot complete a fresh paste.
         assert_eq!(latency.ack(29, 4096, 500), None);
+    }
+    #[test]
+    fn a_refused_paste_is_terminal_without_canceling_another_transfer_or_reporting_success() {
+        let mut latency = ClipboardLatency::default();
+        latency.sent(7, 80, 100);
+        latency.sent(8, 4096, 150);
+        assert!(!latency.failed(9)); // A reverse or unknown error is not this paste.
+        assert_eq!(latency.pending.len(), 2);
+        assert!(latency.failed(7));
+        assert!(!latency.failed(7)); // Repeated refusal cannot count twice.
+        assert_eq!(latency.pending.front(), Some(&(8, 4096, 150)));
+        assert_eq!(latency.ack(7, 80, 200), None);
+        assert!(latency.acknowledged.is_empty());
+        assert_eq!(latency.ack(8, 4096, 210), Some(60.));
+        assert!(latency.pending.is_empty()); // No phantom ready-pending incident.
+        assert_eq!(latency.acknowledged, vec![60.]);
+        assert_eq!(latency.evicted, 0);
     }
     #[test]
     fn submission_debt_distinguishes_idle_replacement_and_concurrent_arrival() {

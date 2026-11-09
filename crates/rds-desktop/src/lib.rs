@@ -42,7 +42,11 @@ pub use producer_signal::ProducerSignal;
 mod portal;
 mod receipts;
 pub mod render;
-#[cfg(any(feature = "x11", test))]
+#[cfg(any(
+    test,
+    all(target_os = "linux", feature = "x11"),
+    all(target_os = "macos", feature = "host")
+))]
 mod scaling;
 mod session;
 mod source;
