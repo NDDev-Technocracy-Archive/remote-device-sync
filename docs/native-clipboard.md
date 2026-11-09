@@ -2,8 +2,8 @@
 
 Execution: [#212](https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote/issues/212).
 The existing DesktopV5 text wire is unchanged. The new native representation,
-file authority and streaming core are building blocks; they do not advertise
-image/file support or qualify an OS adapter by themselves.
+file authority and streaming core are building blocks; they do not enable
+image/file support in the runtime handshake or qualify OS integration by themselves.
 
 `rds-core::clipboard` owns directional capabilities, typed limits, offers,
 session/offer/request identities, exact selected-file manifests and metadata
@@ -65,6 +65,9 @@ from native jobs and wire body concurrency. Unsupported schema versions and
 missing/unknown backend settings are refused rather than filled with defaults.
 Schema 3 additionally declares the portal FD chunk size, independently of the
 wire and X11 chunk settings. Its common profile remains compiled and strict.
+Schema 4 adds the native peer's bounded metadata queue and startup/write
+deadlines. Native peer settings are mandatory and validated independently of
+native jobs and body transfers; earlier/unknown schema versions are refused.
 
 Native viewing and serving providers share the same weak process budget pool.
 Each selected descriptor retains that exact physical owner, independently of a
@@ -142,6 +145,32 @@ Real loopback tests cover simultaneous requests, a late canceled response,
 selected-file integrity without a staging file, and progressing control/media
 beside a backpressured file. The native handshake, manager and GUI still need
 coordinated integration before this mode is advertised to a user.
+
+`clipboard::peer` owns the symmetric native metadata channel for an explicitly
+admitted desktop. The caller prepares its exact route before acknowledging the
+native handshake, then starts only after mutual capability acceptance. This
+component does not open a native provider or authorize a clipboard read. It
+reduces the prepared provider's actual capabilities to implemented text/PNG;
+selected files are deliberately absent until native receiving/paste adapters
+are qualified. Offers read only generation/representation metadata; a request
+retains its exact gesture and original purpose before reading a body.
+
+The desktop control-stream initiator and responder have disjoint request
+number namespaces. Simultaneous copies cannot direct a publication failure,
+receipt or cancellation into the reverse transfer with an equal offer/counter.
+One ordered, bounded metadata stream uses control priority; separately admitted
+body streams remain below interactive traffic. Reader/writer ownership retains
+partial framing, and a failed clipboard channel does not close the connection.
+
+Dropping a requested/received body sends bounded cancellation. If that notice
+cannot be admitted, the clipboard channel seals so its peer cannot retain a
+stranded source read. Source jobs stop and the actual native provider drains
+before cleanup completes. Consuming publication preparation validates immutable
+text/PNG off the UI/async executor; its blocking work keeps body credit and the
+original owner after waiter cancellation. A canceled gesture or peer refusal
+prevents preparation/receipt success. Verified/publication receipts remain
+observations, not proof of application paste. See
+[metadata peer qualification](reports/clipboard-metadata-peer.md).
 
 `native::RemoteFiles` binds one validated offered selection to its negotiated
 body owner and metadata queue. Its request carries only an opaque selected ID

@@ -50,6 +50,7 @@ pub struct Policy {
     pub selected_file_descriptors: usize,
     /// Concurrent native body jobs, independent of transport stream credits.
     pub native_body_operations: usize,
+    pub peer: PeerPolicy,
     pub portal: PortalPolicy,
     pub x11: X11Policy,
 }
@@ -58,6 +59,25 @@ pub struct Policy {
 #[serde(deny_unknown_fields)]
 pub struct PortalPolicy {
     pub selection_chunk_bytes: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerPolicy {
+    pub metadata_messages: usize,
+    pub startup_timeout_ms: u64,
+    pub write_timeout_ms: u64,
+}
+impl PeerPolicy {
+    pub fn validate(&self) -> Result<(), Error> {
+        if !(1..=64).contains(&self.metadata_messages)
+            || !(100..=30_000).contains(&self.startup_timeout_ms)
+            || !(100..=30_000).contains(&self.write_timeout_ms)
+        {
+            return Err(Error::Settings);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,7 +101,8 @@ impl Policy {
     }
     pub fn validate(&self) -> Result<(), Error> {
         self.limits.validate()?;
-        if self.schema_version != 3
+        self.peer.validate()?;
+        if self.schema_version != 4
             || !(5..=1000).contains(&self.watch_interval_ms)
             || !(100..=30_000).contains(&self.operation_timeout_ms)
             || !(1..=16 * rds_core::clipboard::TEXT_BYTES).contains(&self.native_uri_bytes)
@@ -416,7 +437,20 @@ mod tests {
         selected.native_body_operations = 3;
         selected.validate().unwrap();
         assert_eq!(selected.limits, policy.limits);
-        selected.schema_version = 4;
+        selected.schema_version = 5;
+        assert!(matches!(selected.validate(), Err(Error::Settings)));
+        selected.schema_version = 3;
+        assert!(matches!(selected.validate(), Err(Error::Settings)));
+        for field in value["peer"].as_object().unwrap().keys() {
+            let mut absent = value.clone();
+            absent["peer"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Policy>(absent).is_err());
+        }
+        let mut unknown = value.clone();
+        unknown["peer"]["unknown"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<Policy>(unknown).is_err());
+        selected = policy.clone();
+        selected.peer.metadata_messages = 0;
         assert!(matches!(selected.validate(), Err(Error::Settings)));
         selected = policy.clone();
         selected.x11.event_batch = 0;

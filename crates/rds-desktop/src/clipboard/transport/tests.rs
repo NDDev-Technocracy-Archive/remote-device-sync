@@ -195,6 +195,7 @@ async fn concurrent_request_ids_follow_committed_metadata_on_both_transports() {
                 Streams::new(
                     pair.left.clone(),
                     [19; 16],
+                    Side::Initiator,
                     Limits::default(),
                     metadata,
                     Arc::new(()),
@@ -250,6 +251,7 @@ async fn metadata_admission_precedes_request_allocation_and_retains_cleanup_cred
     let owner = Streams::new(
         pair.left.clone(),
         [19; 16],
+        Side::Initiator,
         Limits::default(),
         metadata.clone(),
         Arc::new(()),
@@ -392,6 +394,7 @@ impl Pair {
             Streams::new(
                 self.left.clone(),
                 [19; 16],
+                Side::Initiator,
                 Limits::default(),
                 self.metadata(),
                 Arc::new(()),
@@ -400,6 +403,7 @@ impl Pair {
             Streams::new(
                 self.right.clone(),
                 [19; 16],
+                Side::Responder,
                 Limits::default(),
                 self.metadata(),
                 Arc::new(()),
@@ -531,6 +535,7 @@ async fn representation_admission_precedes_native_read_and_survives_waiter_cance
         Streams::new(
             pair.right.clone(),
             [19; 16],
+            Side::Responder,
             Limits {
                 parallel_transfers: 1,
                 ..Limits::default()
@@ -589,6 +594,7 @@ async fn verified_representation_keeps_admission_through_actual_publication_drai
     let left = Streams::new(
         pair.left.clone(),
         [19; 16],
+        Side::Initiator,
         Limits {
             parallel_transfers: 1,
             ..Limits::default()
@@ -726,7 +732,7 @@ async fn remote_native_promise_writes_only_its_selected_file_and_receipts_verifi
         let pair = Pair::backend(rds_net::Backend::Noq).await;
         let (_, right) = pair.owners();
         let (metadata, mut requests) = mpsc::channel(4);
-        let left = Streams::new(pair.left.clone(), [19; 16], Limits::default(), metadata, Arc::new(())).unwrap();
+        let left = Streams::new(pair.left.clone(), [19; 16], Side::Initiator, Limits::default(), metadata, Arc::new(())).unwrap();
         let scope = CancellationToken::new();
         let remote = native::RemoteFiles::new(5, selected.manifest().clone(), Arc::new(left), scope.clone()).unwrap();
         assert!(matches!(remote.open([0;16], Arc::new(())).await, Err(native::Error::File(_))));
@@ -822,6 +828,7 @@ async fn outgoing_reservation_survives_cancellation_of_its_actual_native_open() 
         Streams::new(
             pair.right.clone(),
             [19; 16],
+            Side::Responder,
             Limits {
                 parallel_transfers: 1,
                 ..Limits::default()
@@ -874,6 +881,7 @@ async fn revoking_a_remote_file_scope_stops_an_existing_reader_and_cancels_its_r
         let left = Streams::new(
             pair.left.clone(),
             [19; 16],
+            Side::Initiator,
             Limits::default(),
             metadata,
             Arc::new(()),
@@ -940,6 +948,7 @@ async fn blocked_bulk(backend: rds_net::Backend) {
         let left = Streams::new(
             pair.left.clone(),
             [19; 16],
+            Side::Initiator,
             Limits::default(),
             pair.metadata(),
             original,
@@ -949,6 +958,7 @@ async fn blocked_bulk(backend: rds_net::Backend) {
             Streams::new(
                 pair.right.clone(),
                 [19; 16],
+                Side::Responder,
                 Limits::default(),
                 pair.metadata(),
                 Arc::new(()),
