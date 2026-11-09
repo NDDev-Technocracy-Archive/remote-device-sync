@@ -3741,3 +3741,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux", feature = "x11"))]
+mod native_idle_qa;
