@@ -70,6 +70,11 @@ Rules every change follows. CI enforces what it can; the rest is review.
 
 ## Testing lanes
 
+- `just check` runs build-free formatting, workflow, dependency-graph and
+  whitespace checks. Native compilation, tests and applications run on build
+  devices or runners; the source-check entrypoint does not start them.
+- `just test` runs denied Clippy, nextest and doctests on build devices/runners.
+  Its optional feature argument selects the native feature set explicitly.
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
   warnings`, `cargo test --workspace` — green on Ubuntu and macOS in CI.
 - Feature lanes: `--features rds-desktop/x11` on Linux;

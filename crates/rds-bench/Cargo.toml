@@ -25,13 +25,13 @@ rds-relay = { workspace = true, optional = true, features = ["owned-relay"] }
 rds-cli.workspace = true
 rds-discovery.workspace = true
 rds-net.workspace = true
-rds-sync.workspace = true
-postcard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+postcard.workspace = true
+rds-sync.workspace = true
 rds-audio.workspace = true
 rds-desktop.workspace = true
 
