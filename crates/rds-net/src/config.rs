@@ -337,6 +337,19 @@ fn set_owned_relay(
     ))
 }
 
+pub(crate) fn validate_alpns(alpns: &[Vec<u8>]) -> Result<(), ConfigError> {
+    if alpns.is_empty()
+        || alpns.len() > 16
+        || alpns.iter().any(|a| a.is_empty() || a.len() > 255)
+        || alpns.iter().collect::<HashSet<_>>().len() != alpns.len()
+    {
+        return Err(ConfigError::Invalid(
+            "ALPNs must be 1..16 distinct identifiers of 1..255 bytes",
+        ));
+    }
+    Ok(())
+}
+
 impl EndpointConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_for(self.backend)
@@ -364,15 +377,7 @@ impl EndpointConfig {
         if matches!(self.max_multipath_paths, Some(0 | 33..)) {
             return Err(ConfigError::Invalid("max_multipath_paths must be 1..32"));
         }
-        if self.alpns.is_empty()
-            || self.alpns.len() > 16
-            || self.alpns.iter().any(|a| a.is_empty() || a.len() > 255)
-            || self.alpns.iter().collect::<HashSet<_>>().len() != self.alpns.len()
-        {
-            return Err(ConfigError::Invalid(
-                "ALPNs must be 1..16 distinct identifiers of 1..255 bytes",
-            ));
-        }
+        validate_alpns(&self.alpns)?;
         if self.relays.len() > MAX_RELAYS
             || self.relays.iter().collect::<HashSet<_>>().len() != self.relays.len()
         {

@@ -48,3 +48,32 @@ explicit `payload_receipts` and `clipboard` flags; the matching
 `HelloAck::DesktopV5` is required before offers are sent. V2/V3/V4 peers keep
 their exact layouts and never receive new clipboard event variants. There is no
 silent downgrade from a requested V5 session.
+
+## Explicit alternatives
+
+`Endpoint::connect_offered(target, alpns)` is a separate opt-in API for a caller
+that can implement every protocol in its supplied offer. Both backends validate
+1–16 distinct identifiers of 1–255 bytes, and every identifier must have been
+configured at endpoint binding. The server chooses a common protocol in its
+preference order during the existing TLS handshake. The caller reads the actual
+`Connection::alpn()` before selecting an application protocol; a missing or
+unrecognized result cannot establish feature support or authorize a service.
+
+This follows [RFC 7301](https://www.rfc-editor.org/rfc/rfc7301.html#section-3.2):
+the server selects from the client's explicit offer, and no common protocol is
+a handshake failure. There is no second dial, guessed legacy retry, default
+identifier appended to the offer, or interpretation of an application error as
+an older peer. `connect(target, alpn)` retains its exact-protocol contract.
+
+Iroh receives per-dial `ConnectOptions`. The owned backend creates one immutable
+TLS configuration for an explicit multi-protocol dial and uses it for all raced
+candidates. It does not change the endpoint's default configuration or cache
+arbitrary offer combinations. Its configurations share the same original peer
+verifier, certificate resolver and endpoint-wide bound of 256 TLS sessions;
+single-protocol offers use the prebuilt exact configuration. Awaiting the
+handshake and authenticating the expected peer key remain mandatory.
+
+This transport boundary prepares mixed-version desktop integration. It does not
+introduce another default ALPN, change `rds/0`, select DesktopV6 automatically,
+change frozen desktop greetings, or claim clipboard/receiving-application
+acceptance. See [qualification scope](reports/protocol-offers.md).
