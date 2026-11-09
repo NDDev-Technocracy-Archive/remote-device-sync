@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "limits": {
     "text_bytes": 1048576,
     "image_bytes": 33554432,
@@ -16,6 +16,11 @@
   "pending_operations": 8,
   "selected_file_descriptors": 64,
   "native_body_operations": 2,
+  "peer": {
+    "metadata_messages": 16,
+    "startup_timeout_ms": 5000,
+    "write_timeout_ms": 2000
+  },
   "portal": {
     "selection_chunk_bytes": 16384
   },

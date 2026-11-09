@@ -6,6 +6,7 @@ pub mod image;
 pub(crate) mod macos;
 pub mod native;
 pub(crate) mod ownership;
+pub mod peer;
 pub mod stream;
 pub mod transport;
 pub const MAX_TEXT_BYTES: usize = rds_core::clipboard::TEXT_BYTES as usize;

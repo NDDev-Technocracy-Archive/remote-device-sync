@@ -305,6 +305,40 @@ impl FileSelection {
     }
 }
 
+const REQUEST_SIDE: u64 = 1 << 63;
+
+/// Assigned by the actual desktop control-stream direction. It is not a peer
+/// capability or an authorization. Request numbers have disjoint namespaces
+/// so simultaneous copies cannot confuse a receipt/refusal with the reverse
+/// direction's otherwise equal offer and counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Initiator,
+    Responder,
+}
+impl Side {
+    pub fn peer(self) -> Self {
+        match self {
+            Self::Initiator => Self::Responder,
+            Self::Responder => Self::Initiator,
+        }
+    }
+    pub fn request_id(self, sequence: u64) -> Result<u64, Error> {
+        if sequence == 0 || sequence >= REQUEST_SIDE {
+            return Err(Error::Identity);
+        }
+        Ok(sequence
+            | if self == Self::Responder {
+                REQUEST_SIDE
+            } else {
+                0
+            })
+    }
+    pub fn owns_request(self, request: u64) -> bool {
+        request & !REQUEST_SIDE != 0 && (request & REQUEST_SIDE != 0) == (self == Self::Responder)
+    }
+}
+
 /// A transfer is pinned to an existing desktop, its exact offer and one request.
 /// The owner additionally binds this to its authenticated connection and grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -316,7 +350,7 @@ pub struct TransferId {
 
 impl TransferId {
     pub fn validate(&self) -> Result<(), Error> {
-        if self.desktop == [0; 16] || self.offer == 0 || self.request == 0 {
+        if self.desktop == [0; 16] || self.offer == 0 || self.request & !REQUEST_SIDE == 0 {
             Err(Error::Identity)
         } else {
             Ok(())
@@ -435,6 +469,32 @@ pub enum Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opposite_desktop_sides_cannot_mint_the_same_request_identity() {
+        for sequence in [1, 2, REQUEST_SIDE - 1] {
+            let first = Side::Initiator.request_id(sequence).unwrap();
+            let second = Side::Responder.request_id(sequence).unwrap();
+            assert_ne!(first, second);
+            assert!(Side::Initiator.owns_request(first));
+            assert!(!Side::Responder.owns_request(first));
+            assert!(Side::Responder.owns_request(second));
+            assert!(!Side::Initiator.owns_request(second));
+        }
+        for side in [Side::Initiator, Side::Responder] {
+            assert!(side.request_id(0).is_err());
+            assert!(side.request_id(REQUEST_SIDE).is_err());
+        }
+        assert!(
+            TransferId {
+                desktop: [1; 16],
+                offer: 1,
+                request: REQUEST_SIDE
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
     #[test]
     fn selection_is_bounded_and_never_accepts_a_source_path_or_duplicate_target() {

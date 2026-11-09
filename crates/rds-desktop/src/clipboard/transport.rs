@@ -14,7 +14,7 @@ use bytes::Bytes;
 use rds_core::{
     UniHello,
     clipboard::{
-        Control, Failure, Limits, PayloadKind, Receipt, Request, TransferHeader, TransferId,
+        Control, Failure, Limits, PayloadKind, Receipt, Request, Side, TransferHeader, TransferId,
     },
 };
 use rds_net::{Connection, RecvStream, SendStream, UniStreams};
@@ -86,6 +86,7 @@ fn body_error(error: stream::Error) -> Error {
 pub struct Streams {
     connection: Connection,
     desktop: [u8; 16],
+    side: Side,
     limits: Limits,
     metadata: mpsc::Sender<Control>,
     next: Mutex<u64>,
@@ -100,6 +101,7 @@ impl Streams {
     pub fn new(
         connection: Connection,
         desktop: [u8; 16],
+        side: Side,
         limits: Limits,
         metadata: mpsc::Sender<Control>,
         original: NativeLifetime,
@@ -112,6 +114,7 @@ impl Streams {
         Ok(Self {
             connection,
             desktop,
+            side,
             limits,
             metadata,
             next: Mutex::new(1),
@@ -159,7 +162,7 @@ impl Streams {
             .try_acquire_owned()
             .map_err(|_| self.admission_error())?;
         let mut next = self.next.lock().map_err(|_| Error::Closed)?;
-        let sequence = *next;
+        let sequence = self.side.request_id(*next)?;
         *next = next.checked_add(1).ok_or(Error::Closed)?;
         let request = Request {
             id: TransferId {
@@ -199,7 +202,7 @@ impl Streams {
     /// An unknown/finished request is not a new authorization or a session fault.
     pub fn refused(&self, id: TransferId, code: Failure) -> Result<bool, Error> {
         id.validate()?;
-        if id.desktop != self.desktop {
+        if id.desktop != self.desktop || !self.side.owns_request(id.request) {
             return Err(rds_core::clipboard::Error::Identity.into());
         }
         self.refusals.signal(id, code)
@@ -229,7 +232,8 @@ impl Streams {
     /// original owner accompanies each actual native operation.
     pub fn response(&self, request: &Request) -> Result<Response<'_>, Error> {
         request.validate(&self.limits)?;
-        if request.id.desktop != self.desktop {
+        if request.id.desktop != self.desktop || !self.side.peer().owns_request(request.id.request)
+        {
             return Err(rds_core::clipboard::Error::Identity.into());
         }
         let permit = self

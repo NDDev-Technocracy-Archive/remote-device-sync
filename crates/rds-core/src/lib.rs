@@ -76,6 +76,10 @@ pub enum UniHello {
     /// One explicitly requested native clipboard body. The owning desktop
     /// negotiates native clipboard support before claiming or sending it.
     ClipboardBody { id: clipboard::TransferId },
+    /// Symmetric metadata for one explicitly negotiated native desktop.
+    /// The desktop ID is never reused on this connection. Bodies stay on
+    /// ClipboardBody routes; input and video never wait on this stream.
+    ClipboardMetadata { id: [u8; 16] },
 }
 
 /// First frame on every bi-directional stream.
@@ -585,6 +589,14 @@ mod tests {
         assert_eq!(
             postcard::from_bytes::<UniHello>(&encoded).unwrap(),
             clipboard
+        );
+        assert!(postcard::from_bytes::<LegacyUni>(&encoded).is_err());
+        let metadata = UniHello::ClipboardMetadata { id: [46; 16] };
+        let encoded = postcard::to_stdvec(&metadata).unwrap();
+        assert_eq!(encoded, [vec![7], vec![46; 16]].concat());
+        assert_eq!(
+            postcard::from_bytes::<UniHello>(&encoded).unwrap(),
+            metadata
         );
         assert!(postcard::from_bytes::<LegacyUni>(&encoded).is_err());
     }
