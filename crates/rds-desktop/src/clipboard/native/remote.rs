@@ -8,10 +8,7 @@ use std::{
     },
     task::{Context, Poll},
 };
-use tokio::{
-    io::{AsyncRead, ReadBuf},
-    sync::mpsc,
-};
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio_util::sync::CancellationToken;
 
 use super::{Destination, Error, FileRead, FileReceipt, Files, Operation};
@@ -25,7 +22,6 @@ pub struct RemoteFiles {
     offer: u64,
     selection: FileSelection,
     streams: Arc<Streams>,
-    metadata: mpsc::Sender<Control>,
     scope: CancellationToken,
 }
 impl RemoteFiles {
@@ -33,7 +29,6 @@ impl RemoteFiles {
         offer: u64,
         selection: FileSelection,
         streams: Arc<Streams>,
-        metadata: mpsc::Sender<Control>,
         scope: CancellationToken,
     ) -> Result<Self, Error> {
         if offer == 0 {
@@ -47,7 +42,6 @@ impl RemoteFiles {
             offer,
             selection,
             streams,
-            metadata,
             scope,
         })
     }
@@ -68,23 +62,18 @@ impl RemoteFiles {
             .ok_or(rds_sync::selection::Error::Unknown)?;
         let incoming = self
             .streams
-            .request(
+            .request_into(
                 self.offer,
                 PayloadKind::File(file),
                 Some(entry.bytes),
                 self.scope.clone(),
+                original,
             )
-            .map_err(transport::Error::into_native)?
-            .retaining(original);
+            .map_err(transport::Error::into_native)?;
         let request = incoming.request().clone();
-        // Claiming the route preceded metadata admission. A saturated/closed
-        // queue cannot create unbounded waiting request jobs or read any body.
-        self.metadata
-            .try_send(Control::Request(request.clone()))
-            .map_err(|_| Error::Unavailable)?;
         let pending = Arc::new(Pending {
             id: request.id,
-            metadata: self.metadata.clone(),
+            streams: self.streams.clone(),
             scope: self.scope.clone(),
             verified: AtomicBool::new(false),
         });
@@ -143,9 +132,9 @@ impl Files for RemoteFiles {
             if pending.scope.is_cancelled() {
                 return Err(Error::Changed);
             }
-            self.metadata
-                .try_send(Control::Receipt(receipt))
-                .map_err(|_| Error::Unavailable)?;
+            self.streams
+                .send_metadata(Control::Receipt(receipt))
+                .map_err(transport::Error::into_native)?;
             pending.finish()?;
             Ok(FileReceipt {
                 bytes: receipt.bytes,
@@ -157,7 +146,7 @@ impl Files for RemoteFiles {
 
 struct Pending {
     id: TransferId,
-    metadata: mpsc::Sender<Control>,
+    streams: Arc<Streams>,
     scope: CancellationToken,
     verified: AtomicBool,
 }
@@ -174,8 +163,8 @@ impl Drop for Pending {
     fn drop(&mut self) {
         if !self.verified.load(Ordering::Acquire)
             && self
-                .metadata
-                .try_send(Control::Cancel { id: self.id })
+                .streams
+                .send_metadata(Control::Cancel { id: self.id })
                 .is_err()
         {
             // The dropped receive route/stream also stops the sender. This

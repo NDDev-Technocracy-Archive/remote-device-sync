@@ -2,6 +2,147 @@ use super::*;
 use rds_core::clipboard::Format;
 use tokio::io::AsyncReadExt;
 
+// Body fixtures relay the admitted metadata explicitly to the other endpoint.
+// Keep those fixtures on the same ordered admission path as the product.
+trait RequestedBody {
+    fn request(
+        &self,
+        offer: u64,
+        kind: PayloadKind,
+        bytes: Option<u64>,
+        scope: CancellationToken,
+    ) -> Result<Incoming, Error>;
+}
+impl RequestedBody for Streams {
+    fn request(
+        &self,
+        offer: u64,
+        kind: PayloadKind,
+        bytes: Option<u64>,
+        scope: CancellationToken,
+    ) -> Result<Incoming, Error> {
+        self.request_into(offer, kind, bytes, scope, Arc::new(()))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_request_ids_follow_committed_metadata_on_both_transports() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for backend in [rds_net::Backend::Iroh, rds_net::Backend::Noq] {
+            let pair = Pair::backend(backend).await;
+            let (metadata, mut receiver) = mpsc::channel(16);
+            let owner = Arc::new(
+                Streams::new(
+                    pair.left.clone(),
+                    [19; 16],
+                    Limits::default(),
+                    metadata,
+                    Arc::new(()),
+                )
+                .unwrap(),
+            );
+            let mut jobs = tokio::task::JoinSet::new();
+            for _ in 0..4 {
+                let owner = owner.clone();
+                jobs.spawn(async move {
+                    for _ in 0..64 {
+                        loop {
+                            match owner.request_into(
+                                1,
+                                PayloadKind::Representation(Format::TextUtf8),
+                                Some(0),
+                                CancellationToken::new(),
+                                Arc::new(()),
+                            ) {
+                                Ok(incoming) => {
+                                    drop(incoming);
+                                    break;
+                                }
+                                Err(Error::Busy) => tokio::task::yield_now().await,
+                                Err(error) => panic!("request admission failed: {error}"),
+                            }
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                });
+            }
+            for sequence in 1..=256 {
+                let Control::Request(request) = receiver.recv().await.unwrap() else {
+                    panic!("unexpected request metadata");
+                };
+                assert_eq!(request.id.request, sequence);
+                assert_eq!(request.id.desktop, [19; 16]);
+            }
+            while let Some(result) = jobs.join_next().await {
+                result.unwrap();
+            }
+            assert_eq!(owner.incoming.available_permits(), 2);
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn metadata_admission_precedes_request_allocation_and_retains_cleanup_credit() {
+    let pair = Pair::new().await;
+    let (metadata, mut receiver) = mpsc::channel(1);
+    let owner = Streams::new(
+        pair.left.clone(),
+        [19; 16],
+        Limits::default(),
+        metadata.clone(),
+        Arc::new(()),
+    )
+    .unwrap();
+    metadata.try_send(Control::Withdraw { offer: 1 }).unwrap();
+    let request = |original| {
+        owner.request_into(
+            1,
+            PayloadKind::Representation(Format::TextUtf8),
+            Some(0),
+            CancellationToken::new(),
+            original,
+        )
+    };
+    assert!(matches!(request(Arc::new(())), Err(Error::Busy)));
+    assert_eq!(*owner.next.lock().unwrap(), 1);
+    assert_eq!(owner.incoming.available_permits(), 2);
+    receiver.try_recv().unwrap();
+
+    struct Original {
+        budget: Arc<Semaphore>,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for Original {
+        fn drop(&mut self) {
+            assert_eq!(self.budget.available_permits(), 1);
+            self.finished
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let incoming = request(Arc::new(Original {
+        budget: owner.incoming.clone(),
+        finished: finished.clone(),
+    }))
+    .unwrap();
+    assert_eq!(incoming.request().id.request, 1);
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        Control::Request(incoming.request().clone())
+    );
+    assert!(!finished.load(std::sync::atomic::Ordering::Acquire));
+    drop(incoming);
+    assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(owner.incoming.available_permits(), 2);
+
+    drop(receiver);
+    assert!(matches!(request(Arc::new(())), Err(Error::Closed)));
+    assert_eq!(*owner.next.lock().unwrap(), 2);
+    assert_eq!(owner.incoming.available_permits(), 2);
+}
+
 struct Generated {
     selection: rds_core::clipboard::FileSelection,
     limits: Limits,
@@ -55,6 +196,7 @@ struct Pair {
     right: Connection,
     _a: rds_net::Endpoint,
     _b: rds_net::Endpoint,
+    metadata: Mutex<Vec<mpsc::Receiver<Control>>>,
 }
 impl Pair {
     async fn new() -> Self {
@@ -77,15 +219,29 @@ impl Pair {
             right: right.unwrap(),
             _a: a,
             _b: b,
+            metadata: Mutex::new(Vec::new()),
         }
+    }
+    fn metadata(&self) -> mpsc::Sender<Control> {
+        let (sender, receiver) = mpsc::channel(32);
+        self.metadata.lock().unwrap().push(receiver);
+        sender
     }
     fn owners(&self) -> (Streams, Streams) {
         (
-            Streams::new(self.left.clone(), [19; 16], Limits::default(), Arc::new(())).unwrap(),
+            Streams::new(
+                self.left.clone(),
+                [19; 16],
+                Limits::default(),
+                self.metadata(),
+                Arc::new(()),
+            )
+            .unwrap(),
             Streams::new(
                 self.right.clone(),
                 [19; 16],
                 Limits::default(),
+                self.metadata(),
                 Arc::new(()),
             )
             .unwrap(),
@@ -219,6 +375,7 @@ async fn representation_admission_precedes_native_read_and_survives_waiter_cance
                 parallel_transfers: 1,
                 ..Limits::default()
             },
+            pair.metadata(),
             Arc::new(()),
         )
         .unwrap(),
@@ -276,6 +433,7 @@ async fn verified_representation_keeps_admission_through_actual_publication_drai
             parallel_transfers: 1,
             ..Limits::default()
         },
+        pair.metadata(),
         Arc::new(()),
     )
     .unwrap();
@@ -406,10 +564,11 @@ async fn remote_native_promise_writes_only_its_selected_file_and_receipts_verifi
     let file = selected.manifest().entries[0].id;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let pair = Pair::backend(rds_net::Backend::Noq).await;
-        let (left, right) = pair.owners();
-        let (metadata, mut requests) = tokio::sync::mpsc::channel(4);
+        let (_, right) = pair.owners();
+        let (metadata, mut requests) = mpsc::channel(4);
+        let left = Streams::new(pair.left.clone(), [19; 16], Limits::default(), metadata, Arc::new(())).unwrap();
         let scope = CancellationToken::new();
-        let remote = native::RemoteFiles::new(5, selected.manifest().clone(), Arc::new(left), metadata, scope.clone()).unwrap();
+        let remote = native::RemoteFiles::new(5, selected.manifest().clone(), Arc::new(left), scope.clone()).unwrap();
         assert!(matches!(remote.open([0;16], Arc::new(())).await, Err(native::Error::File(_))));
         assert!(requests.try_recv().is_err());
         let destination = std::fs::OpenOptions::new().write(true).create_new(true).open(root.join("pasted")).unwrap();
@@ -443,7 +602,7 @@ async fn outgoing_reservation_survives_cancellation_of_its_actual_native_open() 
     }
     struct NativeOpening {
         selected: rds_sync::selection::Selection,
-        gate: std::sync::Mutex<Option<Gate>>,
+        gate: Mutex<Option<Gate>>,
     }
     impl native::Files for NativeOpening {
         fn selection(&self) -> &rds_core::clipboard::FileSelection {
@@ -492,7 +651,7 @@ async fn outgoing_reservation_survives_cancellation_of_its_actual_native_open() 
     let (release, held) = std::sync::mpsc::channel();
     let source = NativeOpening {
         selected,
-        gate: std::sync::Mutex::new(Some(Gate {
+        gate: Mutex::new(Some(Gate {
             entered,
             release: held,
         })),
@@ -507,6 +666,7 @@ async fn outgoing_reservation_survives_cancellation_of_its_actual_native_open() 
                 parallel_transfers: 1,
                 ..Limits::default()
             },
+            pair.metadata(),
             Arc::new(()),
         )
         .unwrap(),
@@ -548,9 +708,17 @@ async fn revoking_a_remote_file_scope_stops_an_existing_reader_and_cancels_its_r
     use rds_core::clipboard::{Control, FileEntry, FileSelection};
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let pair = Pair::new().await;
-        let (left, right) = pair.owners();
+        let (_, right) = pair.owners();
         let right = Arc::new(right);
-        let (metadata, mut requests) = tokio::sync::mpsc::channel(4);
+        let (metadata, mut requests) = mpsc::channel(4);
+        let left = Streams::new(
+            pair.left.clone(),
+            [19; 16],
+            Limits::default(),
+            metadata,
+            Arc::new(()),
+        )
+        .unwrap();
         let scope = CancellationToken::new();
         let remote = native::RemoteFiles::new(
             6,
@@ -562,7 +730,6 @@ async fn revoking_a_remote_file_scope_stops_an_existing_reader_and_cancels_its_r
                 }],
             },
             Arc::new(left),
-            metadata,
             scope.clone(),
         )
         .unwrap();
@@ -610,12 +777,20 @@ async fn blocked_bulk(backend: rds_net::Backend) {
         let pair = Pair::backend(backend).await;
         let original = Arc::new(());
         let retained = Arc::downgrade(&original);
-        let left = Streams::new(pair.left.clone(), [19; 16], Limits::default(), original).unwrap();
+        let left = Streams::new(
+            pair.left.clone(),
+            [19; 16],
+            Limits::default(),
+            pair.metadata(),
+            original,
+        )
+        .unwrap();
         let right = Arc::new(
             Streams::new(
                 pair.right.clone(),
                 [19; 16],
                 Limits::default(),
+                pair.metadata(),
                 Arc::new(()),
             )
             .unwrap(),
