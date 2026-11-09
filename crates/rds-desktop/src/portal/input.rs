@@ -1,4 +1,6 @@
 //! One EIS owner; bounded requests, exact monitor regions, no timed-out replay.
+mod wake;
+use wake::Wake;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,11 +18,13 @@ use reis::{
 };
 use rustix::event::{PollFd, PollFlags};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use crate::{DesktopError, InputSink};
 
-const INPUT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(super) const INPUT_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DEVICES: usize = 64;
+const REQUEST_CAPACITY: usize = 64;
 
 type Mappings = BTreeMap<u32, (String, Arc<super::capture::Slot>)>;
 
@@ -105,6 +109,8 @@ fn check_pending(
 }
 
 pub(super) struct Group {
+    wake: Wake,
+    closed: CancellationToken,
     sender: mpsc::SyncSender<Request>,
     stop: Arc<AtomicBool>,
     pub ready: Arc<AtomicBool>,
@@ -122,10 +128,14 @@ impl Group {
             .clone()
             .try_acquire_owned()
             .map_err(|_| error())?;
-        let (sender, receiver) = mpsc::sync_channel(64);
+        let (sender, receiver) = mpsc::sync_channel(REQUEST_CAPACITY);
+        let wake = Wake::new()?;
+        let notified = wake.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(AtomicBool::new(false));
         let era = Arc::new(AtomicU64::new(0));
+        let closed = CancellationToken::new();
+        let closing = closed.clone();
         let (stopping, readiness, generation) = (stop.clone(), ready.clone(), era.clone());
         let task = tokio::task::spawn_blocking(move || {
             // The converter has non-Send callbacks. Construct and retain it on
@@ -134,14 +144,25 @@ impl Group {
             let _exit = WorkerExit {
                 ready: &readiness,
                 stop: &stopping,
+                closed: &closing,
             };
-            let result = run(fd, mappings, receiver, &stopping, &readiness, &generation);
+            let result = run(
+                fd,
+                mappings,
+                receiver,
+                &stopping,
+                &readiness,
+                &generation,
+                &notified,
+            );
             if result.is_err() {
                 tracing::warn!("Wayland EIS native worker failed");
             }
             result
         });
         Ok(Self {
+            wake,
+            closed,
             sender,
             stop,
             ready,
@@ -153,7 +174,7 @@ impl Group {
     }
 
     pub fn sink(&self, index: u32, extent: (u32, u32)) -> Result<Box<dyn InputSink>, DesktopError> {
-        if self.stop.load(Ordering::Acquire) || !self.ready.load(Ordering::Acquire) {
+        if self.stopped() || !self.ready.load(Ordering::Acquire) {
             return Err(error());
         }
         let permit = self
@@ -166,6 +187,8 @@ impl Group {
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| error())?;
         Ok(Box::new(Sink {
+            wake: self.wake.clone(),
+            unavailable: self.closed.clone(),
             sender: self.sender.clone(),
             stop: self.stop.clone(),
             ready: self.ready.clone(),
@@ -182,8 +205,12 @@ impl Group {
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
+    pub async fn closed_signal(&self) {
+        self.closed.cancelled().await;
+    }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+        let _ = self.wake.notify();
     }
     pub async fn close(&self) -> Result<(), DesktopError> {
         self.stop();
@@ -201,6 +228,7 @@ impl Drop for Group {
 }
 
 struct WorkerExit<'a> {
+    closed: &'a CancellationToken,
     ready: &'a AtomicBool,
     stop: &'a AtomicBool,
 }
@@ -208,10 +236,13 @@ impl Drop for WorkerExit<'_> {
     fn drop(&mut self) {
         self.ready.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Release);
+        self.closed.cancel();
     }
 }
 
 struct Sink {
+    wake: Wake,
+    unavailable: CancellationToken,
     sender: mpsc::SyncSender<Request>,
     stop: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
@@ -247,10 +278,19 @@ impl InputSink for Sink {
                 reply,
             })
             .map_err(|_| error())?;
+        if self.wake.notify().is_err() {
+            // A refused local wake must never leave authorized input queued
+            // for an unrelated later EI event to replay.
+            self.live.store(false, Ordering::Release);
+            self.stop.store(true, Ordering::Release);
+            self.unavailable.cancel();
+            return Err(error());
+        }
         match response.recv_timeout(INPUT_TIMEOUT) {
             Ok(result) => result,
             Err(_) => {
                 self.live.store(false, Ordering::Release);
+                let _ = self.wake.notify();
                 Err(error())
             }
         }
@@ -259,6 +299,7 @@ impl InputSink for Sink {
 impl Drop for Sink {
     fn drop(&mut self) {
         self.live.store(false, Ordering::Release);
+        let _ = self.wake.notify();
     }
 }
 
@@ -565,31 +606,47 @@ impl Actor {
     }
 }
 
-fn poll(context: &ei::Context, writable: bool) -> Result<(), DesktopError> {
-    let mut fds = [PollFd::new(
-        context,
-        PollFlags::IN
-            | if writable {
-                PollFlags::OUT
-            } else {
-                PollFlags::empty()
-            },
-    )];
-    rustix::event::poll(
-        &mut fds,
-        Some(&rustix::time::Timespec {
-            tv_sec: 0,
-            tv_nsec: 10_000_000,
-        }),
-    )
-    .map_err(|_| error())?;
-    if fds[0]
-        .revents()
-        .intersects(PollFlags::ERR | PollFlags::NVAL | PollFlags::HUP)
-    {
-        return Err(error());
+fn poll(
+    context: &ei::Context,
+    writable: bool,
+    wake: &Wake,
+    deadline: Option<Instant>,
+) -> Result<(), DesktopError> {
+    loop {
+        let mut fds = [
+            PollFd::new(
+                context,
+                PollFlags::IN
+                    | if writable {
+                        PollFlags::OUT
+                    } else {
+                        PollFlags::empty()
+                    },
+            ),
+            PollFd::new(wake, PollFlags::IN),
+        ];
+        // Recompute from the original absolute deadline after an interruption;
+        // a signal can never grant an expired request another timeout period.
+        let timeout: Option<rustix::time::Timespec> = deadline
+            .map(|end| end.saturating_duration_since(Instant::now()).try_into())
+            .transpose()
+            .map_err(|_| error())?;
+        match rustix::event::poll(&mut fds, timeout.as_ref()) {
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => return Err(error()),
+            Ok(_) => {}
+        }
+        if fds.iter().any(|fd| {
+            fd.revents()
+                .intersects(PollFlags::ERR | PollFlags::NVAL | PollFlags::HUP)
+        }) {
+            return Err(error());
+        }
+        if fds[1].revents().contains(PollFlags::IN) {
+            wake.drain()?;
+        }
+        return Ok(());
     }
-    Ok(())
 }
 
 fn flush(context: &ei::Context) -> Result<bool, DesktopError> {
@@ -607,6 +664,7 @@ fn run(
     stop: &AtomicBool,
     ready: &AtomicBool,
     era: &AtomicU64,
+    wake: &Wake,
 ) -> Result<(), DesktopError> {
     let context = ei::Context::new(UnixStream::from(fd)).map_err(|_| error())?;
     let mut handshake =
@@ -616,7 +674,10 @@ fn run(
         if stop.load(Ordering::Acquire) || Instant::now() >= end {
             return Err(error());
         }
-        poll(&context, flush(&context)?)?;
+        poll(&context, flush(&context)?, wake, Some(end))?;
+        if stop.load(Ordering::Acquire) {
+            return Err(error());
+        }
         context.read().map_err(|_| error())?;
         let mut response = None;
         while let Some(event) = context.pending_event() {
@@ -644,14 +705,11 @@ fn run(
     let mut pending: Option<Pending> = None;
     // Diagnostic-only target, capped per actor lifetime. No input payloads.
     let mut timing_samples = 0_u32;
-    while !stop.load(Ordering::Acquire) {
+    'running: while !stop.load(Ordering::Acquire) {
         check_pending(&mut pending, era.load(Ordering::Acquire), Instant::now())?;
-        actor.release_closed()?;
-        let writable = flush(&actor.context)?;
-        if !writable && let Some(pending) = &mut pending {
-            pending.flushed = true;
-        }
-        poll(&actor.context, writable)?;
+        // A socket read may have buffered EI events beyond the completed
+        // handshake. Drain them, and flush their generated requests, before
+        // waiting for another kernel-readiness edge.
         actor.events(era)?;
         let available = actor.ready();
         ready.store(available, Ordering::Release);
@@ -676,44 +734,69 @@ fn run(
             // A canceled, already-flushed action is never replayed or ACKed.
             // Its actual sync callback has now drained, so fresh leases can run.
         }
+        let mut queued_work = false;
         if pending.is_none() {
-            match requests.try_recv() {
-                Ok(request) => {
-                    if !available
-                        || !request.live.load(Ordering::Acquire)
-                        || request.era != era.load(Ordering::Acquire)
-                        || Instant::now() >= request.deadline
-                    {
-                        let _ = request.reply.try_send(Err(error()));
-                        continue;
+            // Drain refused queue entries while the coalesced notification is
+            // consumed. Bound the batch so a noisy caller cannot starve EI I/O.
+            for index in 0..REQUEST_CAPACITY {
+                queued_work = index + 1 == REQUEST_CAPACITY;
+                match requests.try_recv() {
+                    Ok(request) => {
+                        if stop.load(Ordering::Acquire)
+                            || !available
+                            || !request.live.load(Ordering::Acquire)
+                            || request.era != era.load(Ordering::Acquire)
+                            || Instant::now() >= request.deadline
+                        {
+                            let _ = request.reply.try_send(Err(error()));
+                            continue;
+                        }
+                        let applied_at = Instant::now();
+                        let queue_us = applied_at
+                            .duration_since(request.deadline - INPUT_TIMEOUT)
+                            .as_micros();
+                        if let Err(error) = actor.apply(&request) {
+                            let _ = request.reply.try_send(Err(error));
+                            continue;
+                        }
+                        let done = Rc::new(Cell::new(false));
+                        let mark = done.clone();
+                        let callback = actor.converter.connection().connection().sync(1);
+                        actor
+                            .converter
+                            .add_callback_handler(callback, move |_| mark.set(true));
+                        pending = Some(Pending {
+                            applied_at,
+                            queue_us,
+                            request,
+                            done,
+                            flushed: false,
+                            canceled_until: None,
+                        });
+                        queued_work = false;
+                        break;
                     }
-                    let applied_at = Instant::now();
-                    let queue_us = applied_at
-                        .duration_since(request.deadline - INPUT_TIMEOUT)
-                        .as_micros();
-                    if let Err(error) = actor.apply(&request) {
-                        let _ = request.reply.try_send(Err(error));
-                        continue;
+                    Err(mpsc::TryRecvError::Empty) => {
+                        queued_work = false;
+                        break;
                     }
-                    let done = Rc::new(Cell::new(false));
-                    let mark = done.clone();
-                    let callback = actor.converter.connection().connection().sync(1);
-                    actor
-                        .converter
-                        .add_callback_handler(callback, move |_| mark.set(true));
-                    pending = Some(Pending {
-                        applied_at,
-                        queue_us,
-                        request,
-                        done,
-                        flushed: false,
-                        canceled_until: None,
-                    });
+                    Err(mpsc::TryRecvError::Disconnected) => break 'running,
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
+        check_pending(&mut pending, era.load(Ordering::Acquire), Instant::now())?;
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let writable = flush(&actor.context)?;
+        if !writable && let Some(pending) = &mut pending {
+            pending.flushed = true;
+        }
+        let deadline = pending
+            .as_ref()
+            .map(|pending| pending.canceled_until.unwrap_or(pending.request.deadline))
+            .or_else(|| queued_work.then(Instant::now));
+        poll(&actor.context, writable, wake, deadline)?;
     }
     // Closing this EIS peer releases its virtual-device holds in the compositor;
     // it has no ownership over another application's (e.g. Deskflow) devices.
@@ -723,6 +806,55 @@ fn run(
 #[cfg(test)]
 mod exit_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_poll_wakes_for_local_work_then_obeys_the_original_deadline() {
+        let (client, _silent_peer) = UnixStream::pair().unwrap();
+        let wake = Wake::new().unwrap();
+        let notified = wake.clone();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let context = ei::Context::new(client).unwrap();
+            entered.send(()).unwrap();
+            poll(&context, false, &notified, None).unwrap();
+            // The coalesced notifications were consumed. No periodic 10 ms
+            // timeout may masquerade as another local or native event.
+            let end = Instant::now() + Duration::from_millis(100);
+            poll(&context, false, &notified, Some(end)).unwrap();
+            assert!(Instant::now() >= end);
+        });
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!worker.is_finished());
+        wake.notify().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notifications_queued_before_native_poll_are_coalesced_without_losing_the_wake() {
+        let (client, _silent_peer) = UnixStream::pair().unwrap();
+        let wake = Wake::new().unwrap();
+        for _ in 0..REQUEST_CAPACITY {
+            wake.notify().unwrap();
+        }
+        let worker = tokio::task::spawn_blocking(move || {
+            let context = ei::Context::new(client).unwrap();
+            poll(&context, false, &wake, None).unwrap();
+            let end = Instant::now() + Duration::from_millis(100);
+            poll(&context, false, &wake, Some(end)).unwrap();
+            assert!(Instant::now() >= end);
+        });
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn input_frames_share_the_os_monotonic_epoch() {
@@ -786,10 +918,12 @@ mod exit_tests {
 
     #[test]
     fn input_worker_unwind_seals_old_leases_and_readiness() {
+        let closed = CancellationToken::new();
         let ready = AtomicBool::new(true);
         let stop = AtomicBool::new(false);
         let result = std::panic::catch_unwind(|| {
             let _exit = WorkerExit {
+                closed: &closed,
                 ready: &ready,
                 stop: &stop,
             };
@@ -798,5 +932,6 @@ mod exit_tests {
         assert!(result.is_err());
         assert!(!ready.load(Ordering::Acquire));
         assert!(stop.load(Ordering::Acquire));
+        assert!(closed.is_cancelled());
     }
 }
