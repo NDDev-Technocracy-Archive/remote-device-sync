@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rds_core::local::{Command, ErrorCode, Reply, Request, Response, SessionId, VERSION};
+use rds_core::local::{
+    CAPABILITIES_VERSION, Command, ErrorCode, ManagerCapabilities, Reply, Request, Response,
+    SessionId, VERSION,
+};
 use rds_net::{Connection, Endpoint};
 use rds_net::{read_frame, write_frame};
 use tokio::io::AsyncReadExt;
@@ -299,7 +302,36 @@ async fn serve(
     } else {
         OPERATION_TIMEOUT
     };
-    let result = if request.version != VERSION {
+    let request_version = request.version;
+    let capability_profile = request_version == CAPABILITIES_VERSION;
+    let response_version = if capability_profile {
+        CAPABILITIES_VERSION
+    } else {
+        VERSION
+    };
+    let operation = async {
+        if capability_profile {
+            if !matches!(request.command, Command::List) {
+                return Err(ErrorCode::InvalidRequest);
+            }
+            let instance = state::lock(&shared)?.instance;
+            return Ok(Output::reply(Reply::Capabilities(ManagerCapabilities {
+                instance,
+                native_clipboard_proxy: false,
+            })));
+        }
+        execute(
+            request.command,
+            &shared,
+            &endpoint,
+            directory,
+            streams,
+            transfers,
+            &events,
+        )
+        .await
+    };
+    let result = if request_version != VERSION && !capability_profile {
         Err(ErrorCode::Version)
     } else {
         // EOF means the caller canceled; extra request bytes are a protocol
@@ -307,11 +339,11 @@ async fn serve(
         tokio::select! {
             biased;
             _ = stream.read(&mut probe) => return Ok(()),
-            result = tokio::time::timeout(timeout, execute(request.command, &shared, &endpoint, directory, streams, transfers, &events)) => result.unwrap_or(Err(ErrorCode::Timeout)),
+            result = tokio::time::timeout(timeout, operation) => result.unwrap_or(Err(ErrorCode::Timeout)),
         }
     };
     let response = Response {
-        version: VERSION,
+        version: response_version,
         result: result.as_ref().map(|o| o.reply.clone()).map_err(|e| *e),
     };
     tokio::time::timeout(PRELUDE_TIMEOUT, write_frame(&mut stream, &response))
@@ -581,6 +613,38 @@ impl Client {
         Self {
             directory: directory.into(),
         }
+    }
+
+    /// Probe code capabilities without selecting, connecting or replaying a
+    /// service command. Only a typed v5 version refusal means unsupported;
+    /// EOF, incompatible replies and transport/native errors remain errors.
+    pub async fn capabilities(&self) -> Result<Option<ManagerCapabilities>, Error> {
+        tokio::time::timeout(PRELUDE_TIMEOUT, async {
+            let mut stream = socket::connect(&self.directory).await?;
+            write_frame(
+                &mut stream,
+                &Request {
+                    version: CAPABILITIES_VERSION,
+                    command: Command::List,
+                },
+            )
+            .await?;
+            let response: Response = read_frame(&mut stream).await?;
+            let mut trailing = [0];
+            if stream.read(&mut trailing).await? != 0 {
+                return Err(Error::Protocol);
+            }
+            match (response.version, response.result) {
+                (CAPABILITIES_VERSION, Ok(Reply::Capabilities(capabilities))) => {
+                    Ok(Some(capabilities))
+                }
+                (VERSION, Err(ErrorCode::Version)) => Ok(None),
+                (CAPABILITIES_VERSION | VERSION, Err(error)) => Err(error.into()),
+                _ => Err(Error::Protocol),
+            }
+        })
+        .await
+        .map_err(|_| ErrorCode::Timeout)?
     }
 
     async fn exchange(&self, command: Command) -> Result<(Reply, UnixStream), Error> {

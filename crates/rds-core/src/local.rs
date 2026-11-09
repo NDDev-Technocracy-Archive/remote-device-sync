@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 /// Wire version 5 adds the managed desktop channel (`Desktop`,
 /// `DesktopDown`/`DesktopUp`).
 pub const VERSION: u16 = 5;
+/// Explicit read-only capability profile. Its request uses the frozen List
+/// command so a v5 manager can return its typed version refusal before work.
+pub const CAPABILITIES_VERSION: u16 = 6;
 pub const MAX_SESSIONS: usize = 32;
 pub const TCP_CHUNK: usize = 16 * 1024;
 /// Bound on one encoded desktop frame payload on the local channel — the
@@ -258,6 +261,14 @@ pub struct Response {
     pub result: Result<Reply, ErrorCode>,
 }
 
+/// Manager code support, not remote service authority or native OS consent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagerCapabilities {
+    pub instance: SessionId,
+    /// True only once the native provider proxy/lease RPC is implemented.
+    pub native_clipboard_proxy: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
     Snapshot(Snapshot),
@@ -291,6 +302,8 @@ pub enum Reply {
     DesktopEventsOpened {
         route: SessionId,
     },
+    /// Emitted only in the explicit capability profile, never to v5 callers.
+    Capabilities(ManagerCapabilities),
 }
 
 /// Stable reasons, with no upstream error, address, path or credential payload.
@@ -574,6 +587,13 @@ mod tests {
                 9,
             ),
             (Reply::DesktopEventsOpened { route: id }, 10),
+            (
+                Reply::Capabilities(ManagerCapabilities {
+                    instance: id,
+                    native_clipboard_proxy: false,
+                }),
+                11,
+            ),
         ] {
             let bytes = postcard::to_stdvec(&reply).unwrap();
             assert_eq!(bytes[0], tag);
