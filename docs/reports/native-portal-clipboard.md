@@ -9,7 +9,11 @@ Owner signals update type metadata without reading contents. Requested bodies
 use owned nonblocking descriptors and immutable bytes, without a staging file.
 Safe Tokio pipe/socket registration replaces direct unsafe reactor registration.
 Actual FIFO checks cover multichunk content, directional rejection and a native
-peer write proving that descriptor closure precedes original-context cleanup.
+descriptor check proving that closure precedes original-context cleanup.
+The later [refusal qualification](clipboard-refusal.md) replaces the original
+peer-EPIPE assertion with a direct local descriptor identity check. A duplicated
+open description, including one temporarily inherited across fork before exec,
+can keep a peer write successful after the local descriptor closes.
 The process body allowance survives physical-owner replacement while any old
 operation retains credit. Descriptor cleanup precedes purpose, body-credit and
 drain acknowledgement. The former periodic cleanup tick is removed; inactive

@@ -25,6 +25,166 @@ impl RequestedBody for Streams {
     }
 }
 
+#[tokio::test]
+async fn peer_refusal_before_body_poll_is_exact_sticky_and_does_not_close_the_connection() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for backend in [rds_net::Backend::Iroh, rds_net::Backend::Noq] {
+            let pair = Pair::backend(backend).await;
+            let (left, right) = pair.owners();
+            let incoming = left
+                .request(
+                    1,
+                    PayloadKind::Representation(Format::TextUtf8),
+                    Some(2),
+                    CancellationToken::new(),
+                )
+                .unwrap();
+            let id = incoming.request().id;
+            assert!(matches!(
+                left.refused(
+                    TransferId {
+                        desktop: [29; 16],
+                        ..id
+                    },
+                    Failure::Unavailable
+                ),
+                Err(Error::Contract(_))
+            ));
+            assert!(
+                !left
+                    .refused(
+                        TransferId {
+                            request: id.request + 1,
+                            ..id
+                        },
+                        Failure::Unavailable
+                    )
+                    .unwrap()
+            );
+            assert!(left.refused(id, Failure::Unsupported).unwrap());
+            assert!(!left.refused(id, Failure::Unavailable).unwrap());
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), incoming.bytes())
+                    .await
+                    .unwrap(),
+                Err(Error::PeerRefused(Failure::Unsupported))
+            ));
+            assert_eq!(left.incoming.available_permits(), 2);
+            assert!(!left.refused(id, Failure::Unavailable).unwrap());
+
+            let incoming = left
+                .request(
+                    2,
+                    PayloadKind::Representation(Format::TextUtf8),
+                    Some(2),
+                    CancellationToken::new(),
+                )
+                .unwrap();
+            let request = incoming.request().clone();
+            let (sent, received) = tokio::join!(
+                async {
+                    right
+                        .response(&request)
+                        .unwrap()
+                        .send_bytes(Bytes::from_static(b"ok"))
+                        .await
+                        .unwrap()
+                },
+                incoming.bytes(),
+            );
+            let received = received.unwrap();
+            assert_eq!(received.receipt, sent);
+            assert_eq!(received.bytes, b"ok"[..]);
+            assert_eq!(received.refusal(), None);
+            let id = received.receipt.id;
+            assert!(left.refused(id, Failure::Expired).unwrap());
+            assert_eq!(received.refusal(), Some(Failure::Expired));
+            assert_eq!(received.refused().await, Failure::Expired);
+            drop(received);
+            assert_eq!(left.incoming.available_permits(), 2);
+            assert!(!left.refused(id, Failure::Unavailable).unwrap());
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn peer_refusal_stops_an_accepted_wire_and_repeated_reads_remain_errors() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for backend in [rds_net::Backend::Iroh, rds_net::Backend::Noq] {
+            let pair = Pair::backend(backend).await;
+            let (left, right) = pair.owners();
+            let mut incoming = left
+                .request(
+                    1,
+                    PayloadKind::Representation(Format::TextUtf8),
+                    Some(2),
+                    CancellationToken::new(),
+                )
+                .unwrap();
+            let id = incoming.request().id;
+            let sending = right.open(id).await.unwrap();
+            let mut wire = incoming.accept().await.unwrap();
+            assert!(left.refused(id, Failure::Unavailable).unwrap());
+            for _ in 0..2 {
+                let error = wire.read(&mut [0; 1]).await.unwrap_err();
+                assert!(matches!(
+                    error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<Error>()),
+                    Some(Error::PeerRefused(Failure::Unavailable))
+                ));
+            }
+            drop(wire);
+            drop(incoming);
+            drop(sending);
+            assert_eq!(left.incoming.available_permits(), 2);
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_peer_refusal_interrupts_a_selected_file_reader_and_its_completion() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for backend in [rds_net::Backend::Iroh, rds_net::Backend::Noq] {
+            let pair = Pair::backend(backend).await;
+            let (left, right) = pair.owners();
+            let right = Arc::new(right);
+            let incoming = left
+                .request(
+                    1,
+                    PayloadKind::File([7; 16]),
+                    Some(64 * 1024 * 1024),
+                    CancellationToken::new(),
+                )
+                .unwrap();
+            let request = incoming.request().clone();
+            let id = request.id;
+            let sending =
+                tokio::spawn(async move { right.send_file(&request, &Generated::new(8)).await });
+            let mut read = incoming.file().await.unwrap();
+            assert_eq!(read.reader.read(&mut [0; 1]).await.unwrap(), 1);
+            assert!(left.refused(id, Failure::Unavailable).unwrap());
+            for _ in 0..2 {
+                assert!(read.reader.read(&mut [0; 1]).await.is_err());
+            }
+            assert!(matches!(
+                read.complete.await,
+                Err(native::Error::Unavailable)
+            ));
+            drop(read.reader);
+            assert!(sending.await.unwrap().is_err());
+            assert_eq!(left.incoming.available_permits(), 2);
+            assert!(!left.refused(id, Failure::Unavailable).unwrap());
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_request_ids_follow_committed_metadata_on_both_transports() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
