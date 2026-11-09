@@ -22,7 +22,17 @@ six existing Windows-only dependency edges from windows-sys 0.61.2 to the
 already resolved 0.52.0; this does not establish Windows support.
 
 The enabled native graphs contain 567 Linux and 510 Mac external package/version
-pairs. Build-free checks pass. Native compilation and behavior qualification of
-the final source remain pending; individual package qualification does not prove
-the entire consumer set. No installed runtime, permissions, device pin or build
-provider was changed.
+pairs. Build-free checks and all six workflows pass for source
+`555a19c9dbe532145398cd7f9a7252206cd07edc`, merged by PR #240. Native run
+42583768154 checks the same tree, `4674bdd865ae1c7de9e9fd708786b2553c12dfe9`:
+Linux passes 241 desktop cases and two real-agent handshakes, Mac passes 208
+and two. Both execute all 25 audio cases, including real Opus packets and PCM
+formats. Platform-dependent exclusions remain explicit.
+
+Artifact 13658823520 supplies the optimized AppKit probe
+`594ee2bf4672bca0e265c77a488047396afcf2751dfc98a06d263c1aa3653109`.
+Strict signature verification and all 18 isolated native cases pass on both
+physical Apple Silicon devices. Both logs retain the
+`sandbox_extension_consume failed: 1` warning. These native-owner checks do not
+establish receiving-application clipboard success. No installed runtime,
+permissions, device pin or build provider was changed.
