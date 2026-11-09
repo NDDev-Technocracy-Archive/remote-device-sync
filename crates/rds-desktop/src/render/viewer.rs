@@ -948,7 +948,7 @@ struct SessionView {
     pointer: bool,
     pointer_point: Option<(f64, f64)>,
     native: Option<Arc<super::native_clipboard::Clipboard>>,
-    publication: Option<(Option<u64>, super::native_clipboard::Pending<i64>)>,
+    publication: Option<(u64, super::native_clipboard::Pending<i64>)>,
     request_generation: Option<super::native_clipboard::Pending<i64>>,
 }
 impl Drop for SessionView {
@@ -957,13 +957,6 @@ impl Drop for SessionView {
     }
 }
 impl SessionView {
-    fn native_purpose(&self) -> crate::clipboard::NativeLifetime {
-        Arc::new((
-            self.handle.clone(),
-            lock(&self.handle.state).report.session_epoch,
-            self.tab,
-        ))
-    }
     fn native_generation(&self) -> Option<i64> {
         self.native.as_ref().and_then(|native| native.generation())
     }
@@ -980,7 +973,7 @@ impl SessionView {
             .take()
             .expect("completed publication exists");
         let mut state = lock(&self.handle.state);
-        let current = state.clipboard.publication_scope().0 == claim;
+        let current = state.clipboard.owns_publication(claim);
         let published = state
             .clipboard
             .publication_finished(claim, result.as_ref().ok().copied());
@@ -1007,10 +1000,26 @@ impl SessionView {
         let Some(generation) = native.generation() else {
             return published;
         };
-        let text = lock(&self.handle.state).clipboard.publish(generation);
-        if let Some(text) = text {
-            let (claim, scope) = lock(&self.handle.state).clipboard.publication_scope();
-            match native.publish(generation, text, scope, self.native_purpose()) {
+        let prepared = {
+            let mut state = lock(&self.handle.state);
+            let epoch = state.report.session_epoch;
+            state
+                .clipboard
+                .prepare_publication(generation)
+                .map(|publication| {
+                    let purpose: crate::clipboard::NativeLifetime =
+                        Arc::new((self.handle.clone(), epoch, self.tab));
+                    (publication, purpose)
+                })
+        };
+        if let Some((publication, purpose)) = prepared {
+            let claim = publication.claim;
+            match native.publish(
+                publication.generation,
+                publication.text,
+                publication.scope,
+                purpose,
+            ) {
                 Ok(pending) => self.publication = Some((claim, pending)),
                 Err(error) => {
                     lock(&self.handle.state)

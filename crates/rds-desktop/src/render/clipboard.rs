@@ -6,10 +6,7 @@ use crate::{
 };
 use rds_core::{ClipboardFormat, DesktopControl};
 use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -22,47 +19,98 @@ pub(super) struct CopySnapshot {
     pub published_generation: Option<i64>,
 }
 #[derive(Default)]
+struct CopyState {
+    epoch: u64,
+    status: Option<CopySnapshot>,
+    scope: tokio_util::sync::CancellationToken,
+}
+#[derive(Default)]
 pub(super) struct CopyFence {
-    epoch: AtomicU64,
-    status: Mutex<Option<CopySnapshot>>,
-    scope: Mutex<tokio_util::sync::CancellationToken>,
+    state: Mutex<CopyState>,
 }
 impl CopyFence {
-    fn scope(&self) -> tokio_util::sync::CancellationToken {
-        self.scope
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-    fn replace_scope(&self) {
-        let mut scope = self
-            .scope
+    fn current(&self, claim: Option<u64>) -> bool {
+        let state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = std::mem::replace(&mut *scope, tokio_util::sync::CancellationToken::new());
+        claim.is_none_or(|claim| claim == state.epoch)
+    }
+    fn scope(&self, claim: Option<u64>) -> tokio_util::sync::CancellationToken {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if claim == Some(state.epoch) {
+            return state.scope.clone();
+        }
+        let canceled = tokio_util::sync::CancellationToken::new();
+        canceled.cancel();
+        canceled
+    }
+    fn claim(&self) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.epoch = state.epoch.wrapping_add(1);
+        let epoch = state.epoch;
+        let previous =
+            std::mem::replace(&mut state.scope, tokio_util::sync::CancellationToken::new());
+        state.status = Some(CopySnapshot {
+            epoch,
+            pending: true,
+            published_generation: None,
+        });
+        drop(state);
         previous.cancel();
+        epoch
+    }
+    fn fail(&self, claim: Option<u64>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if claim != Some(state.epoch) {
+            return;
+        }
+        state.status = Some(CopySnapshot {
+            epoch: state.epoch,
+            pending: false,
+            published_generation: None,
+        });
+        let scope = state.scope.clone();
+        drop(state);
+        scope.cancel();
     }
     pub(super) fn snapshot(&self) -> Option<CopySnapshot> {
-        *self
-            .status
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status
     }
     fn set(&self, claim: Option<u64>, pending: bool, published_generation: Option<i64>) {
-        let mut status = self
-            .status
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(epoch) = claim
-            && epoch == self.epoch.load(Ordering::Acquire)
+            && epoch == state.epoch
         {
-            *status = Some(CopySnapshot {
+            state.status = Some(CopySnapshot {
                 epoch,
                 pending,
                 published_generation,
             });
         }
     }
+}
+
+pub(super) struct Publication {
+    pub text: String,
+    pub generation: i64,
+    pub claim: u64,
+    pub scope: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Default)]
@@ -87,27 +135,16 @@ impl Clipboard {
         }
     }
     fn current(&self) -> bool {
-        self.claim
-            .is_none_or(|claim| claim == self.arbiter.epoch.load(Ordering::Acquire))
+        self.arbiter.current(self.claim)
     }
     fn claim(&mut self) {
-        self.arbiter.replace_scope();
-        self.claim = Some(
-            self.arbiter
-                .epoch
-                .fetch_add(1, Ordering::AcqRel)
-                .wrapping_add(1),
-        );
-        self.arbiter.set(self.claim, true, None);
+        self.claim = Some(self.arbiter.claim());
     }
     pub(super) fn published(&self, generation: i64) {
         self.arbiter.set(self.claim, false, Some(generation));
     }
     pub(super) fn publication_failed(&self) {
-        if self.claim.is_some() && self.current() {
-            self.arbiter.scope().cancel();
-        }
-        self.arbiter.set(self.claim, false, None);
+        self.arbiter.fail(self.claim);
     }
     pub(super) fn needs_work(&self) -> bool {
         self.publishing.is_some()
@@ -292,40 +329,58 @@ impl Clipboard {
             self.authorized = false;
         }
     }
-    pub(super) fn publish(&mut self, generation: i64) -> Option<String> {
-        let value = self.complete.take()?;
-        // A newer explicit Copy/Cut supersedes this in-flight snapshot. Drain
-        // it without changing the pasteboard, then request the latest offer.
-        let permitted = self.authorized
-            && self.current()
-            && self.generation == Some(generation)
-            && self.copy_intent.is_none();
-        if permitted {
-            self.publishing = self.claim;
-        } else {
+    pub(super) fn prepare_publication(&mut self, generation: i64) -> Option<Publication> {
+        let text = self.complete.take()?;
+        let Some(claim) = self.claim else {
             self.authorized = false;
             self.generation = None;
+            return None;
+        };
+        let scope = self.arbiter.scope(Some(claim));
+        // Data, identity and cancellation belong to this exact admission.
+        // Reusing the model cannot attach old bytes to a later copy scope.
+        let permitted = self.authorized
+            && self.current()
+            && !scope.is_cancelled()
+            && self.generation == Some(generation)
+            && self.copy_intent.is_none();
+        if !permitted {
+            self.authorized = false;
+            self.generation = None;
+            if self.copy_intent.is_none() {
+                self.publication_failed();
+            }
+            return None;
         }
-        permitted.then_some(value)
+        self.publishing = Some(claim);
+        Some(Publication {
+            text,
+            generation,
+            claim,
+            scope,
+        })
     }
     pub(super) fn arbiter(&self) -> Arc<CopyFence> {
         self.arbiter.clone()
     }
-    pub(super) fn publication_scope(&self) -> (Option<u64>, tokio_util::sync::CancellationToken) {
-        (self.claim, self.arbiter.scope())
+    #[cfg(test)]
+    fn publication_scope(&self) -> (u64, tokio_util::sync::CancellationToken) {
+        (
+            self.claim.expect("fixture has a claimed copy"),
+            self.arbiter.scope(self.claim),
+        )
     }
-    pub(super) fn publication_finished(
-        &mut self,
-        claim: Option<u64>,
-        generation: Option<i64>,
-    ) -> bool {
-        if claim.is_none() || self.publishing != claim {
+    pub(super) fn owns_publication(&self, claim: u64) -> bool {
+        self.claim == Some(claim) && self.current()
+    }
+    pub(super) fn publication_finished(&mut self, claim: u64, generation: Option<i64>) -> bool {
+        if self.publishing != Some(claim) {
             return false;
         }
         self.publishing = None;
         self.authorized = false;
         self.generation = None;
-        if self.claim != claim || !self.current() {
+        if !self.owns_publication(claim) {
             return false;
         }
         match generation {
@@ -363,7 +418,13 @@ mod tests {
         clipboard.offer(8, ClipboardFormat::TextUtf8, 4);
         clipboard.request(1).unwrap();
         clipboard.chunk(8, 0, 4, b"text".to_vec()).unwrap();
-        assert_eq!(clipboard.publish(1).as_deref(), Some("text"));
+        assert_eq!(
+            clipboard
+                .prepare_publication(1)
+                .map(|publication| publication.text)
+                .as_deref(),
+            Some("text")
+        );
         let (claim, scope) = clipboard.publication_scope();
         assert!(!scope.is_cancelled());
         assert!(clipboard.handoff_pending(1));
@@ -389,6 +450,25 @@ mod tests {
         assert!(!current.is_cancelled());
     }
     #[test]
+    fn prepared_bytes_keep_their_original_scope_when_the_model_is_reused() {
+        let mut clipboard = Clipboard::default();
+        clipboard.focus(true);
+        clipboard.copying(1);
+        clipboard.offer(8, ClipboardFormat::TextUtf8, 4);
+        clipboard.request(1).unwrap();
+        clipboard.chunk(8, 0, 4, b"text".to_vec()).unwrap();
+        let prepared = clipboard.prepare_publication(1).unwrap();
+        clipboard.reset();
+        clipboard.copying(2);
+        let (new_claim, current) = clipboard.publication_scope();
+        assert_ne!(prepared.claim, new_claim);
+        assert!(prepared.scope.is_cancelled());
+        assert!(!current.is_cancelled());
+        assert_eq!(prepared.text, "text");
+        assert!(!clipboard.publication_finished(prepared.claim, Some(3)));
+        assert!(!current.is_cancelled());
+    }
+    #[test]
     fn copy_in_another_window_supersedes_a_pending_reply_without_native_change() {
         let arbiter = Arc::new(CopyFence::default());
         let mut old = Clipboard::with_arbiter(arbiter.clone());
@@ -401,11 +481,16 @@ mod tests {
         new.focus(true);
         new.copying(17);
         old.chunk(1, 0, 3, b"old".to_vec()).unwrap();
-        assert!(old.publish(17).is_none());
+        assert!(old.prepare_publication(17).is_none());
         new.offer(2, ClipboardFormat::TextUtf8, 3);
         assert!(new.request(17).is_some());
         new.chunk(2, 0, 3, b"new".to_vec()).unwrap();
-        assert_eq!(new.publish(17).as_deref(), Some("new"));
+        assert_eq!(
+            new.prepare_publication(17)
+                .map(|publication| publication.text)
+                .as_deref(),
+            Some("new")
+        );
         new.reset();
         new.focus(true);
         new.copying(18);
@@ -428,7 +513,12 @@ mod tests {
         assert!(old.handoff_pending(17));
         old.chunk(1, 0, 3, b"abc".to_vec()).unwrap();
         assert!(old.handoff_pending(17));
-        assert_eq!(old.publish(17).as_deref(), Some("abc"));
+        assert_eq!(
+            old.prepare_publication(17)
+                .map(|publication| publication.text)
+                .as_deref(),
+            Some("abc")
+        );
         assert!(!old.handoff_pending(18));
         old.offer(2, ClipboardFormat::TextUtf8, 3);
         assert!(!old.needs_work());
@@ -448,7 +538,7 @@ mod tests {
                 old.reset(); // New explicit Copy in another tab revokes the old lease.
             }
             old.chunk(1, 0, 3, b"old".to_vec()).unwrap();
-            assert!(old.publish(18).is_none());
+            assert!(old.prepare_publication(18).is_none());
             assert!(!old.handoff_pending(18));
         }
     }
@@ -463,7 +553,7 @@ mod tests {
         c.requested.as_mut().unwrap().2 = Instant::now() - Duration::from_secs(30);
         assert!(!c.handoff_pending(17));
         c.chunk(1, 0, 3, b"old".to_vec()).unwrap();
-        assert!(c.publish(17).is_none());
+        assert!(c.prepare_publication(17).is_none());
         c.focus(true);
         c.copying(17);
         c.copy_intent.as_mut().unwrap().1 = Instant::now() - COPY_HANDOFF;
@@ -479,7 +569,15 @@ mod tests {
         assert!(c.needs_work());
         assert!(c.request(17).is_some());
         c.chunk(1, 0, 3, b"abc".to_vec()).unwrap();
-        assert_eq!(c.publish(17), Some("abc".into()));
+        assert_eq!(
+            c.prepare_publication(17)
+                .map(|publication| publication.text),
+            Some("abc".into())
+        );
+        assert!(c.needs_work());
+        assert!(c.handoff_pending(17));
+        let claim = c.publication_scope().0;
+        assert!(c.publication_finished(claim, Some(18)));
         c.offer(2, ClipboardFormat::TextUtf8, 0);
         assert!(c.request(17).is_none());
         assert!(!c.needs_work());
@@ -496,7 +594,7 @@ mod tests {
                 c.copy_intent = Some((Some(17), Instant::now() - COPY_HANDOFF));
             }
             assert!(c.request(if expired { 17 } else { 18 }).is_none());
-            assert!(c.publish(17).is_none());
+            assert!(c.prepare_publication(17).is_none());
             c.copying(18); // Background callers cannot arm another handoff.
             c.offer(2, ClipboardFormat::TextUtf8, 0);
             assert!(c.request(18).is_none());
@@ -512,13 +610,16 @@ mod tests {
         c.focus(false);
         c.offer(2, ClipboardFormat::TextUtf8, 3);
         c.chunk(1, 0, 3, b"old".to_vec()).unwrap();
-        assert!(c.publish(9).is_none());
+        assert!(c.prepare_publication(9).is_none());
         assert!(matches!(
             c.request(9),
             Some(DesktopControl::ClipboardRequest { id: 2, .. })
         ));
         c.chunk(2, 0, 3, b"new".to_vec()).unwrap();
-        assert_eq!(c.publish(9), Some("new".into()));
+        assert_eq!(
+            c.prepare_publication(9).map(|publication| publication.text),
+            Some("new".into())
+        );
     }
     #[test]
     fn background_windows_and_unsolicited_chunks_never_publish() {
@@ -527,12 +628,15 @@ mod tests {
         assert!(c.request(1).is_none());
         c.focus(true);
         assert!(c.chunk(7, 0, 3, b"abc".to_vec()).is_err());
-        assert!(c.publish(1).is_none());
+        assert!(c.prepare_publication(1).is_none());
         c.offer(7, ClipboardFormat::TextUtf8, 3);
         assert!(c.request(1).is_some());
         c.focus(false);
         c.chunk(7, 0, 3, b"abc".to_vec()).unwrap();
-        assert_eq!(c.publish(1), Some("abc".into()));
+        assert_eq!(
+            c.prepare_publication(1).map(|publication| publication.text),
+            Some("abc".into())
+        );
     }
     #[test]
     fn complete_utf8_requires_exact_offer_and_unchanged_native_generation() {
@@ -545,8 +649,12 @@ mod tests {
             assert!(c.chunk(id, 0, 9, vec![0; 9]).is_err());
             c.chunk(id, 0, 4, "🖥".as_bytes()[..2].to_vec()).unwrap();
             c.chunk(id, 2, 4, "🖥".as_bytes()[2..].to_vec()).unwrap();
-            assert_eq!(c.publish(final_generation).is_some(), result);
-            assert!(c.publish(final_generation).is_none());
+            assert_eq!(c.prepare_publication(final_generation).is_some(), result);
+            assert!(c.prepare_publication(final_generation).is_none());
+            if result {
+                let claim = c.publication_scope().0;
+                assert!(c.publication_finished(claim, Some(final_generation + 1)));
+            }
         }
         c.offer(3, ClipboardFormat::TextUtf8, MAX_TEXT_BYTES as u32 + 1);
         assert!(c.request(1).is_none());
@@ -560,13 +668,22 @@ mod tests {
         c.offer(2, ClipboardFormat::TextUtf8, 0);
         assert!(c.request(8).is_none());
         c.chunk(1, 0, 0, vec![]).unwrap();
-        assert_eq!(c.publish(8), Some(String::new()));
+        assert_eq!(
+            c.prepare_publication(8).map(|publication| publication.text),
+            Some(String::new())
+        );
+        assert!(
+            c.request(9).is_none(),
+            "publication has no native receipt yet"
+        );
+        let claim = c.publication_scope().0;
+        assert!(c.publication_finished(claim, Some(9)));
         assert!(matches!(
             c.request(9),
             Some(DesktopControl::ClipboardRequest { id: 2, .. })
         ));
         c.reset();
         assert!(c.request(9).is_none());
-        assert!(c.publish(9).is_none());
+        assert!(c.prepare_publication(9).is_none());
     }
 }

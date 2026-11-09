@@ -17,8 +17,10 @@ use crate::clipboard::{
     ownership::{Owner, Running},
 };
 
+#[cfg(feature = "host")]
+use crate::clipboard::ClipboardBackend;
 #[cfg(all(feature = "viewer", feature = "host"))]
-use crate::clipboard::{ClipboardBackend, native::Text};
+use crate::clipboard::native::Text;
 
 static POOL: OnceLock<Mutex<Weak<Core>>> = OnceLock::new();
 static NATIVE_OWNER: Semaphore = Semaphore::const_new(1);
@@ -197,7 +199,7 @@ impl Group {
     pub(crate) fn worker(
         &self,
         watching: bool,
-    ) -> Result<Box<dyn crate::clipboard::ClipboardBackend>, crate::DesktopError> {
+    ) -> Result<Box<dyn ClipboardBackend>, crate::DesktopError> {
         if !self.available() {
             return Err(desktop_error(Error::Unavailable));
         }
