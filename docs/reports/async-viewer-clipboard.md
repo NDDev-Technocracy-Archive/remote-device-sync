@@ -40,8 +40,24 @@ This refusal exposed a diagnostic defect: the matching outbound transfer kept
 waiting for Ready after its terminal error, causing repeated pending-clipboard
 incidents. The candidate now removes only the failed transfer, counts cancellation
 once, preserves other pending operations and displays a clipboard notice beside
-the connected session. Final-cut native and physical refusal qualification of
-this correction remain pending.
+the connected session.
+
+Integrated source `0a22bf9dc91f9ca5702d1b2b287439ca05b8a81f` passes all six
+workflows and is merged by PR #239. Native run 42587744100 passes Linux 251 and
+Mac 218 desktop cases, both real-agent handshakes on each, five Xvfb cases and
+25 audio cases per target, retaining both combined and viewer-only denied
+Clippy. The new refusal regression passes on both targets.
+
+The physical follow-up uses artifact 13661226476, CI source
+`255823c9a5e257282e99c3e8d1355011cc747e6f`, tree
+`aa4298799836c1bfa941cfe91db0347a1e1ab7fd` (identical to the PR source), and
+strict-signature-verified application executable
+`cbb1e4d81273a4c4fd30845def987cdc08599c1b94e17f3d1c83bf9cf0885734`.
+After observed application/window activation, the same peer refuses paste.
+Exactly one cancellation and zero pending transfers remain through nine further
+samples five seconds apart. There are no new incident writes after settling;
+the actual Chrome receiving field stays empty. This establishes terminal
+refusal and cleanup, while successful paste remains unqualified.
 
 A bounded keyless native-input example is retained separately from product
 packages. It attaches to an already admitted manager session and sends explicit
