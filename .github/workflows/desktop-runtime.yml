@@ -68,6 +68,7 @@ jobs:
           cargo clippy --locked -p rds-net --all-targets --features transport-noq -- -D warnings
           cargo test --locked -p rds-net --test protocol_offer
           cargo test --locked -p rds-net --features transport-noq --test protocol_offer --test alpn_selection
+          cargo test --locked -p rds-client --features transport-noq --test local_capabilities
       - name: Check isolated native X11 clipboard
         if: runner.os == 'Linux'
         run: |

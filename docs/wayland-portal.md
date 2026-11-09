@@ -126,6 +126,14 @@ pointer input is refused because this implementation scopes absolute regions.
 Optional Clipboard v1 access is requested on this same session before Start.
 Only a granted session advertises clipboard support; unsupported, refused or
 failed clipboard setup leaves capture/input usable and never probes Xwayland.
+Preparation logs distinguish proxy availability, unsupported protocol, request,
+signal subscription and activation failures. The single Start-result event
+records whether a restore token was supplied, the request succeeded, signal
+subscriptions were prepared and the portal actually granted clipboard access.
+These bounded status fields contain no token, selection or clipboard contents.
+An available Clipboard interface or successful request is not a grant; a false
+`clipboard_granted` result remains authoritative. Diagnostics do not reset saved
+permission, retry consent or establish why the portal refused access.
 One source-owned actor filters session signals and lends at most eight leases.
 It reads changes only while a controlling reverse-clipboard lease exists, skips
 its own selection ownership, retains the newest external owner and serves up to
