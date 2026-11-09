@@ -6,6 +6,7 @@ use rds_core::local::{
     CAPABILITIES_VERSION, Command, ErrorCode, ManagerCapabilities, Reply, Request, Response,
     SessionId, VERSION,
 };
+use rds_core::{HelloAck, StreamHello};
 use rds_net::{Backend, Endpoint, EndpointConfig, read_frame, write_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -151,6 +152,15 @@ async fn profile_discovery_preserves_a_selected_session_and_v5_operations() {
             let remote = remote.clone();
             async move {
                 let connection = remote.accept().await.unwrap().await.unwrap();
+                // A managed connection is admitted only after its authenticated
+                // peer completes the existing application-level Ping exchange.
+                let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+                let StreamHello::Ping { nonce } = read_frame(&mut recv).await.unwrap() else {
+                    panic!("unexpected fixture admission");
+                };
+                write_frame(&mut send, &HelloAck::Ok).await.unwrap();
+                send.write_all(&nonce.to_be_bytes()).await.unwrap();
+                send.finish().unwrap();
                 let _ = stopped.await;
                 connection.close(0u32.into(), b"capability fixture complete");
             }
