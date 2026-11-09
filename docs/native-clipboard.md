@@ -63,6 +63,8 @@ selection-transfer count and chunk size, transfer/timestamp deadlines,
 legacy owner-observation interval and bounded event batch. They are separate
 from native jobs and wire body concurrency. Unsupported schema versions and
 missing/unknown backend settings are refused rather than filled with defaults.
+Schema 3 additionally declares the portal FD chunk size, independently of the
+wire and X11 chunk settings. Its common profile remains compiled and strict.
 
 Native viewing and serving providers share the same weak process budget pool.
 Each selected descriptor retains that exact physical owner, independently of a
@@ -173,13 +175,22 @@ remain unsupported, so macOS source and receiver capabilities differ.
 
 `native_clipboard` runs against private named pasteboards. The first seven
 AppKit cases passed on physical Apple Silicon hosts using the exact PR probe
-artifact. The queued owner adds five cases, and the native file case reads an
+artifact. The queued owner covers native publication, cancellation and the
+text-wire adapter; the native file case reads an
 explicit NSURL selection after its pathname has been moved/replaced. Its held
 descriptor supplies the original bytes while the caller authority survives
 through completion. These probes do
 not read the general clipboard, change OS grants or establish cross-device paste
 acceptance. PR probe bytes are bound to their source tree and artifact digest;
 release provenance is emitted only for successful main producers.
+
+The text-wire adapter is shared by macOS and the consented portal provider.
+Its current metadata/read future belongs to the adapter, so cancellation of
+`next_change` by a control-input select cannot discard an admitted read or
+advance past its undelivered body. Close seals its owner and drops that waiter;
+the provider still drains the actual native job under its retained original.
+An explicit publication supersedes an undelivered read result. The AppKit owner
+refreshes a differing idle metadata cache before reporting a changed generation.
 
 Native API references: [NSPasteboard object reading](https://developer.apple.com/documentation/appkit/nspasteboard)
 and [NSURL resource scope](https://developer.apple.com/documentation/foundation/nsurl/startaccessingsecurityscopedresource()).
@@ -214,6 +225,31 @@ Native selection/property limits and deadlines come from the common profile.
 The event loop drains buffered events before polling and sleeps until a real
 native/job event or the nearest active transfer deadline. The new provider
 requires XFixes; the existing legacy observation fallback remains a distinct
-supported path. File reception/source URIs, Wayland providers, manager/GUI
+supported path. File reception/source URIs, viewer providers, manager/GUI
 integration and negotiated native mode remain unfinished and are not advertised
 by this increment.
+
+## Consented Wayland provider
+
+The existing combined RemoteDesktop session supplies the portal provider.
+Clipboard signal streams are prepared before Start and activated only after
+the portal grants clipboard access. Creating a per-session provider is an
+in-memory operation under the caller's admitted original context; it cannot
+request another consent session or fall back to X11. This is a hosting edge,
+not a screen-capture permission requirement for a clipboard-only viewer.
+
+Owner notifications carry bounded text/PNG type metadata. Bodies are read only
+on request through nonblocking owned descriptors. Published and received PNG
+bytes remain immutable; there is no payload cache or staging file. A process
+budget shared across physical portal replacements bounds native body work.
+Canceled waiters retain each queued or running operation's original context;
+descriptor cleanup precedes purpose, body-credit and drain acknowledgement.
+The owner sleeps on native signals, jobs and active transfers, without the
+old periodic cleanup tick.
+
+Read completion checks the observed native generation. Publication checks the
+expected observed generation before SetSelection; the portal has no atomic
+cross-client compare-and-set operation. Its method reply acknowledges native
+publication, not consumption by another application. File formats are absent
+from this provider's capabilities. Native host/manager/viewer negotiation and
+real application pastes on the desktop matrix remain separate acceptance steps.

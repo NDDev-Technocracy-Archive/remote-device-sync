@@ -9,6 +9,16 @@ use rds_core::clipboard::{Capabilities, FileSelection, Format, Limits, Represent
 use super::image::Png;
 mod destination;
 pub use destination::Destination;
+#[cfg(any(
+    all(target_os = "linux", feature = "portal"),
+    all(target_os = "macos", feature = "host")
+))]
+mod legacy;
+#[cfg(any(
+    all(target_os = "linux", feature = "portal"),
+    all(target_os = "macos", feature = "host")
+))]
+pub(crate) use legacy::Legacy;
 mod remote;
 pub use remote::RemoteFiles;
 
@@ -40,7 +50,14 @@ pub struct Policy {
     pub selected_file_descriptors: usize,
     /// Concurrent native body jobs, independent of transport stream credits.
     pub native_body_operations: usize,
+    pub portal: PortalPolicy,
     pub x11: X11Policy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortalPolicy {
+    pub selection_chunk_bytes: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -64,7 +81,7 @@ impl Policy {
     }
     pub fn validate(&self) -> Result<(), Error> {
         self.limits.validate()?;
-        if self.schema_version != 2
+        if self.schema_version != 3
             || !(5..=1000).contains(&self.watch_interval_ms)
             || !(100..=30_000).contains(&self.operation_timeout_ms)
             || !(1..=16 * rds_core::clipboard::TEXT_BYTES).contains(&self.native_uri_bytes)
@@ -72,6 +89,7 @@ impl Policy {
             || !(1..=64).contains(&self.pending_operations)
             || !(1..=4096).contains(&self.selected_file_descriptors)
             || !(1..=64).contains(&self.native_body_operations)
+            || !(1024..=1024 * 1024).contains(&self.portal.selection_chunk_bytes)
             || !(1..=64).contains(&self.x11.selection_transfers)
             || !(1024..=1024 * 1024).contains(&self.x11.selection_chunk_bytes)
             || !(100..=30_000).contains(&self.x11.selection_transfer_timeout_ms)
@@ -384,18 +402,30 @@ mod tests {
         let mut unknown = value.clone();
         unknown["x11"]["unknown"] = serde_json::Value::Bool(true);
         assert!(serde_json::from_value::<Policy>(unknown).is_err());
+        let mut absent = value.clone();
+        absent["portal"]
+            .as_object_mut()
+            .unwrap()
+            .remove("selection_chunk_bytes");
+        assert!(serde_json::from_value::<Policy>(absent).is_err());
+        let mut unknown = value.clone();
+        unknown["portal"]["unknown"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<Policy>(unknown).is_err());
         let mut selected = policy.clone();
         selected.selected_file_descriptors = 1;
         selected.native_body_operations = 3;
         selected.validate().unwrap();
         assert_eq!(selected.limits, policy.limits);
-        selected.schema_version = 3;
+        selected.schema_version = 4;
         assert!(matches!(selected.validate(), Err(Error::Settings)));
         selected = policy.clone();
         selected.x11.event_batch = 0;
         assert!(matches!(selected.validate(), Err(Error::Settings)));
         selected = policy.clone();
         selected.x11.selection_chunk_bytes = 0;
+        assert!(matches!(selected.validate(), Err(Error::Settings)));
+        selected = policy.clone();
+        selected.portal.selection_chunk_bytes = 0;
         assert!(matches!(selected.validate(), Err(Error::Settings)));
     }
 
