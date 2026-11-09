@@ -159,6 +159,11 @@ that cleanup. These guards grant no new permission. A timed-out input call ends
 its owning session rather than probing a replacement OS sink while the admitted
 backend is still executing.
 
+Native queued jobs release the operation's original purpose before returning
+body credit and acknowledging drain. Real Mac/X11 reads hold that destruction
+open and verify that close stays pending; restoring the earlier job order makes
+the same checks fail. See [cleanup qualification](reports/native-cleanup-order.md).
+
 The macOS adapter shares one sleeping AppKit owner per process, a bounded queue
 and body permits. A watching lease polls only native generation metadata; text
 and image data are read on request. Each queued operation retains its original
