@@ -69,7 +69,7 @@ impl Screens {
         let Some(copy) = self.clipboard.snapshot().filter(|copy| copy.pending) else {
             return false;
         };
-        let Ok(generation) = super::super::super::platform::clipboard_generation() else {
+        let Some(generation) = self.native.as_ref().and_then(|native| native.generation()) else {
             return true;
         };
         self.pending_paste = Some(PendingPaste {
@@ -95,7 +95,7 @@ impl Screens {
             return;
         };
         let copy = self.clipboard.snapshot();
-        let generation = super::super::super::platform::clipboard_generation().ok();
+        let generation = self.native.as_ref().and_then(|native| native.generation());
         let Some(app) = self.panes.get_mut(&Some(paste.tab)) else {
             return;
         };

@@ -52,7 +52,7 @@ jobs:
           key: ${{ matrix.cache_key }}
       - name: Install the Linux portal ABI
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev libclang-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev libclang-dev xvfb
       - name: Build desktop executables
         env:
           TARGET: ${{ matrix.target }}
@@ -67,6 +67,10 @@ jobs:
           cargo clippy --locked -p rds-agent -p rds-desktop -p rds-cli --all-targets --features "$FEATURES" -- -D warnings
           cargo test --locked -p rds-desktop -p rds-agent -p rds-cli --lib --bins --features "$FEATURES"
           cargo test --locked -p rds-agent --test native_clipboard --features "$FEATURES"
+      - name: Check isolated native X11 clipboard
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a cargo test --locked -p rds-desktop --lib --features viewer,x11 native_clipboard -- --ignored --test-threads=1
       - name: Build the synthetic workspace qualification tool
         env:
           TARGET: ${{ matrix.target }}

@@ -45,9 +45,6 @@ impl App {
         })
     }
     pub(in super::super) fn workspace_copying(&mut self) {
-        let Ok(generation) = super::super::super::platform::clipboard_generation() else {
-            return;
-        };
         if let Some(deck) = &mut self.workspace {
             // The newest explicit Copy wins even before native ownership changes.
             for session in deck.inactive.values() {
@@ -56,9 +53,7 @@ impl App {
             deck.clipboard_owner = deck.active;
             deck.pending_paste = None;
         }
-        lock(&self.session.handle.state)
-            .clipboard
-            .copying(generation);
+        lock(&self.session.handle.state).clipboard.begin_copy();
     }
     pub(in super::super) fn workspace_defer_paste(&mut self, event_loop: &ActiveEventLoop) -> bool {
         if self.workspace.is_none() || !self.workspace_clipboard_enabled() {
@@ -74,7 +69,7 @@ impl App {
         let Some(tab) = deck.active.and_then(|id| deck.model.tab(id)) else {
             return true;
         };
-        let Ok(generation) = super::super::super::platform::clipboard_generation() else {
+        let Some(generation) = self.session.native_generation() else {
             deck.clipboard_message("Paste canceled: native clipboard is unavailable");
             return true;
         };
@@ -117,18 +112,10 @@ impl App {
             self.workspace = Some(deck);
             return true;
         }
-        let Ok(generation) = super::super::super::platform::clipboard_generation() else {
+        let Some(generation) = self.session.native_generation() else {
             self.workspace = Some(deck);
             return true;
         };
-        if deck
-            .pending_paste
-            .as_ref()
-            .is_some_and(|p| p.generation != generation)
-        {
-            deck.pending_paste = None;
-            deck.clipboard_message("Paste canceled: clipboard ownership changed");
-        }
         let mut published = false;
         if let Some(owner) = deck.clipboard_owner {
             let session = if deck.active == Some(owner) {
@@ -138,9 +125,11 @@ impl App {
             };
             let mut pending = false;
             if let Some(session) = session {
-                pending = lock(&session.handle.state)
-                    .clipboard
-                    .handoff_pending(generation);
+                published = session.poll_publication();
+                pending = !published
+                    && lock(&session.handle.state)
+                        .clipboard
+                        .handoff_pending(generation);
                 if pending {
                     published = session.clipboard_work();
                     if !published {
@@ -158,13 +147,22 @@ impl App {
             }
         } else {
             self.session.clipboard_work();
-            if let Ok(generation) = super::super::super::platform::clipboard_generation()
+            if let Some(generation) = self.session.native_generation()
                 && lock(&self.session.handle.state)
                     .clipboard
                     .handoff_pending(generation)
             {
                 deck.clipboard_owner = deck.active;
             }
+        }
+        if !published
+            && deck
+                .pending_paste
+                .as_ref()
+                .is_some_and(|paste| paste.generation != generation)
+        {
+            deck.pending_paste = None;
+            deck.clipboard_message("Paste canceled: clipboard ownership changed");
         }
         let paste = if published {
             deck.pending_paste.take()

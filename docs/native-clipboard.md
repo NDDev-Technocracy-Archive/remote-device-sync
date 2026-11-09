@@ -240,8 +240,10 @@ and body permits. A watching lease polls only native generation metadata; text
 and image data are read on request. Each queued operation retains its original
 scope through native completion, even when its receiver times out. No watcher
 means the native owner sleeps on its queue. Consented Mac hosting uses this
-owner for the existing text mode. The current viewer wrappers still require
-migration to its asynchronous contract before native clipboard mode is offered.
+owner for the existing text mode and the native viewer. The viewer uses
+asynchronous snapshot/read/publication jobs; its event loop only observes
+cached metadata and completed results. This text-mode migration is separate
+from advertising negotiated native clipboard mode.
 The prepared `DesktopSource` exposes an in-memory native-provider lease factory:
 the caller supplies its original admitted clipboard context before jobs begin.
 It does not open OS consent or fall back to an unrelated backend. Provider close
@@ -307,9 +309,9 @@ Native selection/property limits and deadlines come from the common profile.
 The event loop drains buffered events before polling and sleeps until a real
 native/job event or the nearest active transfer deadline. The new provider
 requires XFixes; the existing legacy observation fallback remains a distinct
-supported path. File reception/source URIs, viewer providers, manager/GUI
-integration and negotiated native mode remain unfinished and are not advertised
-by this increment.
+supported path. An explicitly selected X11 viewer now shares this prepared
+native provider for its existing text mode. File reception/source URIs and
+manager/GUI integration with negotiated native mode remain unfinished.
 
 ## Consented Wayland provider
 
@@ -335,3 +337,30 @@ cross-client compare-and-set operation. Its method reply acknowledges native
 publication, not consumption by another application. File formats are absent
 from this provider's capabilities. Native host/manager/viewer negotiation and
 real application pastes on the desktop matrix remain separate acceptance steps.
+
+
+## Asynchronous viewer text access
+
+The existing text-mode viewer uses one prepared native clipboard owner across
+its tabs and native windows. A real X11 display selects the X11 edge; AppKit
+selects the shared Mac owner. A native Wayland viewer remains explicitly
+unavailable here: the hosting portal is not opened to obtain viewer clipboard
+access, and no XWayland/helper fallback is used.
+
+An explicit Copy first obtains an asynchronous native-generation baseline,
+then releases its ordered input. Paste obtains a bounded native text read
+before committing clipboard chunks and the following input. The event loop
+continues responding during those waits. Held input is bounded by the existing
+input admission limit and only adjacent pointer motion is coalesced. Failure
+suppresses the original paste key while preserving subsequent ordinary input.
+Session epoch, tab revision, selection and focus fence the gesture. New copy
+ownership cancels an earlier queued publication; its native job retains its
+original purpose and body credit through actual cleanup.
+
+Ordinary video ticks use cached metadata without native reads or a clipboard
+watcher. The common native operation timeout also bounds a complete UI operation.
+The gate records metadata-only wait duration; no latency or CPU improvement is
+claimed from source structure alone. Negotiated text/PNG transport, target-native
+shortcut selection, native Wayland viewing and file receivers still require
+their product integration and receiving-application qualification. See the
+[viewer qualification report](reports/async-viewer-clipboard.md).

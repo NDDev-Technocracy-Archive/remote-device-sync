@@ -19,6 +19,7 @@ pub(super) struct Screens {
     events: tokio::sync::mpsc::Sender<WorkspaceEvent>,
     proxy: EventLoopProxy<()>,
     clipboard: Arc<CopyFence>,
+    native: Option<Arc<super::super::native_clipboard::Clipboard>>,
     pending_paste: Option<clipboard::PendingPaste>,
     error: Option<DesktopError>,
     activated: bool,
@@ -70,7 +71,8 @@ impl Viewer {
             action_sender,
             events,
             proxy,
-            clipboard: Arc::new(CopyFence::default()),
+            clipboard: lock(&viewer.app.session.handle.state).clipboard.arbiter(),
+            native: viewer.app.session.native.clone(),
             pending_paste: None,
             error: None,
             activated: false,
@@ -119,6 +121,8 @@ impl Screens {
         let (mut session, view, input) = SessionView::new(
             tab.as_ref().map_or(0, |t| t.spec.display),
             self.proxy.clone(),
+            self.native.clone(),
+            self.clipboard.clone(),
         );
         session.tab = id;
         lock(&view.state).clipboard =
@@ -160,6 +164,7 @@ impl Screens {
             fullscreen: tab.is_some(),
             native_input: NativeInputPolicy::default(),
             shortcuts: None,
+            native_gesture: None,
         };
         app.resumed(event_loop);
         if tab.is_some()
@@ -241,7 +246,12 @@ impl Screens {
         };
         app.release(event_loop);
         lock(&app.session.handle.state).clipboard.reset();
-        let (mut session, view, input) = SessionView::new(tab.spec.display, self.proxy.clone());
+        let (mut session, view, input) = SessionView::new(
+            tab.spec.display,
+            self.proxy.clone(),
+            self.native.clone(),
+            self.clipboard.clone(),
+        );
         session.tab = Some(id);
         lock(&view.state).clipboard =
             super::super::clipboard::Clipboard::with_arbiter(self.clipboard.clone());

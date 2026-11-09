@@ -338,7 +338,7 @@ impl App {
         }
         deck.pending_paste = None;
         if deck.clipboard_owner.is_none()
-            && let Ok(generation) = super::super::platform::clipboard_generation()
+            && let Some(generation) = self.session.native_generation()
             && lock(&self.session.handle.state)
                 .clipboard
                 .handoff_pending(generation)
@@ -394,8 +394,12 @@ impl App {
         };
         if fresh {
             let tab = deck.model.tab(id).expect("newly inserted tab").clone();
-            let (mut session, view, input) =
-                SessionView::new(tab.spec.display, self.session.handle.proxy.clone());
+            let (mut session, view, input) = SessionView::new(
+                tab.spec.display,
+                self.session.handle.proxy.clone(),
+                self.session.native.clone(),
+                lock(&self.session.handle.state).clipboard.arbiter(),
+            );
             session.tab = Some(id);
             view.label(format!(
                 "{} · {} · Display {}",
@@ -446,7 +450,12 @@ impl App {
             if let Some(next) = deck.model.active() {
                 self.workspace_select(deck, next, event_loop);
             } else {
-                let (blank, _, _) = SessionView::new(0, self.session.handle.proxy.clone());
+                let (blank, _, _) = SessionView::new(
+                    0,
+                    self.session.handle.proxy.clone(),
+                    self.session.native.clone(),
+                    lock(&self.session.handle.state).clipboard.arbiter(),
+                );
                 self.session = blank;
                 self.session.handle.status("Ready");
                 deck.active = None;
@@ -554,8 +563,12 @@ impl App {
         let Some(tab) = deck.model.tab(id).cloned() else {
             return;
         };
-        let (mut new, view, input) =
-            SessionView::new(tab.spec.display, self.session.handle.proxy.clone());
+        let (mut new, view, input) = SessionView::new(
+            tab.spec.display,
+            self.session.handle.proxy.clone(),
+            self.session.native.clone(),
+            lock(&self.session.handle.state).clipboard.arbiter(),
+        );
         new.tab = Some(id);
         view.label(format!(
             "{} · {} · Display {}",
