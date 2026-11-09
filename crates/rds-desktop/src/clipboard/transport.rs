@@ -13,7 +13,9 @@ use std::{
 use bytes::Bytes;
 use rds_core::{
     UniHello,
-    clipboard::{Control, Limits, PayloadKind, Receipt, Request, TransferHeader, TransferId},
+    clipboard::{
+        Control, Failure, Limits, PayloadKind, Receipt, Request, TransferHeader, TransferId,
+    },
 };
 use rds_net::{Connection, RecvStream, SendStream, UniStreams};
 use tokio::{
@@ -23,6 +25,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{NativeLifetime, native, stream};
+mod refusal;
+use refusal::{Refusal, Refusals};
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +42,8 @@ pub enum Error {
     Busy,
     #[error("clipboard body owner is closed")]
     Closed,
+    #[error("peer refused clipboard body: {0:?}")]
+    PeerRefused(Failure),
     #[error("clipboard body transport failed: {0}")]
     Transport(#[from] io::Error),
 }
@@ -49,9 +55,30 @@ impl Error {
             Self::Native(error) => error,
             Self::Closed => native::Error::Changed,
             Self::Busy => native::Error::Unavailable,
+            Self::PeerRefused(code) => match code {
+                Failure::Unavailable => native::Error::Unavailable,
+                Failure::Unsupported => native::Error::Unsupported,
+                Failure::Expired | Failure::Canceled => native::Error::Changed,
+                Failure::TooLarge => native::Error::Contract(rds_core::clipboard::Error::TooLarge),
+                Failure::NativePublication => native::Error::Publication,
+                Failure::Integrity => native::Error::Integrity,
+                Failure::InvalidRequest => {
+                    native::Error::Contract(rds_core::clipboard::Error::Identity)
+                }
+                Failure::Io => native::Error::Io(io::Error::other(Self::PeerRefused(code))),
+            },
             Self::Transport(error) => native::Error::Io(error),
         }
     }
+}
+fn body_error(error: stream::Error) -> Error {
+    if let stream::Error::Io(io) = &error
+        && let Some(Error::PeerRefused(code)) =
+            io.get_ref().and_then(|error| error.downcast_ref::<Error>())
+    {
+        return Error::PeerRefused(*code);
+    }
+    Error::Body(error)
 }
 
 /// One negotiated desktop's bulk owner. Each direction has its own budget:
@@ -66,6 +93,7 @@ pub struct Streams {
     outgoing: Arc<Semaphore>,
     stop: CancellationToken,
     original: NativeLifetime,
+    refusals: Arc<Refusals>,
 }
 
 impl Streams {
@@ -91,6 +119,7 @@ impl Streams {
             outgoing: Arc::new(Semaphore::new(parallel)),
             stop: CancellationToken::new(),
             original,
+            refusals: Arc::default(),
         })
     }
 
@@ -146,21 +175,34 @@ impl Streams {
             .connection
             .uni_streams(UniHello::ClipboardBody { id: request.id })
             .map_err(io::Error::other)?;
+        let refusal = self.refusals.track(request.id)?;
         let incoming = Incoming {
             inbox,
             request: request.clone(),
             limits: self.limits.clone(),
             stop: self.stop.clone(),
             scope,
+            refusal: refusal.clone(),
             lease: Arc::new(Lease {
                 _permit: permit,
                 _original: self.original.clone(),
                 _operation_original: Some(original),
+                _refusal: Some(refusal),
             }),
         };
         metadata.send(Control::Request(request));
         drop(next);
         Ok(incoming)
+    }
+
+    /// Route a peer's Failed metadata to this desktop's exact admitted body.
+    /// An unknown/finished request is not a new authorization or a session fault.
+    pub fn refused(&self, id: TransferId, code: Failure) -> Result<bool, Error> {
+        id.validate()?;
+        if id.desktop != self.desktop {
+            return Err(rds_core::clipboard::Error::Identity.into());
+        }
+        self.refusals.signal(id, code)
     }
 
     fn admission_error(&self) -> Error {
@@ -202,6 +244,7 @@ impl Streams {
                 _permit: permit,
                 _original: self.original.clone(),
                 _operation_original: None,
+                _refusal: None,
             }),
         })
     }
@@ -304,6 +347,7 @@ impl Response<'_> {
 struct Lease {
     _operation_original: Option<NativeLifetime>,
     _original: NativeLifetime,
+    _refusal: Option<Arc<Refusal>>,
     // Admission is released after the request's original owner is cleaned up.
     _permit: OwnedSemaphorePermit,
 }
@@ -314,6 +358,7 @@ pub struct Incoming {
     limits: Limits,
     stop: CancellationToken,
     scope: CancellationToken,
+    refusal: Arc<Refusal>,
     lease: NativeLifetime,
 }
 
@@ -324,10 +369,17 @@ pub struct Received {
     pub bytes: Bytes,
     pub receipt: Receipt,
     lease: NativeLifetime,
+    refusal: Arc<Refusal>,
 }
 impl Received {
     pub fn original(&self) -> NativeLifetime {
         self.lease.clone()
+    }
+    pub fn refusal(&self) -> Option<Failure> {
+        self.refusal.current()
+    }
+    pub async fn refused(&self) -> Failure {
+        self.refusal.wait().await
     }
 }
 impl Incoming {
@@ -340,6 +392,7 @@ impl Incoming {
             biased;
             _ = self.stop.cancelled() => return Err(Error::Closed),
             _ = self.scope.cancelled() => return Err(Error::Closed),
+            code = self.refusal.wait() => return Err(Error::PeerRefused(code)),
             stream = self.inbox.recv() => stream.ok_or(Error::Closed)?,
         };
         Ok(Receiving {
@@ -347,10 +400,16 @@ impl Incoming {
             stopped: Box::pin({
                 let stop = self.stop.clone();
                 let scope = self.scope.clone();
+                let refusal = self.refusal.clone();
                 async move {
-                    tokio::select! { _ = stop.cancelled() => {}, _ = scope.cancelled() => {} }
+                    tokio::select! { biased;
+                        _ = stop.cancelled() => Stopped::Closed,
+                        _ = scope.cancelled() => Stopped::Closed,
+                        code = refusal.wait() => Stopped::Refused(code),
+                    }
                 }
             }),
+            terminal: None,
             _original: self.lease.clone(),
         })
     }
@@ -363,11 +422,18 @@ impl Incoming {
         // Stop accepting duplicate bodies before consuming this one.
         drop(self.inbox);
         let mut bytes = Vec::new();
-        let receipt = stream::receive(&mut wire, &mut bytes, &self.request, &self.limits).await?;
+        let receipt = tokio::select! { biased;
+            code = self.refusal.wait() => return Err(Error::PeerRefused(code)),
+            result = stream::receive(&mut wire, &mut bytes, &self.request, &self.limits) => result.map_err(body_error)?,
+        };
+        if let Some(code) = self.refusal.current() {
+            return Err(Error::PeerRefused(code));
+        }
         Ok(Received {
             bytes: Bytes::from(bytes),
             receipt,
             lease: self.lease,
+            refusal: self.refusal,
         })
     }
 
@@ -379,7 +445,27 @@ impl Incoming {
         }
         let wire = self.accept().await?;
         drop(self.inbox);
-        Ok(stream::receive_reader(wire, &self.request, &self.limits, self.lease).await?)
+        let incoming = stream::receive_reader(wire, &self.request, &self.limits, self.lease);
+        let native::FileRead {
+            bytes,
+            reader,
+            complete,
+        } = tokio::select! { biased;
+            code = self.refusal.wait() => return Err(Error::PeerRefused(code)),
+            result = incoming => result.map_err(body_error)?,
+        };
+        let reader = self.refusal.reader(reader);
+        let refusal = self.refusal;
+        Ok(native::FileRead {
+            bytes,
+            reader,
+            complete: Box::pin(async move {
+                tokio::select! { biased;
+                    code = refusal.wait() => Err(Error::PeerRefused(code).into_native()),
+                    result = complete => result,
+                }
+            }),
+        })
     }
 
     pub async fn write(mut self, destination: native::Destination) -> Result<Receipt, Error> {
@@ -389,14 +475,35 @@ impl Incoming {
         let mut wire = self.accept().await?;
         drop(self.inbox);
         let destination = destination.retaining(self.lease);
-        Ok(stream::receive_file(&mut wire, destination, &self.request, &self.limits).await?)
+        let receipt = tokio::select! { biased;
+            code = self.refusal.wait() => return Err(Error::PeerRefused(code)),
+            result = stream::receive_file(&mut wire, destination, &self.request, &self.limits) => result.map_err(body_error)?,
+        };
+        if let Some(code) = self.refusal.current() {
+            return Err(Error::PeerRefused(code));
+        }
+        Ok(receipt)
     }
 }
 
 struct Receiving {
     stream: RecvStream,
-    stopped: Pin<Box<dyn Future<Output = ()> + Send>>,
+    stopped: Pin<Box<dyn Future<Output = Stopped> + Send>>,
+    terminal: Option<Stopped>,
     _original: NativeLifetime,
+}
+#[derive(Clone, Copy)]
+enum Stopped {
+    Closed,
+    Refused(Failure),
+}
+impl Stopped {
+    fn error(self) -> io::Error {
+        match self {
+            Self::Closed => io::ErrorKind::Interrupted.into(),
+            Self::Refused(code) => io::Error::other(Error::PeerRefused(code)),
+        }
+    }
 }
 impl AsyncRead for Receiving {
     fn poll_read(
@@ -404,9 +511,13 @@ impl AsyncRead for Receiving {
         cx: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if self.stopped.as_mut().poll(cx).is_ready() {
+        if let Some(reason) = self.terminal {
+            return Poll::Ready(Err(reason.error()));
+        }
+        if let Poll::Ready(reason) = self.stopped.as_mut().poll(cx) {
+            self.terminal = Some(reason);
             let _ = self.stream.stop(0u32.into());
-            return Poll::Ready(Err(io::ErrorKind::Interrupted.into()));
+            return Poll::Ready(Err(reason.error()));
         }
         Pin::new(&mut self.stream).poll_read(cx, buffer)
     }
