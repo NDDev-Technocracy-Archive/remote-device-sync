@@ -53,3 +53,7 @@ required-features = ["desktop"]
 
 [lints]
 workspace = true
+
+[[example]]
+name = "native_input_probe"
+required-features = ["desktop"]

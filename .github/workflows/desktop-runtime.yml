@@ -65,6 +65,7 @@ jobs:
         run: |
           rustup component add clippy
           cargo clippy --locked -p rds-agent -p rds-desktop -p rds-cli --all-targets --features "$FEATURES" -- -D warnings
+          cargo clippy --locked -p rds-cli --all-targets --features rds-cli/desktop,rds-cli/transport-noq -- -D warnings
           cargo test --locked -p rds-desktop -p rds-agent -p rds-cli --lib --bins --features "$FEATURES"
           cargo test --locked -p rds-agent --test native_clipboard --features "$FEATURES"
       - name: Check isolated native X11 clipboard
@@ -75,7 +76,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo build --locked --release --target "$TARGET" -p rds-cli --example workspace_managed_preview --features rds-cli/desktop,rds-cli/transport-noq
+          cargo build --locked --release --target "$TARGET" -p rds-cli --example workspace_managed_preview --example native_input_probe --features rds-cli/desktop,rds-cli/transport-noq
       - name: Check native entrypoints and package exact bytes
         # Packaging consumes only product binaries, independently of probe tools.
         env:
@@ -125,6 +126,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+      - name: Retain the exact native input qualification tool
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-input-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/examples/native_input_probe
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
 
   provenance:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -156,3 +165,6 @@ jobs:
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/desktop-qualification/**/native_clipboard
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/desktop-qualification/**/native_input_probe

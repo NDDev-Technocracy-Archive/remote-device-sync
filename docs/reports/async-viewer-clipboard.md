@@ -22,10 +22,25 @@ ordering/refusal. The isolated Linux lane additionally uses a dedicated Xvfb
 selection owner and the actual X11 facade; OS-dependent cases run serially.
 These fixtures are not receiving-application acceptance.
 
-Source checks pass. The first native build exposed a sibling-module visibility
-error and a missing trait import in the Mac probe; both are corrected in the
-next source cut. Native compilation, unit/Xvfb cases and physical application
-copy/paste are pending for this candidate. No installed application, signature,
+The combined source at `a6755619f71af7f961fc7c8baf18fe7c2ff9c1c8` passes
+250 desktop cases on Linux (12 display-dependent cases excluded from that run),
+both real-agent handshake cases, and all five isolated Xvfb clipboard cases.
+The Mac combined-role build passes denied Clippy, 217 desktop cases and both
+handshake cases. Its subsequent viewer-only build exposed a close-signal feature
+gate still limited to hosting. The next cut corrects that gate and explicitly
+checks denied viewer-only Clippy as well as the combined role.
+
+A bounded keyless native-input qualification example is retained independently
+of product packages. It attaches only to an existing admitted manager session
+and sends explicit fixture focus/shortcut chords. It reads neither clipboard
+contents nor screen pixels, never enrolls an identity or changes permissions,
+and requires owned nonblocking input/output pipes. Its artifacts allow real
+application input through the already authorized host without another OS input
+permission.
+
+Source checks pass. Final-cut native compilation/tests and physical receiving-
+application copy/paste remain pending; those effects cannot be inferred from
+unit or Xvfb results. No installed application, signature,
 permission, saved connection, device pin or shared build/cache configuration was
 changed. The native Wayland viewer, negotiated native-mode manager integration,
 target shortcut selection, image/file product flows and independent performance
