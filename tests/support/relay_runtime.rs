@@ -136,7 +136,7 @@ fn address(line: &str) -> SocketAddr {
 }
 struct Ready {
     addr: SocketAddr,
-    id: Option<iroh::EndpointId>,
+    id: Option<BackendEndpointId>,
     directory: Option<SocketAddr>,
 }
 impl Process {
@@ -234,7 +234,7 @@ async fn invalid_or_misapplied_relay_flags_do_not_initialize_state() {
     for case in 0..13 {
         let scratch = Scratch::new();
         let key = scratch.key();
-        let allow = iroh::SecretKey::from_bytes(&[151; 32]).public().to_string();
+        let allow = BackendSecretKey::from_bytes(&[151; 32]).public().to_string();
         let values = match case {
             0 => args(&["--relay-backend", "unknown"]),
             1 => args(&["--relay-key-file", &key]),
@@ -380,8 +380,8 @@ async fn explicit_iroh_mode_preserves_listener_and_shutdown_contract() {
 }
 
 fn tls_fixture(scratch: &Scratch) -> (PathBuf, PathBuf) {
-    let rcgen::CertifiedKey { cert, signing_key } =
-        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert_path = scratch.0.join("cert.pem");
     let key_path = scratch.0.join("tls.key");
     fs::write(&cert_path, cert.pem()).unwrap();
@@ -397,7 +397,7 @@ async fn mismatched_or_oversized_private_key_is_rejected_before_catalog_creation
         let replacement = if oversized {
             vec![b'x'; 64 * 1024 + 1]
         } else {
-            rcgen::KeyPair::generate()
+            KeyPair::generate()
                 .unwrap()
                 .serialize_pem()
                 .into_bytes()
@@ -469,14 +469,14 @@ fn owned_args(scratch: &Scratch, keys: &[rds_net::SecretKey], cap: u16) -> Vec<S
 }
 
 #[cfg(feature = "owned-relay")]
-fn relay_address(ready: &Ready) -> rds_net::EndpointAddr {
-    rds_net::EndpointAddr::new(
+fn relay_address(ready: &Ready) -> EndpointAddr {
+    EndpointAddr::new(
         rds_net::backends::iroh::convert::id_from(ready.id.unwrap()),
     ).with_ip_addr(ready.addr)
 }
 
 #[cfg(feature = "owned-relay")]
-async fn attached_endpoint(key: rds_net::SecretKey, relay: rds_net::EndpointAddr) -> rds_net::Endpoint {
+async fn attached_endpoint(key: rds_net::SecretKey, relay: EndpointAddr) -> rds_net::Endpoint {
     rds_net::bind_endpoint(rds_net::EndpointConfig {
         backend: rds_net::Backend::Noq,
         secret_key: Some(key),
@@ -494,7 +494,7 @@ async fn attached_endpoint(key: rds_net::SecretKey, relay: rds_net::EndpointAddr
 
 #[cfg(feature = "owned-relay")]
 async fn attachment(
-    relay: rds_net::EndpointAddr,
+    relay: EndpointAddr,
     key: rds_net::SecretKey,
 ) -> anyhow::Result<(
     rds_net::backends::noq::relay::RelaySocket,

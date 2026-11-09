@@ -12,7 +12,6 @@ anyhow.workspace = true
 clap.workspace = true
 iroh.workspace = true
 iroh-relay = { workspace = true, features = ["server"] }
-postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
 rds-net = { workspace = true, optional = true }
 rustix = { workspace = true, features = ["fs"] }
@@ -23,11 +22,12 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
+postcard = { workspace = true, features = ["alloc", "use-std"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing-subscriber.workspace = true
 noq.workspace = true
 ed25519-dalek.workspace = true
-rcgen.workspace = true
 rds-discovery.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 
