@@ -68,6 +68,7 @@ jobs:
           cargo clippy --locked -p rds-cli --all-targets --features rds-cli/desktop,rds-cli/transport-noq -- -D warnings
           cargo test --locked -p rds-desktop -p rds-agent -p rds-cli --lib --bins --features "$FEATURES"
           cargo test --locked -p rds-agent --test native_clipboard --features "$FEATURES"
+          cargo test --locked -p rds-audio
       - name: Check isolated native X11 clipboard
         if: runner.os == 'Linux'
         run: |
