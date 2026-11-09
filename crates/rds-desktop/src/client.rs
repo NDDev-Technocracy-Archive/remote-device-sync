@@ -237,6 +237,8 @@ impl Delivery {
 
 /// A live desktop session on the client side.
 pub struct DesktopSession {
+    /// Explicit native clipboard admission, independent of screen/input.
+    pub native_clipboard: Option<crate::clipboard::peer::Handle>,
     /// Decoded frames in arrival order; stale ones never arrive here.
     /// Bounded, newest-wins: a full queue evicts the oldest frame.
     pub frames: mailbox::Receiver<RawFrame>,
@@ -268,6 +270,9 @@ pub struct DesktopSession {
 
 impl Drop for DesktopSession {
     fn drop(&mut self) {
+        if let Some(peer) = &self.native_clipboard {
+            peer.close();
+        }
         self.task.abort();
     }
 }
@@ -300,9 +305,29 @@ impl Drop for FrameBudget {
     }
 }
 
+/// One per-desktop lease from an already prepared viewer clipboard owner.
+pub struct NativeClipboard {
+    pub provider: Arc<dyn crate::clipboard::native::Provider>,
+    pub admitted: rds_core::clipboard::Capabilities,
+    pub policy: crate::clipboard::native::PeerPolicy,
+    pub original: crate::clipboard::NativeLifetime,
+}
+
+struct NativeAdmission(Option<Arc<dyn crate::clipboard::native::Provider>>);
+impl Drop for NativeAdmission {
+    fn drop(&mut self) {
+        if let Some(provider) = &self.0 {
+            drop(provider.close());
+        }
+    }
+}
+
 /// Options for [`DesktopSession::connect_opts`].
 #[derive(Default)]
 pub struct SessionOpts {
+    /// Explicit DesktopV6 mode, mutually exclusive with reverse text. This
+    /// lease closes on rejected/canceled handshake or session teardown.
+    pub native_clipboard: Option<NativeClipboard>,
     /// Request DesktopV4 and bounded complete-payload proofs. Older peers must
     /// reject the requested mode; no implicit legacy fallback is performed.
     pub payload_receipts: bool,
@@ -371,8 +396,13 @@ impl DesktopSession {
     pub async fn connect_opts(
         conn: &Connection,
         hello: DesktopHello,
-        opts: SessionOpts,
+        mut opts: SessionOpts,
     ) -> Result<Self, DesktopError> {
+        let mut native_admission = NativeAdmission(
+            opts.native_clipboard
+                .as_ref()
+                .map(|local| local.provider.clone()),
+        );
         let display = hello.display;
         let observation =
             crate::control_observation::ControlObservation::new(conn.path_observer())?;
@@ -382,12 +412,53 @@ impl DesktopSession {
             .session
             .map(|session| rds_core::UniHello::DesktopFrames { id: session })
             .unwrap_or(rds_core::UniHello::Desktop);
+        let native_caps = if let Some(local) = &opts.native_clipboard {
+            local
+                .policy
+                .validate()
+                .map_err(|error| DesktopError::Input(error.to_string()))?;
+            crate::clipboard::peer::validate_admission(local.provider.as_ref(), &local.admitted)
+                .map_err(|error| DesktopError::Input(error.to_string()))?;
+            if opts.reverse_clipboard || opts.session.is_none_or(|id| id == [0; 16]) {
+                return Err(DesktopError::Input(
+                    "native clipboard requires an isolated session and excludes text mode".into(),
+                ));
+            }
+            Some(local.admitted.clone())
+        } else {
+            None
+        };
+        let native_requested = native_caps.is_some();
+        let mut native_route = if native_requested {
+            Some(
+                conn.uni_streams(rds_core::UniHello::ClipboardMetadata {
+                    id: opts.session.expect("validated native session ID"),
+                })
+                .map_err(|error| DesktopError::Io(std::io::Error::other(error)))?,
+            )
+        } else {
+            None
+        };
         // Claim before any wire I/O or spawned work. A duplicate claim must
         // not start another remote session and then leak local tasks on error.
         let uni = conn
             .uni_streams(route)
             .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())))?;
-        let greeting = if opts.reverse_clipboard {
+        let greeting = if let Some(clipboard) = native_caps {
+            let output_height = opts.output_height.unwrap_or(0);
+            if output_height != 0 && !(16..=4320).contains(&output_height) {
+                return Err(DesktopError::Capture(
+                    "video height must be 0 or 16..=4320".into(),
+                ));
+            }
+            StreamHello::DesktopV6 {
+                session: opts.session.expect("validated native session ID"),
+                hello,
+                output_height,
+                payload_receipts: opts.payload_receipts,
+                clipboard,
+            }
+        } else if opts.reverse_clipboard {
             let session = opts.session.ok_or_else(|| {
                 DesktopError::Capture("reverse clipboard requires an isolated session route".into())
             })?;
@@ -442,23 +513,39 @@ impl DesktopSession {
                 }
             }
         };
-        let (mut send, recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
+        let (mut send, recv, caps, peer_caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
             let (send, mut recv) = conn.open_bi().await?;
             let mut send = ControlSend(send);
             rds_net::wire::prioritize_control(&send.0, &greeting)?;
             write_frame(&mut send.0, &greeting).await?;
-            let caps = match read_frame::<_, HelloAck>(&mut recv).await? {
-                HelloAck::DesktopV5(caps) if opts.reverse_clipboard => caps,
-                HelloAck::DesktopV4(caps) if opts.payload_receipts && !opts.reverse_clipboard => {
-                    caps
+            let (caps, peer_caps) = match read_frame::<_, HelloAck>(&mut recv).await? {
+                HelloAck::DesktopV6 { desktop, clipboard } if native_requested => {
+                    (desktop, clipboard)
                 }
-                HelloAck::Desktop(caps) if !opts.payload_receipts && !opts.reverse_clipboard => {
-                    caps
+                HelloAck::DesktopV5(caps) if opts.reverse_clipboard && !native_requested => {
+                    (caps, None)
                 }
-                HelloAck::Ok if !opts.payload_receipts && !opts.reverse_clipboard => DesktopCaps {
-                    displays: vec![],
-                    codecs: vec![],
-                },
+                HelloAck::DesktopV4(caps)
+                    if opts.payload_receipts && !opts.reverse_clipboard && !native_requested =>
+                {
+                    (caps, None)
+                }
+                HelloAck::Desktop(caps)
+                    if !opts.payload_receipts && !opts.reverse_clipboard && !native_requested =>
+                {
+                    (caps, None)
+                }
+                HelloAck::Ok
+                    if !opts.payload_receipts && !opts.reverse_clipboard && !native_requested =>
+                {
+                    (
+                        DesktopCaps {
+                            displays: vec![],
+                            codecs: vec![],
+                        },
+                        None,
+                    )
+                }
                 HelloAck::Error { message } => return Err(DesktopError::Capture(message)),
                 _ => {
                     return Err(DesktopError::Capture(
@@ -466,10 +553,42 @@ impl DesktopSession {
                     ));
                 }
             };
-            Ok((send, recv, caps))
+            Ok((send, recv, caps, peer_caps))
         })
         .await
         .map_err(|_| DesktopError::Capture("session handshake timed out".into()))??;
+
+        let native_clipboard = if let Some(local) = opts.native_clipboard.take() {
+            if let Some(peer) = peer_caps {
+                Some(
+                    crate::clipboard::peer::Prepared::claimed(
+                        crate::clipboard::peer::Setup {
+                            connection: conn.clone(),
+                            desktop: opts.session.expect("validated native session ID"),
+                            side: rds_core::clipboard::Side::Initiator,
+                            provider: local.provider,
+                            admitted: local.admitted,
+                            peer,
+                            policy: local.policy,
+                            original: local.original,
+                        },
+                        native_route.take().expect("claimed native route"),
+                    )
+                    .and_then(crate::clipboard::peer::Prepared::start)
+                    .map_err(|error| DesktopError::Input(error.to_string()))?,
+                )
+            } else {
+                local.provider.close().await;
+                None
+            }
+        } else {
+            None
+        };
+        native_admission.0 = None;
+        drop(native_route);
+        let native_handle = native_clipboard
+            .as_ref()
+            .map(crate::clipboard::peer::Session::handle);
 
         let (frame_tx, frames) = mailbox::channel(4);
         let (header_tx, frame_headers) = mailbox::channel(64);
@@ -616,11 +735,17 @@ impl DesktopSession {
                 // the underlying connection remains available for other services.
                 let _ = tasks.join_next().await;
                 tasks.shutdown().await;
+                if let Some(peer) = native_clipboard
+                    && let Err(error) = peer.close().await
+                {
+                    tracing::debug!(%error, "native clipboard ended during desktop shutdown");
+                }
             }
             .in_current_span(),
         );
 
         Ok(Self {
+            native_clipboard: native_handle,
             frames,
             frame_headers,
             events,

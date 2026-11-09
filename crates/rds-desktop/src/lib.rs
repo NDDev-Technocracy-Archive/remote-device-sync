@@ -55,8 +55,8 @@ pub use source::DesktopSource;
 #[cfg(feature = "x11")]
 pub use codec::openh264::{H264Decoder, H264Encoder};
 pub use session::{
-    BitrateController, FrameProducer, NullProducer, Produced, ProducerControls, SessionClock,
-    SessionConfig, SyntheticProducer, serve_desktop, serve_desktop_with,
+    BitrateController, FrameProducer, NullProducer, Produced, ProducerControls, ServingClipboard,
+    SessionClock, SessionConfig, SyntheticProducer, serve_desktop, serve_desktop_with,
 };
 
 /// One captured video frame, BGRA8 unless noted otherwise.

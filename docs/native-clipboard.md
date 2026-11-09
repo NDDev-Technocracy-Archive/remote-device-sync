@@ -1,9 +1,10 @@
 # Native clipboard
 
 Execution: [#212](https://github.com/NDDev-Technocracy-OpenNetwork/nddev-remote/issues/212).
-The existing DesktopV5 text wire is unchanged. The new native representation,
-file authority and streaming core are building blocks; they do not enable
-image/file support in the runtime handshake or qualify OS integration by themselves.
+The existing DesktopV5 text wire is unchanged. DesktopV6 exposes explicit native
+clipboard negotiation through the engine API. Existing manager/GUI callers
+retain text mode until their provider, gesture and local IPC integration is
+qualified. A protocol or native adapter alone does not establish application paste.
 
 `rds-core::clipboard` owns directional capabilities, typed limits, offers,
 session/offer/request identities, exact selected-file manifests and metadata
@@ -143,8 +144,41 @@ authorization. The original native work still owns its reservation until actual
 cleanup. See [refusal qualification](reports/clipboard-refusal.md).
 Real loopback tests cover simultaneous requests, a late canceled response,
 selected-file integrity without a staging file, and progressing control/media
-beside a backpressured file. The native handshake, manager and GUI still need
-coordinated integration before this mode is advertised to a user.
+beside a backpressured file. The manager and GUI still need coordinated
+integration before this mode is advertised to a user.
+
+## Explicit native desktop negotiation
+
+`SessionOpts::native_clipboard` requests DesktopV6 with a per-desktop provider
+lease, actual locally admitted capabilities, validated policy and original
+viewer authority. It excludes reverse text mode and requires a fresh isolated
+desktop ID. The viewer claims both frame and native metadata routes before the
+greeting, then binds the accepted peer capabilities to that same metadata inbox.
+An abandoned/rejected handshake closes its native lease. Earlier peers reject
+the new greeting; there is no implicit text retry.
+
+The agent prepares a native provider only from its existing desktop source,
+under the verified full-control scope and retained service/key lifetime. A
+view-only grant never opens that provider. An absent source/provider or no
+common representation returns an explicit native-unavailable acknowledgement;
+the desktop can continue. It does not probe a legacy clipboard or another OS
+backend. Native mode rejects legacy text chunks/requests even when native
+clipboard was unavailable. The independently owned metadata channel remains
+the only native clipboard path for that desktop.
+
+`SessionConfig::clipboard` uses `ServingClipboard::Text { reverse }` for the
+existing wire or `ServingClipboard::Native` for the explicitly negotiated mode.
+Embedding callers migrate the former `SessionConfig::reverse_clipboard` field
+to the text variant; `SessionOpts::reverse_clipboard` still requests DesktopV5.
+Serving validates the exact frame/metadata desktop ID and responder direction
+before starting a native peer. Desktop teardown seals its admission and drains
+actual provider cleanup; canceled teardown still leaves the native owner alive
+through its work. A clipboard-channel failure remains independent of video/input.
+
+This API does not implement the manager's native provider proxy, viewer focus
+and paste barriers, OS receiving-application publication or selected-file paste.
+The production manager/GUI does not opt into it yet. See
+[handshake qualification](reports/native-desktop-handshake.md).
 
 `clipboard::peer` owns the symmetric native metadata channel for an explicitly
 admitted desktop. The caller prepares its exact route before acknowledging the

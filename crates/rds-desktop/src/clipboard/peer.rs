@@ -121,6 +121,11 @@ impl Handle {
     pub fn closed(&self) -> bool {
         self.0.stop.is_cancelled()
     }
+    /// Seal new clipboard admission. The owning task drains the actual native
+    /// operations independently; the desktop connection remains available.
+    pub fn close(&self) {
+        self.0.seal();
+    }
     /// The caller supplies the exact gesture/paste purpose before admission.
     /// Offers alone never cause a content read or native publication.
     pub fn request(
@@ -329,32 +334,31 @@ impl Drop for Session {
 }
 
 impl Prepared {
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.shared.caps
+    }
+    pub(crate) fn binding(&self) -> ([u8; 16], Side) {
+        (self.shared.desktop, self.shared.side)
+    }
     pub fn new(setup: Setup) -> Result<Self, Error> {
-        setup.policy.validate()?;
-        setup.admitted.validate()?;
-        setup.peer.validate()?;
-        let native = capabilities(setup.provider.as_ref())?;
-        if setup.admitted.shortcut != native.shortcut
-            || setup
-                .admitted
-                .receive
-                .iter()
-                .any(|format| !native.receive.contains(format))
-            || setup
-                .admitted
-                .offer
-                .iter()
-                .any(|format| !native.offer.contains(format))
-            || setup.admitted.limits.intersect(&native.limits)? != setup.admitted.limits
-            || setup.desktop == [0; 16]
-        {
-            return Err(rds_core::clipboard::Error::UnsupportedFormat.into());
-        }
-        let caps = setup.admitted.negotiate(&setup.peer)?;
         let inbox = setup
             .connection
             .uni_streams(UniHello::ClipboardMetadata { id: setup.desktop })
             .map_err(io::Error::other)?;
+        Self::claimed(setup, inbox)
+    }
+    /// The viewer claims before its greeting, then binds the accepted peer's
+    /// capabilities without relinquishing that exact route in between.
+    pub(crate) fn claimed(setup: Setup, inbox: UniStreams) -> Result<Self, Error> {
+        setup.policy.validate()?;
+        setup.peer.validate()?;
+        validate_admission(setup.provider.as_ref(), &setup.admitted)?;
+        if setup.desktop == [0; 16]
+            || inbox.kind() != (UniHello::ClipboardMetadata { id: setup.desktop })
+        {
+            return Err(rds_core::clipboard::Error::Identity.into());
+        }
+        let caps = setup.admitted.negotiate(&setup.peer)?;
         let (metadata, outgoing) = mpsc::channel(setup.policy.metadata_messages);
         let streams = Arc::new(Streams::new(
             setup.connection.clone(),
@@ -432,6 +436,28 @@ impl Prepared {
             task: Some(task),
         })
     }
+}
+
+pub(crate) fn validate_admission(
+    provider: &dyn Provider,
+    admitted: &Capabilities,
+) -> Result<(), Error> {
+    admitted.validate()?;
+    let native = capabilities(provider)?;
+    if admitted.shortcut != native.shortcut
+        || admitted
+            .receive
+            .iter()
+            .any(|format| !native.receive.contains(format))
+        || admitted
+            .offer
+            .iter()
+            .any(|format| !native.offer.contains(format))
+        || admitted.limits.intersect(&native.limits)? != admitted.limits
+    {
+        return Err(rds_core::clipboard::Error::UnsupportedFormat.into());
+    }
+    Ok(())
 }
 
 struct Actor {
