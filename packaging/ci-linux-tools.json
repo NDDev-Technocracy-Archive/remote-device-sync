@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "repository": "EmbarkStudios/cargo-deny",
+      "asset": 471598214,
+      "file": "cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz",
+      "size": 4936832,
+      "sha256": "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f",
+      "members": [
+        {
+          "path": "cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny",
+          "file": "cargo-deny",
+          "size": 8844624,
+          "sha256": "b329e25933d01c36dd7c47d84ea5716694f9b7caf53a5003d45674703a8ed54a",
+          "executable": true
+        }
+      ]
+    },
+    {
+      "repository": "nextest-rs/nextest",
+      "asset": 703600788,
+      "file": "cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz",
+      "size": 12161169,
+      "sha256": "1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4",
+      "members": [
+        {
+          "path": "cargo-nextest",
+          "file": "cargo-nextest",
+          "size": 36467312,
+          "sha256": "f746a548e01a5ec9f50d209ff3188fbf934a4969bddb1cd84a17af087912219b",
+          "executable": true
+        }
+      ]
+    },
+    {
+      "repository": "Boshen/cargo-shear",
+      "asset": 580851856,
+      "file": "cargo-shear-x86_64-unknown-linux-gnu.tar.gz",
+      "size": 1514719,
+      "sha256": "1d7d860fdbd0d95857ff1f2643cc70d20c5d31236159ad51be7ce436eb3e5bf4",
+      "members": [
+        {
+          "path": "cargo-shear",
+          "file": "cargo-shear",
+          "size": 3544832,
+          "sha256": "37f2f573a53c786c12c4a935976267351a731010e464a179b29af78c3b53c216",
+          "executable": true
+        }
+      ]
+    },
+    {
+      "repository": "zizmorcore/zizmor",
+      "asset": 703541932,
+      "file": "zizmor-x86_64-unknown-linux-gnu.tar.gz",
+      "size": 9418466,
+      "sha256": "bb110cc765eca9cd7efb2e284a956be5974c60027b0970f16397d86208a9957b",
+      "members": [
+        {
+          "path": "zizmor",
+          "file": "zizmor",
+          "size": 27485344,
+          "sha256": "04d55fb88e582a8e9a9ce6b4753df723fc44c35e0d1a8e8771db9e017066c6df",
+          "executable": true
+        }
+      ]
+    },
+    {
+      "repository": "rhysd/actionlint",
+      "asset": 384924896,
+      "file": "actionlint_1.7.12_linux_amd64.tar.gz",
+      "size": 2353908,
+      "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+      "members": [
+        {
+          "path": "actionlint",
+          "file": "actionlint",
+          "size": 6074530,
+          "sha256": "c872d6db8c6bf83a8eaa704fc93999f027d55dffbc63b8a6abdccb47df5f4cd4",
+          "executable": true
+        }
+      ]
+    }
+  ]
+}

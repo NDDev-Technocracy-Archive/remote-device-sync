@@ -25,13 +25,12 @@ jobs:
     - name: Select the Rust toolchain
       run: |
         rustup show active-toolchain
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
+    - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/release-assets@9d59594f4582fd6c8c3439d8a3c4e8e25639ad43
       with:
-        capability: rust
-    # cargo-machete is not run: in the retired library it never executed (an unsupported flag was
-    # swallowed by `|| true`), and a real run reports unused dependencies the product must remove first.
+        manifest: packaging/ci-linux-tools.json
+        directory: ${{ runner.temp }}/nddev-remote-tools
+        add-to-path: true
     - name: Supply chain
       shell: bash
       run: |
         cargo deny --manifest-path ./Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
-        (cd . && cargo audit --db "$RUNNER_TEMP/rustsec-advisory-db")

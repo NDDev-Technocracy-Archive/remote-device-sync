@@ -21,6 +21,17 @@ env:
   CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
+  check:
+    uses: NDDev-Technocracy-OpenNetwork/nddev-ci/.github/workflows/check.yml@9d59594f4582fd6c8c3439d8a3c4e8e25639ad43
+    permissions:
+      contents: read
+    with:
+      setup: true
+      rust-version: '1.99.1'
+      rust-components: rustfmt,clippy
+      tool-assets: packaging/ci-linux-tools.json
+      timeout-minutes: 60
+
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -31,25 +42,11 @@ jobs:
     - name: Select the Rust toolchain
       run: |
         rustup show active-toolchain
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
-      with:
-        ecosystems: cargo
-        # clippy and test builds are different artifacts; each keeps its own entry.
-        key: clippy
-    - name: Format
-      shell: bash
-      run: |
-        cargo fmt --all -- --check
     - name: Clippy
       shell: bash
       run: |
-        cargo clippy --locked --workspace --all-targets -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay,rds-server/owned-relay -- -D warnings && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
-    - name: Build
-      shell: bash
-      run: |
-        cargo build --locked --workspace --all-targets
-  # Tests and lints run side by side as the retired library ran them; one job holding
-  # both target trees ran out of runner disk.
+        cargo clippy --locked --workspace --all-targets --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay,rds-server/owned-relay -- -D warnings && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
+  # Optional feature lanes keep separate target trees from the shared default check.
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -60,15 +57,10 @@ jobs:
     - name: Select the Rust toolchain
       run: |
         rustup show active-toolchain
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
-      with:
-        ecosystems: cargo
-        # clippy and test builds are different artifacts; each keeps its own entry.
-        key: test
     - name: Test
       shell: bash
       run: |
-        cargo test --locked --workspace --no-fail-fast && cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml --lib --no-fail-fast && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay --no-fail-fast && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast && cargo test --locked -p rds-client --features transport-noq --test multiple_desktops --no-fail-fast && cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --no-fail-fast && { [ "$(uname -s)" != "Linux" ] || { cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1 && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" sh -c 'setxkbmap -keycodes xfree86 -layout us,ru && cargo test --locked -p rds-desktop --features x11 --test x11_native native_alt_navigation_resolves_the_actual_xkb_physical_map -- --ignored --exact --test-threads=1'; }; }
+        cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml --lib --no-fail-fast && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay --no-fail-fast && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast && cargo test --locked -p rds-client --features transport-noq --test multiple_desktops --no-fail-fast && cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --no-fail-fast && { [ "$(uname -s)" != "Linux" ] || { cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1 && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" sh -c 'setxkbmap -keycodes xfree86 -layout us,ru && cargo test --locked -p rds-desktop --features x11 --test x11_native native_alt_navigation_resolves_the_actual_xkb_physical_map -- --ignored --exact --test-threads=1'; }; }
   rust-platforms:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -114,30 +106,3 @@ jobs:
       run: 'cargo test --locked -p rds-desktop --features portal --lib portal:: -- --test-threads=1'
     - name: Exercise serving regressions with the portal build
       run: cargo test --locked -p rds-agent --features portal --lib
-
-  workflows:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
-        with:
-          capability: security
-      - name: Lint and audit workflows
-        run: |
-          actionlint
-          zizmor --offline --no-progress .github/workflows/ci.yml .github/workflows/observability.yml .github/workflows/supply-chain.yml .github/workflows/security.yml .github/dependabot.yml
-      - name: Scan new pull request commits, or the full history on main
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ -n "$BASE" ]; then
-            gitleaks git --no-banner --redact --log-opts="$BASE..$HEAD" .
-          else
-            gitleaks git --no-banner --redact .
-          fi
-

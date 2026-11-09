@@ -30,11 +30,9 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            cache_key: linux_x64
             features: rds-cli/desktop,rds-cli/transport-noq,rds-agent/portal,rds-agent/transport-noq
           - runner: macos-26
             target: aarch64-apple-darwin
-            cache_key: macos_arm64
             features: rds-cli/desktop,rds-cli/transport-noq,rds-agent/desktop,rds-agent/transport-noq
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -46,10 +44,6 @@ jobs:
           persist-credentials: false
       - name: Select the repository toolchain
         run: rustup show active-toolchain
-      - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/hosted-cache@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
-        with:
-          ecosystems: cargo
-          key: ${{ matrix.cache_key }}
       - name: Install the Linux portal ABI
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev libclang-dev xvfb
