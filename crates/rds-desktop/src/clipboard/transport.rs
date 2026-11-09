@@ -6,22 +6,19 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
 use rds_core::{
     UniHello,
-    clipboard::{Limits, PayloadKind, Receipt, Request, TransferHeader, TransferId},
+    clipboard::{Control, Limits, PayloadKind, Receipt, Request, TransferHeader, TransferId},
 };
 use rds_net::{Connection, RecvStream, SendStream, UniStreams};
 use tokio::{
     io::{AsyncRead, ReadBuf},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -37,7 +34,7 @@ pub enum Error {
     Body(#[from] stream::Error),
     #[error(transparent)]
     Native(#[from] native::Error),
-    #[error("clipboard body budget is occupied")]
+    #[error("clipboard transfer admission is occupied")]
     Busy,
     #[error("clipboard body owner is closed")]
     Closed,
@@ -63,7 +60,8 @@ pub struct Streams {
     connection: Connection,
     desktop: [u8; 16],
     limits: Limits,
-    next: AtomicU64,
+    metadata: mpsc::Sender<Control>,
+    next: Mutex<u64>,
     incoming: Arc<Semaphore>,
     outgoing: Arc<Semaphore>,
     stop: CancellationToken,
@@ -75,6 +73,7 @@ impl Streams {
         connection: Connection,
         desktop: [u8; 16],
         limits: Limits,
+        metadata: mpsc::Sender<Control>,
         original: NativeLifetime,
     ) -> Result<Self, Error> {
         limits.validate()?;
@@ -86,7 +85,8 @@ impl Streams {
             connection,
             desktop,
             limits,
-            next: AtomicU64::new(1),
+            metadata,
+            next: Mutex::new(1),
             incoming: Arc::new(Semaphore::new(parallel)),
             outgoing: Arc::new(Semaphore::new(parallel)),
             stop: CancellationToken::new(),
@@ -105,28 +105,33 @@ impl Streams {
         &self.limits
     }
 
-    /// The caller validates the selected offer before this admission, then
-    /// sends `incoming.request()` over the desktop metadata control stream.
-    /// IDs are never reused, including when a request is canceled before send.
-    pub fn request(
+    /// Reserve metadata capacity, body credit and the receive route before
+    /// publishing the request. Sequence allocation and queue commit share one
+    /// synchronous critical section, so concurrent callers cannot reorder IDs.
+    /// The selected offer must already be admitted by the desktop owner.
+    pub fn request_into(
         &self,
         offer: u64,
         kind: PayloadKind,
         bytes: Option<u64>,
         scope: CancellationToken,
+        original: NativeLifetime,
     ) -> Result<Incoming, Error> {
-        if scope.is_cancelled() {
+        if scope.is_cancelled() || self.stop.is_cancelled() {
             return Err(Error::Closed);
         }
+        let metadata = self.metadata.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => Error::Busy,
+            mpsc::error::TrySendError::Closed(_) => Error::Closed,
+        })?;
         let permit = self
             .incoming
             .clone()
             .try_acquire_owned()
             .map_err(|_| self.admission_error())?;
-        let sequence = self
-            .next
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-            .map_err(|_| Error::Closed)?;
+        let mut next = self.next.lock().map_err(|_| Error::Closed)?;
+        let sequence = *next;
+        *next = next.checked_add(1).ok_or(Error::Closed)?;
         let request = Request {
             id: TransferId {
                 desktop: self.desktop,
@@ -141,17 +146,21 @@ impl Streams {
             .connection
             .uni_streams(UniHello::ClipboardBody { id: request.id })
             .map_err(io::Error::other)?;
-        Ok(Incoming {
+        let incoming = Incoming {
             inbox,
-            request,
+            request: request.clone(),
             limits: self.limits.clone(),
             stop: self.stop.clone(),
             scope,
             lease: Arc::new(Lease {
                 _permit: permit,
                 _original: self.original.clone(),
+                _operation_original: Some(original),
             }),
-        })
+        };
+        metadata.send(Control::Request(request));
+        drop(next);
+        Ok(incoming)
     }
 
     fn admission_error(&self) -> Error {
@@ -160,6 +169,18 @@ impl Streams {
         } else {
             Error::Busy
         }
+    }
+
+    pub(crate) fn send_metadata(&self, control: Control) -> Result<(), Error> {
+        if self.stop.is_cancelled() {
+            return Err(Error::Closed);
+        }
+        self.metadata
+            .try_send(control)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::Busy,
+                mpsc::error::TrySendError::Closed(_) => Error::Closed,
+            })
     }
 
     /// Reserve before reading a native representation. The response's
@@ -180,6 +201,7 @@ impl Streams {
             lease: Arc::new(Lease {
                 _permit: permit,
                 _original: self.original.clone(),
+                _operation_original: None,
             }),
         })
     }
@@ -280,8 +302,10 @@ impl Response<'_> {
 }
 
 struct Lease {
-    _permit: OwnedSemaphorePermit,
+    _operation_original: Option<NativeLifetime>,
     _original: NativeLifetime,
+    // Admission is released after the request's original owner is cleaned up.
+    _permit: OwnedSemaphorePermit,
 }
 
 pub struct Incoming {
@@ -309,11 +333,6 @@ impl Received {
 impl Incoming {
     pub fn request(&self) -> &Request {
         &self.request
-    }
-
-    pub(crate) fn retaining(mut self, original: NativeLifetime) -> Self {
-        self.lease = Arc::new((self.lease, original));
-        self
     }
 
     async fn accept(&mut self) -> Result<Receiving, Error> {

@@ -123,6 +123,12 @@ Selected file capabilities keep their separate selection authority, rather than
 retaining a manifest body's transfer credit for the lifetime of a file promise.
 A forwarding source adds that owner to its upstream reader/proof; it never
 replaces the upstream or native paste authority.
+The body owner also owns one metadata queue. Request ID allocation, exact route
+claim and queue commit share a synchronous admission section; queue rejection
+precedes body/ID allocation. Each request retains its original purpose before
+publication, and that cleanup precedes body-credit release. Selected-file
+requests, receipts and cancellations use this same queue. See
+[request-order qualification](reports/clipboard-request-order.md).
 It neither opens an OS provider nor authorizes clipboard access by itself.
 Real loopback tests cover simultaneous requests, a late canceled response,
 selected-file integrity without a staging file, and progressing control/media
