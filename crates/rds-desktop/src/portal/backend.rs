@@ -145,7 +145,6 @@ impl WaylandDesktop {
         let (finished_tx, finished) = watch::channel(false);
         tokio::spawn(async move {
             let _store = store;
-            let mut tick = tokio::time::interval(Duration::from_millis(20));
             tokio::pin!(stop);
             let reason = loop {
                 tokio::select! {
@@ -160,15 +159,13 @@ impl WaylandDesktop {
                             None => {},
                         }
                     },
-                    _ = tick.tick() => {
-                        if closing_input.stopped() {
-                            tracing::warn!("prepared Wayland EIS input worker stopped");
-                            break StopReason::NativeFailure;
-                        }
-                        if capture.slots.iter().any(|slot| slot.extent().is_err()) {
-                            tracing::warn!("prepared Wayland PipeWire capture unavailable");
-                            break StopReason::NativeFailure;
-                        }
+                    _ = closing_input.closed_signal() => {
+                        tracing::warn!("prepared Wayland EIS input worker stopped");
+                        break StopReason::NativeFailure;
+                    },
+                    _ = capture.closed_signal() => {
+                        tracing::warn!("prepared Wayland PipeWire capture unavailable");
+                        break StopReason::NativeFailure;
                     },
                 }
             };

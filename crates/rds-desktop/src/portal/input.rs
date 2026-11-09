@@ -16,6 +16,7 @@ use reis::{
 };
 use rustix::event::{PollFd, PollFlags};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use crate::{DesktopError, InputSink};
 
@@ -105,6 +106,7 @@ fn check_pending(
 }
 
 pub(super) struct Group {
+    closed: CancellationToken,
     sender: mpsc::SyncSender<Request>,
     stop: Arc<AtomicBool>,
     pub ready: Arc<AtomicBool>,
@@ -126,6 +128,8 @@ impl Group {
         let stop = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(AtomicBool::new(false));
         let era = Arc::new(AtomicU64::new(0));
+        let closed = CancellationToken::new();
+        let closing = closed.clone();
         let (stopping, readiness, generation) = (stop.clone(), ready.clone(), era.clone());
         let task = tokio::task::spawn_blocking(move || {
             // The converter has non-Send callbacks. Construct and retain it on
@@ -134,6 +138,7 @@ impl Group {
             let _exit = WorkerExit {
                 ready: &readiness,
                 stop: &stopping,
+                closed: &closing,
             };
             let result = run(fd, mappings, receiver, &stopping, &readiness, &generation);
             if result.is_err() {
@@ -142,6 +147,7 @@ impl Group {
             result
         });
         Ok(Self {
+            closed,
             sender,
             stop,
             ready,
@@ -153,7 +159,7 @@ impl Group {
     }
 
     pub fn sink(&self, index: u32, extent: (u32, u32)) -> Result<Box<dyn InputSink>, DesktopError> {
-        if self.stop.load(Ordering::Acquire) || !self.ready.load(Ordering::Acquire) {
+        if self.stopped() || !self.ready.load(Ordering::Acquire) {
             return Err(error());
         }
         let permit = self
@@ -182,6 +188,9 @@ impl Group {
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
+    pub async fn closed_signal(&self) {
+        self.closed.cancelled().await;
+    }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
     }
@@ -201,6 +210,7 @@ impl Drop for Group {
 }
 
 struct WorkerExit<'a> {
+    closed: &'a CancellationToken,
     ready: &'a AtomicBool,
     stop: &'a AtomicBool,
 }
@@ -208,6 +218,7 @@ impl Drop for WorkerExit<'_> {
     fn drop(&mut self) {
         self.ready.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Release);
+        self.closed.cancel();
     }
 }
 
@@ -786,10 +797,12 @@ mod exit_tests {
 
     #[test]
     fn input_worker_unwind_seals_old_leases_and_readiness() {
+        let closed = CancellationToken::new();
         let ready = AtomicBool::new(true);
         let stop = AtomicBool::new(false);
         let result = std::panic::catch_unwind(|| {
             let _exit = WorkerExit {
+                closed: &closed,
                 ready: &ready,
                 stop: &stop,
             };
@@ -798,5 +811,6 @@ mod exit_tests {
         assert!(result.is_err());
         assert!(!ready.load(Ordering::Acquire));
         assert!(stop.load(Ordering::Acquire));
+        assert!(closed.is_cancelled());
     }
 }

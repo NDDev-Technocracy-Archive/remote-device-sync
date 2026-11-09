@@ -1,6 +1,8 @@
 //! Owned PipeWire I/O on one bounded native worker, with newest shared pixels.
 
+use std::net::Shutdown;
 use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -8,6 +10,7 @@ use std::time::Duration;
 use pipewire as pw;
 use pw::{properties::properties, spa};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use crate::DesktopError;
 
@@ -36,6 +39,8 @@ pub(super) use crate::capture::latest::Slot;
 pub(super) struct Group {
     pub slots: Vec<Arc<Slot>>,
     stop: Arc<AtomicBool>,
+    stop_wake: UnixStream,
+    failed: CancellationToken,
     task: Option<tokio::task::JoinHandle<Result<(), DesktopError>>>,
 }
 
@@ -67,12 +72,23 @@ impl Group {
             .map(|(index, _)| Slot::new(*index, None))
             .collect();
         let stop = Arc::new(AtomicBool::new(false));
+        let (stop_wake, stop_reader) = UnixStream::pair().map_err(|_| failure())?;
+        let failed = CancellationToken::new();
+        let failure_signal = failed.clone();
         let stopping = stop.clone();
         let writing = slots.clone();
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let _exit = WorkerExit(&writing);
-            let result = run(video, &sources, &writing, &stopping, interval);
+            let _exit = WorkerExit(&writing, &failure_signal);
+            let result = run(
+                video,
+                &sources,
+                &writing,
+                &stopping,
+                interval,
+                stop_reader,
+                &failure_signal,
+            );
             if result.is_err() {
                 tracing::warn!("Wayland PipeWire capture worker failed");
             }
@@ -81,15 +97,26 @@ impl Group {
         Ok(Self {
             slots,
             stop,
+            stop_wake,
+            failed,
             task: Some(task),
         })
     }
 
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Release);
+        if self.stop.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // One-shot EOF wakes the native loop even with no changed pixels.
+        // An already-disconnected reader has finished and needs no signal.
+        let _ = self.stop_wake.shutdown(Shutdown::Write);
         for slot in &self.slots {
             slot.fail();
         }
+    }
+
+    pub async fn closed_signal(&self) {
+        self.failed.cancelled().await;
     }
 
     pub async fn close(&mut self) -> Result<(), DesktopError> {
@@ -118,10 +145,28 @@ impl AsRef<[u8]> for BudgetedPixels {
 }
 
 struct Data {
+    failed: CancellationToken,
     format: spa::param::video::VideoInfoRaw,
     slot: Arc<Slot>,
     slots: Vec<Arc<Slot>>,
     budget: Arc<Semaphore>,
+}
+
+impl Data {
+    fn fail(&self) {
+        self.slot.fail();
+        self.failed.cancel();
+    }
+}
+
+fn stop_source(
+    loop_: &pw::loop_::Loop,
+    receiver: UnixStream,
+    stopping: Arc<AtomicBool>,
+) -> pw::loop_::IoSource<'_, UnixStream> {
+    loop_.add_io(receiver, spa::support::system::IoFlags::IN, move |_| {
+        stopping.store(true, Ordering::Release);
+    })
 }
 
 fn stream_format(interval: Option<Duration>) -> Result<Vec<u8>, DesktopError> {
@@ -218,13 +263,16 @@ fn run(
     video: OwnedFd,
     sources: &[(u32, u32)],
     slots: &[Arc<Slot>],
-    stop: &AtomicBool,
+    stop: &Arc<AtomicBool>,
     interval: Option<Duration>,
+    stop_reader: UnixStream,
+    failed: &CancellationToken,
 ) -> Result<(), DesktopError> {
     // Rc-backed PipeWire objects are created, used and destroyed on this worker.
     // No unsafe Send wrapper, foreign pointer or loop handle crosses threads.
     pw::init();
     let loop_ = pw::main_loop::MainLoopBox::new(None).map_err(|_| failure())?;
+    let _stop_source = stop_source(loop_.loop_(), stop_reader, stop.clone());
     let context = pw::context::ContextBox::new(loop_.loop_(), None).map_err(|_| failure())?;
     let core = context.connect_fd(video, None).map_err(|_| failure())?;
     let budget = Arc::new(Semaphore::new(MAX_RETAINED_BYTES as usize));
@@ -243,6 +291,7 @@ fn run(
         .map_err(|_| failure())?;
         let listener = stream
             .add_local_listener_with_user_data(Data {
+                failed: failed.clone(),
                 format: Default::default(),
                 slot: slot.clone(),
                 slots: slots.to_vec(),
@@ -257,7 +306,7 @@ fn run(
                         unconnected = state == pw::stream::StreamState::Unconnected,
                         "Wayland PipeWire stream failed or disconnected"
                     );
-                    data.slot.fail();
+                    data.fail();
                 }
             })
             .param_changed(|_, data, id, param| {
@@ -268,7 +317,7 @@ fn run(
                     return;
                 };
                 if data.format.parse(param).is_err() {
-                    data.slot.fail();
+                    data.fail();
                     return;
                 }
                 let extent = (data.format.size().width, data.format.size().height);
@@ -278,7 +327,7 @@ fn run(
                         spa::param::video::VideoFormat::BGRA | spa::param::video::VideoFormat::BGRx
                     )
                 {
-                    data.slot.fail();
+                    data.fail();
                     return;
                 }
                 if let Ok(mut state) = data.slot.state.lock() {
@@ -296,7 +345,7 @@ fn run(
                         .checked_add(total)
                 });
                 if total.is_none_or(|total| total > MAX_PIXELS_BYTES) {
-                    data.slot.fail();
+                    data.fail();
                 }
                 data.slot.notify();
             })
@@ -322,7 +371,7 @@ fn run(
                 };
                 let datas = buffer.datas_mut();
                 if datas.len() != 1 {
-                    data.slot.fail();
+                    data.fail();
                     return;
                 }
                 let native = &mut datas[0];
@@ -337,7 +386,7 @@ fn run(
                     return;
                 }
                 let Some(memory) = native.data() else {
-                    data.slot.fail();
+                    data.fail();
                     return;
                 };
                 let Ok(mut frame) = crate::capture::frame::copy_bgra(
@@ -348,7 +397,7 @@ fn run(
                     extent,
                     data.format.format() == spa::param::video::VideoFormat::BGRx,
                 ) else {
-                    data.slot.fail();
+                    data.fail();
                     return;
                 };
                 frame.data = bytes::Bytes::from_owner(BudgetedPixels {
@@ -375,11 +424,7 @@ fn run(
         streams.push(stream);
     }
     while !stop.load(Ordering::Acquire) {
-        if loop_
-            .loop_()
-            .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)))
-            < 0
-        {
+        if loop_.loop_().iterate(pw::loop_::Timeout::Infinite) < 0 {
             return Err(failure());
         }
     }
@@ -392,18 +437,65 @@ fn run(
 
 // Publish exit even when a native adapter panics outside a foreign callback.
 // The source coordinator must never keep serving the last retained pixels.
-struct WorkerExit<'a>(&'a [Arc<Slot>]);
+struct WorkerExit<'a>(&'a [Arc<Slot>], &'a CancellationToken);
 impl Drop for WorkerExit<'_> {
     fn drop(&mut self) {
         for slot in self.0 {
             slot.fail();
         }
+        self.1.cancel();
     }
 }
 
 #[cfg(test)]
 mod exit_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_native_loop_waits_for_the_owned_stop_fd_including_an_early_stop() {
+        use std::sync::atomic::AtomicUsize;
+        for early in [false, true] {
+            let (wake, reader) = UnixStream::pair().unwrap();
+            let stopped = Arc::new(AtomicBool::new(false));
+            let stopping = stopped.clone();
+            let iterations = Arc::new(AtomicUsize::new(0));
+            let observed = iterations.clone();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            if early {
+                wake.shutdown(Shutdown::Write).unwrap();
+            }
+            let worker = tokio::task::spawn_blocking(move || {
+                pw::init();
+                let loop_ = pw::main_loop::MainLoopBox::new(None).unwrap();
+                let _source = stop_source(loop_.loop_(), reader, stopping.clone());
+                entered.send(()).unwrap();
+                while !stopping.load(Ordering::Acquire) {
+                    assert!(loop_.loop_().iterate(pw::loop_::Timeout::Infinite) >= 0);
+                    observed.fetch_add(1, Ordering::AcqRel);
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            if !early {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(!worker.is_finished());
+                assert_eq!(
+                    iterations.load(Ordering::Acquire),
+                    0,
+                    "idle native loop woke without its OS event"
+                );
+                wake.shutdown(Shutdown::Write).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(2), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(stopped.load(Ordering::Acquire));
+            assert_eq!(iterations.load(Ordering::Acquire), 1);
+        }
+    }
     #[test]
     fn copy_cap_validates_and_preserves_default() {
         assert_eq!(copy_interval(None).unwrap(), None);
@@ -481,12 +573,14 @@ mod exit_tests {
     #[test]
     fn native_worker_unwind_invalidates_retained_monitor_inventory() {
         let slots = vec![Slot::fixture(10, (3840, 2160))];
+        let failed = CancellationToken::new();
         let result = std::panic::catch_unwind(|| {
-            let _exit = WorkerExit(&slots);
+            let _exit = WorkerExit(&slots, &failed);
             panic!("fixture native worker fault");
         });
         assert!(result.is_err());
         assert!(slots[0].extent().is_err());
         assert!(slots[0].current().is_err());
+        assert!(failed.is_cancelled());
     }
 }
