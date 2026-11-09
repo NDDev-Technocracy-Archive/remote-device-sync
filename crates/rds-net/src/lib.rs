@@ -302,9 +302,12 @@ impl EndpointConfig {
 /// Bind an endpoint on the configured backend.
 pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     match config.backend {
-        Backend::Iroh => backends::iroh::bind_endpoint(config)
-            .await
-            .map(Endpoint::new_iroh),
+        Backend::Iroh => {
+            let alpns = config.alpns.clone().into();
+            backends::iroh::bind_endpoint(config)
+                .await
+                .map(|inner| Endpoint::new_iroh(inner, alpns))
+        }
         #[cfg(feature = "transport-noq")]
         Backend::Noq => backends::noq::bind_endpoint(config)
             .await
@@ -337,6 +340,7 @@ pub async fn bind_noq_with_socket(
 pub struct Endpoint {
     inner: EndpointInner,
     metrics: metrics::Registry,
+    alpns: std::sync::Arc<[Vec<u8>]>,
 }
 
 #[derive(Clone)]
@@ -347,19 +351,22 @@ enum EndpointInner {
 }
 
 impl Endpoint {
-    fn new_iroh(inner: iroh::Endpoint) -> Self {
+    fn new_iroh(inner: iroh::Endpoint, alpns: std::sync::Arc<[Vec<u8>]>) -> Self {
         Self {
             inner: EndpointInner::Iroh(inner),
             metrics: metrics::Registry::default(),
+            alpns,
         }
     }
 
     #[cfg(feature = "transport-noq")]
     fn new_noq(inner: backends::noq::Endpoint) -> Self {
         let metrics = inner.metrics();
+        let alpns = inner.configured_alpns().into();
         Self {
             inner: EndpointInner::Noq(Box::new(inner)),
             metrics,
+            alpns,
         }
     }
 
@@ -412,6 +419,45 @@ impl Endpoint {
                 .context("connect to peer"),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.connect(target, alpn).await.map(Connection::new_noq),
+        }?;
+        self.metrics.connection_opened();
+        Ok(conn)
+    }
+
+    /// Offer an explicit bounded set of configured protocols in one handshake.
+    ///
+    /// Unlike [`Self::connect`], the caller admits every listed protocol and
+    /// must inspect [`Connection::alpn`] before opening application services.
+    /// The server selects a common protocol using its preference order. No
+    /// default protocol is appended and a failed handshake is never retried
+    /// with a different offer. Protocol selection does not authorize a service.
+    pub async fn connect_offered(
+        &self,
+        target: EndpointAddr,
+        alpns: &[Vec<u8>],
+    ) -> anyhow::Result<Connection> {
+        config::validate_alpns(alpns)?;
+        anyhow::ensure!(
+            alpns.iter().all(|alpn| self.alpns.contains(alpn)),
+            "offered ALPN not configured on this endpoint"
+        );
+        let conn = match &self.inner {
+            EndpointInner::Iroh(ep) => {
+                let (primary, additional) = alpns.split_first().context("empty ALPN offer")?;
+                let options = iroh::endpoint::ConnectOptions::new()
+                    .with_additional_alpns(additional.to_vec());
+                ep.connect_with_opts(backends::iroh::convert::addr(&target), primary, options)
+                    .await
+                    .context("prepare protocol offer")?
+                    .await
+                    .map(Connection::new_iroh)
+                    .context("connect with protocol offer")
+            }
+            #[cfg(feature = "transport-noq")]
+            EndpointInner::Noq(ep) => ep
+                .connect_offered(target, alpns)
+                .await
+                .map(Connection::new_noq),
         }?;
         self.metrics.connection_opened();
         Ok(conn)
@@ -595,6 +641,16 @@ impl Connection {
         Self {
             inner: ConnectionInner::Noq(inner),
             demux: Default::default(),
+        }
+    }
+
+    /// Actual protocol selected by the completed TLS handshake, if available.
+    /// This is transport metadata, not a service or clipboard authorization.
+    pub fn alpn(&self) -> Option<Vec<u8>> {
+        match &self.inner {
+            ConnectionInner::Iroh(c) => Some(c.alpn().to_vec()),
+            #[cfg(feature = "transport-noq")]
+            ConnectionInner::Noq(c) => c.alpn(),
         }
     }
 
