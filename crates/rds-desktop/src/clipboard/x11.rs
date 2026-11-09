@@ -1051,7 +1051,7 @@ mod tests {
                     recv,
                     hello,
                     SessionConfig {
-                        reverse_clipboard: true,
+                        clipboard: crate::ServingClipboard::Text { reverse: true },
                         payload_receipts: true,
                         frame_route: Some(UniHello::DesktopFrames { id: session }),
                         producer: Some(Box::new(SyntheticProducer::new(5, 32, 32, 64))),

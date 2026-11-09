@@ -1072,7 +1072,7 @@ mod tests {
                                             write_frame(&mut send, &HelloAck::DesktopV5(caps)).await.unwrap();
                                             rds_desktop::serve_desktop_with(conn, send, recv, hello, rds_desktop::SessionConfig {
                                                 frame_route: Some(UniHello::DesktopFrames { id: session }),
-                                                reverse_clipboard: true,
+                                                clipboard: rds_desktop::ServingClipboard::Text { reverse: true },
                                                 payload_receipts: v5_receipts,
                                                 input_sink: Some(Box::new(NoopInput)),
                                                 producer: Some(Box::new(rds_desktop::SyntheticProducer::new(30, 640, 480, 1024))),

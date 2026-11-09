@@ -1367,6 +1367,7 @@ async fn relay_mode_preserves_payloads_and_defers_decode_to_consumer() {
             output_height: None,
             payload_receipts: false,
             reverse_clipboard: false,
+            native_clipboard: None,
         },
     )
     .await
