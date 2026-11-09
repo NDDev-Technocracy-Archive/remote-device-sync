@@ -705,23 +705,11 @@ fn run(
     let mut pending: Option<Pending> = None;
     // Diagnostic-only target, capped per actor lifetime. No input payloads.
     let mut timing_samples = 0_u32;
-    let mut queued_work = false;
     'running: while !stop.load(Ordering::Acquire) {
         check_pending(&mut pending, era.load(Ordering::Acquire), Instant::now())?;
-        actor.release_closed()?;
-        let writable = flush(&actor.context)?;
-        if !writable && let Some(pending) = &mut pending {
-            pending.flushed = true;
-        }
-        let deadline = pending
-            .as_ref()
-            .map(|pending| pending.canceled_until.unwrap_or(pending.request.deadline))
-            .or_else(|| queued_work.then(Instant::now));
-        poll(&actor.context, writable, wake, deadline)?;
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        queued_work = false;
+        // A socket read may have buffered EI events beyond the completed
+        // handshake. Drain them, and flush their generated requests, before
+        // waiting for another kernel-readiness edge.
         actor.events(era)?;
         let available = actor.ready();
         ready.store(available, Ordering::Release);
@@ -746,6 +734,7 @@ fn run(
             // A canceled, already-flushed action is never replayed or ACKed.
             // Its actual sync callback has now drained, so fresh leases can run.
         }
+        let mut queued_work = false;
         if pending.is_none() {
             // Drain refused queue entries while the coalesced notification is
             // consumed. Bound the batch so a noisy caller cannot starve EI I/O.
@@ -795,6 +784,19 @@ fn run(
                 }
             }
         }
+        check_pending(&mut pending, era.load(Ordering::Acquire), Instant::now())?;
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let writable = flush(&actor.context)?;
+        if !writable && let Some(pending) = &mut pending {
+            pending.flushed = true;
+        }
+        let deadline = pending
+            .as_ref()
+            .map(|pending| pending.canceled_until.unwrap_or(pending.request.deadline))
+            .or_else(|| queued_work.then(Instant::now));
+        poll(&actor.context, writable, wake, deadline)?;
     }
     // Closing this EIS peer releases its virtual-device holds in the compositor;
     // it has no ownership over another application's (e.g. Deskflow) devices.
