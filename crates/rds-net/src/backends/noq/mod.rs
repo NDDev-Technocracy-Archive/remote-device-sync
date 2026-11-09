@@ -272,7 +272,11 @@ async fn bind_socket(
         id: secret_key.public(),
         local_addr,
         local_addrs,
-        client_configs: Arc::new(client_configs),
+        client_protocols: Arc::new(ClientProtocols {
+            exact: client_configs,
+            tls,
+            transport,
+        }),
         relay_dead: relay_dead_rx,
         _relay_dead_tx: relay_dead_tx.clone(),
         relay,
@@ -353,6 +357,13 @@ fn advertised_addrs(local: SocketAddr) -> std::collections::BTreeSet<TransportAd
     out
 }
 
+/// Exact and explicit-offer configs retain one identity and bounded TLS cache.
+struct ClientProtocols {
+    exact: std::collections::BTreeMap<Vec<u8>, noq::ClientConfig>,
+    tls: tls::TlsConfig,
+    transport: Arc<noq::TransportConfig>,
+}
+
 /// An owned-transport endpoint: our socket, our TLS, our path policy.
 #[derive(Clone)]
 pub struct Endpoint {
@@ -360,7 +371,7 @@ pub struct Endpoint {
     id: EndpointId,
     local_addr: SocketAddr,
     local_addrs: Vec<SocketAddr>,
-    client_configs: Arc<std::collections::BTreeMap<Vec<u8>, noq::ClientConfig>>,
+    client_protocols: Arc<ClientProtocols>,
     /// Relay tunnel handles — index order matches `relay_endpoints`
     /// configuration; slot i owns the `198.19.i.x` synthetic space.
     relay: Vec<relay::RelayHandle>,
@@ -473,9 +484,43 @@ impl Endpoint {
     /// additional addresses then become paths on that same connection.
     /// `alpn` must be one of the protocol ids configured at bind time.
     pub async fn connect(&self, target: EndpointAddr, alpn: &[u8]) -> anyhow::Result<Connection> {
-        let Some(client_config) = self.client_configs.get(alpn) else {
+        let Some(client_config) = self.client_protocols.exact.get(alpn) else {
             bail!("alpn {alpn:?} not configured on this endpoint");
         };
+        self.connect_with_config(target, client_config).await
+    }
+
+    pub(crate) fn configured_alpns(&self) -> Vec<Vec<u8>> {
+        self.client_protocols.exact.keys().cloned().collect()
+    }
+
+    /// Explicit alternatives for one handshake; exact connects remain exact.
+    pub(crate) async fn connect_offered(
+        &self,
+        target: EndpointAddr,
+        alpns: &[Vec<u8>],
+    ) -> anyhow::Result<Connection> {
+        crate::config::validate_alpns(alpns)?;
+        anyhow::ensure!(
+            alpns
+                .iter()
+                .all(|alpn| self.client_protocols.exact.contains_key(alpn)),
+            "offered ALPN not configured on this endpoint"
+        );
+        if let [alpn] = alpns {
+            return self.connect(target, alpn).await;
+        }
+        let crypto = self.client_protocols.tls.client_config(alpns.to_vec())?;
+        let mut client = noq::ClientConfig::new(Arc::new(crypto));
+        client.transport_config(self.client_protocols.transport.clone());
+        self.connect_with_config(target, &client).await
+    }
+
+    async fn connect_with_config(
+        &self,
+        target: EndpointAddr,
+        client_config: &noq::ClientConfig,
+    ) -> anyhow::Result<Connection> {
         let remote_id = target.id;
         anyhow::ensure!(
             self.transport_health
@@ -877,6 +922,15 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
+    /// Actual ALPN from this completed TLS handshake; never an offered default.
+    pub fn alpn(&self) -> Option<Vec<u8>> {
+        self.inner
+            .handshake_data()?
+            .downcast::<noq::crypto::rustls::HandshakeData>()
+            .ok()?
+            .protocol
+    }
+
     pub(crate) fn observer(&self) -> ConnectionObserver {
         ConnectionObserver {
             inner: self.inner.weak_handle(),

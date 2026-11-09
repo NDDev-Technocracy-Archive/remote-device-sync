@@ -142,7 +142,12 @@ async fn retiring_a_blackholed_path_preserves_already_sent_reliable_bytes() {
 async fn stream_work_observation_excludes_probes_and_clears_after_ack() {
     tokio::time::timeout(Duration::from_secs(8), async {
         let (client, server, _, loss, dropped, _) = endpoints().await;
-        let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();
+        let cfg = client
+            .client_protocols
+            .exact
+            .get(rds_core::ALPN)
+            .unwrap()
+            .clone();
         let name = tls::name::encode(server.id());
         let (a, b) = tokio::join!(
             client
@@ -203,7 +208,12 @@ async fn stream_work_observation_excludes_probes_and_clears_after_ack() {
 async fn backup_probe_ack_uses_the_backup_path_while_primary_is_available() {
     tokio::time::timeout(Duration::from_secs(8), async {
         let (client, server, secondary_addr, loss, _, _) = endpoints().await;
-        let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();
+        let cfg = client
+            .client_protocols
+            .exact
+            .get(rds_core::ALPN)
+            .unwrap()
+            .clone();
         let name = tls::name::encode(server.id());
         let (a, b) = tokio::join!(
             client
@@ -273,7 +283,12 @@ async fn latency_driver_reopens_an_abandoned_ticket_standby_without_reconnecting
     use tokio_stream::StreamExt;
     tokio::time::timeout(Duration::from_secs(12), async {
         let (client, server, secondary_addr, _, _, local_addrs) = endpoints().await;
-        let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();
+        let cfg = client
+            .client_protocols
+            .exact
+            .get(rds_core::ALPN)
+            .unwrap()
+            .clone();
         let name = tls::name::encode(server.id());
         let (a, b) = tokio::join!(
             client
@@ -393,7 +408,12 @@ async fn exercise(automatic: bool) {
         let (client, server, secondary_addr, enabled, dropped, _) = endpoints().await;
         // Raw connections deliberately bypass QNT advertisement and the policy
         // driver, so no extra route can hide the injected loss or manual switch.
-        let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();
+        let cfg = client
+            .client_protocols
+            .exact
+            .get(rds_core::ALPN)
+            .unwrap()
+            .clone();
         let name = tls::name::encode(server.id());
         let (a, b) = tokio::join!(
             client

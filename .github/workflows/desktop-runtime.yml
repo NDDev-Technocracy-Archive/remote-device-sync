@@ -69,6 +69,11 @@ jobs:
           cargo test --locked -p rds-desktop -p rds-agent -p rds-cli --lib --bins --features "$FEATURES"
           cargo test --locked -p rds-agent --test native_clipboard --features "$FEATURES"
           cargo test --locked -p rds-audio
+      - name: Check protocol offers and peer identity
+        run: |
+          cargo clippy --locked -p rds-net --all-targets --features transport-noq -- -D warnings
+          cargo test --locked -p rds-net --test protocol_offer
+          cargo test --locked -p rds-net --features transport-noq --test protocol_offer --test alpn_selection
       - name: Check isolated native X11 clipboard
         if: runner.os == 'Linux'
         run: |
