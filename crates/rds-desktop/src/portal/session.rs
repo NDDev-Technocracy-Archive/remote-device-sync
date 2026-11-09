@@ -219,6 +219,7 @@ pub(super) async fn open(
         .await?
         .response()
         .map_err(|_| error("monitor selection"))?;
+        let mut clipboard_requested = false;
         let clipboard = match rpc(
             "clipboard proxy",
             ashpd::desktop::clipboard::Clipboard::with_connection(connection_for_start.clone()),
@@ -233,6 +234,7 @@ pub(super) async fn open(
                 .await
                 .is_ok()
                 {
+                    clipboard_requested = true;
                     match super::clipboard::Group::prepare(
                         proxy,
                         session.clone(),
@@ -248,12 +250,32 @@ pub(super) async fn open(
                         }
                     }
                 } else {
+                    tracing::warn!("Wayland clipboard request failed");
                     None
                 }
             }
-            _ => None,
+            Ok(proxy) => {
+                tracing::warn!(
+                    version = proxy.version(),
+                    "Wayland clipboard protocol unsupported"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!("Wayland clipboard proxy unavailable");
+                None
+            }
         };
         let selected = start(&remote, &session, &owner, &connection_for_start).await?;
+        // Interface presence and a successful request are not permission.
+        // Record only bounded status, never portal errors or restore tokens.
+        tracing::info!(
+            restored_permission = restore_token.is_some(),
+            clipboard_requested,
+            clipboard_signals_prepared = clipboard.is_some(),
+            clipboard_granted = selected.is_clipboard_enabled(),
+            "Wayland portal clipboard permission result"
+        );
         if !selected.devices().contains(devices)
             || selected.streams().is_empty()
             || selected.streams().len() > MAX_MONITORS
@@ -307,7 +329,7 @@ pub(super) async fn open(
                 Some(group) => match group.activate().await {
                     Ok(()) => Some(group),
                     Err(_) => {
-                        tracing::warn!("Wayland clipboard signal subscription unavailable");
+                        tracing::warn!("Wayland clipboard activation failed");
                         None
                     }
                 },
