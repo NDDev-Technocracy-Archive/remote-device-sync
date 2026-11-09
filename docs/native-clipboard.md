@@ -130,6 +130,14 @@ publication, and that cleanup precedes body-credit release. Selected-file
 requests, receipts and cancellations use this same queue. See
 [request-order qualification](reports/clipboard-request-order.md).
 It neither opens an OS provider nor authorizes clipboard access by itself.
+An admitted request also owns its exact peer-failure slot before metadata is
+published. `Streams::refused` validates the desktop and routes a sticky first
+failure only to that request. It interrupts body admission, reads, native-file
+receives and remote file completion without closing the screen connection.
+Verified representation bytes retain that signal and their original body
+reservation through parsing/publication. Unknown or finished IDs create no new
+authorization. The original native work still owns its reservation until actual
+cleanup. See [refusal qualification](reports/clipboard-refusal.md).
 Real loopback tests cover simultaneous requests, a late canceled response,
 selected-file integrity without a staging file, and progressing control/media
 beside a backpressured file. The native handshake, manager and GUI still need
