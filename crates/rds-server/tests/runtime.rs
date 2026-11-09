@@ -1,4 +1,9 @@
 #![cfg(unix)]
+// The included shared fixture consumes these explicit test-target bindings.
+use iroh::{EndpointId as BackendEndpointId, SecretKey as BackendSecretKey};
+use rcgen::{CertifiedKey, KeyPair, generate_simple_self_signed};
+#[cfg(feature = "owned-relay")]
+use rds_net::EndpointAddr;
 const BINARY: &str = env!("CARGO_BIN_EXE_rds-server");
 const BIND_FLAG: &str = "--relay-addr";
 const HOSTS_DIRECTORY: bool = true;
@@ -39,8 +44,7 @@ async fn invalid_host_inputs_are_rejected_before_identity_or_catalog_creation() 
             _ => {
                 match case {
                     7 => fs::write(&cert, b"bad certificate").unwrap(),
-                    8 => fs::write(&key, rcgen::KeyPair::generate().unwrap().serialize_pem())
-                        .unwrap(),
+                    8 => fs::write(&key, KeyPair::generate().unwrap().serialize_pem()).unwrap(),
                     _ => fs::write(&key, vec![b'x'; 64 * 1024 + 1]).unwrap(),
                 }
                 args(&[

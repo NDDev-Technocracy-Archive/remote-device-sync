@@ -28,11 +28,9 @@ private data.
 ## Checks
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --workspace --all-targets --features rds-desktop/x11 -- -D warnings   # linux lane
-cargo test --workspace
-cargo deny check   # if cargo-deny installed
+just check  # build-free formatting, workflow, dependency and whitespace checks
+just test   # denied Clippy, nextest and doctests; build devices/runners only
+just test rds-desktop/x11  # Linux native feature lane
 scripts/checkpoint.sh <gate>   # wave-close gate; registered ids only
 ```
 
