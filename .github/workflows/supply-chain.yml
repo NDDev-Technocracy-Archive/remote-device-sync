@@ -3,7 +3,7 @@ name: supply-chain
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [dev, main]
   workflow_dispatch:
 
 permissions:
@@ -19,15 +19,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+    - name: Disable external telemetry
+      uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/telemetry@52d8302d2272967a21fd8e3ae594205588648777 # v0.6.28
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - name: Select the Rust toolchain
-      run: |
-        rustup show active-toolchain
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
+    - name: Prepare the declared Rust SDK
+      uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@52d8302d2272967a21fd8e3ae594205588648777 # v0.6.28
       with:
-        capability: rust
+        rust-version: "1.99.1"
+        rust-components: rustfmt,clippy
+    - name: Prepare supply-chain tools
+      uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@52d8302d2272967a21fd8e3ae594205588648777 # v0.6.28
+      with:
+        tools: cargo-deny@0.20.2,cargo-audit@0.22.2
     # cargo-machete is not run: in the retired library it never executed (an unsupported flag was
     # swallowed by `|| true`), and a real run reports unused dependencies the product must remove first.
     - name: Supply chain

@@ -24,10 +24,10 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
   - package-ecosystem: github-actions
+    target-branch: dev
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "06:00"
       timezone: "UTC"
     open-pull-requests-limit: 5
