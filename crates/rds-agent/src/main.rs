@@ -404,7 +404,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     } else {
         None
     };
-    let shutdown = shutdown_signal();
+    let shutdown = shutdown_signal()?;
     tokio::pin!(shutdown);
     let endpoint = bind_endpoint(config).await?;
     // Binding starts local service. iroh's online() waits indefinitely for a
@@ -592,20 +592,26 @@ fn desktop_permission_status() -> anyhow::Result<()> {
     anyhow::bail!("--desktop-permission-status requires a macOS desktop build")
 }
 
-/// SIGINT on every platform, SIGTERM on unix (systemd stop).
-async fn shutdown_signal() {
+/// Register Unix stop handlers before listeners can report readiness. Creating
+/// a future from an async function does not execute its registration code.
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
+        let mut term = signal(SignalKind::terminate())?;
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        Ok(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = term.recv() => {}
+            }
+        })
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        Ok(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
     }
 }
 
@@ -626,6 +632,69 @@ fn finish_admin(
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_signal_is_registered_before_its_future_is_polled() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        for signal in [rustix::process::Signal::TERM, rustix::process::Signal::INT] {
+            let mut child = Child(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "config_tests::shutdown_registration_child",
+                        "--nocapture",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+            let mut output = BufReader::new(child.0.stdout.take().unwrap());
+            assert!(
+                (&mut output)
+                    .lines()
+                    .take(8)
+                    .any(|line| line.unwrap().contains("signal-registration-ready"))
+            );
+            let pid = rustix::process::Pid::from_raw(child.0.id().try_into().unwrap()).unwrap();
+            rustix::process::kill_process(pid, signal).unwrap();
+            let wake = child.0.stdin.as_mut().unwrap().write_all(b"x");
+            let status = child.0.wait().unwrap();
+            assert!(status.success(), "{signal:?}: {status}; wake={wake:?}");
+            wake.unwrap();
+            // The child harness still owns its final output after the ready
+            // barrier. Keep the read endpoint open through process completion.
+            drop(output);
+        }
+    }
+
+    /// Only the parent above launches this process with a private stdin pipe.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "owned subprocess fixture for pre-poll signal registration"]
+    async fn shutdown_registration_child() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+        let shutdown = shutdown_signal().unwrap();
+        println!("signal-registration-ready");
+        std::io::stdout().flush().unwrap();
+        // The signal arrives while this future has never been polled. No
+        // product endpoint, key, owner service or user input is involved.
+        std::io::stdin().read_exact(&mut [0]).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .unwrap();
+    }
 
     #[cfg(all(target_os = "linux", feature = "portal"))]
     #[test]
