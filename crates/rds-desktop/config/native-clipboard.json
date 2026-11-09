@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "limits": {
     "text_bytes": 1048576,
     "image_bytes": 33554432,
@@ -16,6 +16,9 @@
   "pending_operations": 8,
   "selected_file_descriptors": 64,
   "native_body_operations": 2,
+  "portal": {
+    "selection_chunk_bytes": 16384
+  },
   "x11": {
     "selection_transfers": 8,
     "selection_chunk_bytes": 32768,

@@ -1,7 +1,12 @@
-//! The consented portal session owns text selection and bounded nonblocking FD I/O.
+//! One consented portal clipboard owner, metadata notifications and scoped FD I/O.
 use crate::{
     DesktopError,
-    clipboard::{ClipboardBackend, ClipboardFuture, MAX_TEXT_BYTES},
+    clipboard::{
+        ClipboardBackend, ClipboardFuture, NativeLifetime,
+        image::Png,
+        native::{Error, Operation, Policy, Provider, Publication, Snapshot, Text, Value},
+        ownership::{Owner, Running},
+    },
 };
 use ashpd::desktop::{
     Session,
@@ -9,493 +14,747 @@ use ashpd::desktop::{
     remote_desktop::RemoteDesktop,
 };
 use ashpd::zbus::OwnedObjectPath;
-use futures_util::StreamExt;
+use bytes::Bytes;
+use futures_util::{StreamExt, stream::FuturesUnordered};
+use rds_core::clipboard::{Capabilities, Format, Representation, ShortcutModifier};
 use std::{
     os::fd::OwnedFd,
+    pin::Pin,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 use tokio::{
-    io::unix::AsyncFd,
+    net::{UnixStream, unix::pipe},
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
-    task::JoinSet,
 };
 
-const TIMEOUT: Duration = Duration::from_secs(2);
-const MIME: &str = "text/plain;charset=utf-8";
-
-fn error() -> DesktopError {
-    DesktopError::Input("Wayland clipboard unavailable or transfer refused".into())
+const TEXT: &str = "text/plain;charset=utf-8";
+const PNG: &str = "image/png";
+fn desktop(error: Error) -> DesktopError {
+    DesktopError::Input(error.to_string())
 }
-fn mime(types: &[String]) -> Option<&str> {
-    if types.len() > 64 || types.iter().any(|s| s.len() > 256) {
-        return None;
-    }
-    [MIME, "text/plain", "UTF8_STRING"]
-        .into_iter()
-        .find(|wanted| types.iter().any(|s| s == wanted))
-}
-async fn bounded<T, E>(future: impl Future<Output = Result<T, E>>) -> Result<T, DesktopError> {
-    tokio::time::timeout(TIMEOUT, future)
-        .await
-        .map_err(|_| error())?
-        .map_err(|_| error())
-}
-fn nonblocking(fd: OwnedFd) -> Result<AsyncFd<OwnedFd>, DesktopError> {
-    let flags = rustix::fs::fcntl_getfl(&fd).map_err(|_| error())?;
-    rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK).map_err(|_| error())?;
-    // SAFETY: the OwnedFd keeps this valid descriptor open and unchanged for
-    // AsyncFd's lifetime; transfers only borrow it through get_ref().
-    #[allow(unsafe_code)]
-    unsafe { AsyncFd::register(fd) }.map_err(|_| error())
-}
-async fn read_text(fd: OwnedFd) -> Result<String, DesktopError> {
-    let fd = nonblocking(fd)?;
-    let mut bytes = Vec::new();
-    let reading = async {
-        let mut buffer = [0u8; 16 * 1024];
-        loop {
-            let mut ready = fd.readable().await.map_err(|_| error())?;
-            match ready.try_io(|fd| {
-                rustix::io::read(fd.get_ref(), &mut buffer).map_err(std::io::Error::from)
-            }) {
-                Ok(Ok(0)) => return String::from_utf8(bytes).map_err(|_| error()),
-                Ok(Ok(n)) => {
-                    if bytes.len() + n > MAX_TEXT_BYTES {
-                        return Err(error());
-                    }
-                    bytes.extend_from_slice(&buffer[..n]);
-                }
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Ok(Err(_)) => return Err(error()),
-                Err(_) => {}
-            }
-        }
-    };
-    tokio::time::timeout(TIMEOUT, reading)
-        .await
-        .map_err(|_| error())?
-}
-async fn write_text(fd: OwnedFd, text: &str) -> Result<(), DesktopError> {
-    if text.len() > MAX_TEXT_BYTES {
-        return Err(error());
-    }
-    let fd = nonblocking(fd)?;
-    let writing = async {
-        let mut bytes = text.as_bytes();
-        while !bytes.is_empty() {
-            let mut ready = fd.writable().await.map_err(|_| error())?;
-            match ready
-                .try_io(|fd| rustix::io::write(fd.get_ref(), bytes).map_err(std::io::Error::from))
-            {
-                Ok(Ok(0)) => return Err(error()),
-                Ok(Ok(n)) => bytes = &bytes[n..],
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Ok(Err(_)) => return Err(error()),
-                Err(_) => {}
-            }
-        }
-        Ok(())
-    };
-    tokio::time::timeout(TIMEOUT, writing)
-        .await
-        .map_err(|_| error())?
+fn unavailable<E>(_: E) -> Error {
+    Error::Unavailable
 }
 
-#[derive(Clone, Default)]
-struct Snapshot {
-    text: Option<Arc<str>>,
-    generation: u64,
+#[derive(Clone)]
+enum Body {
+    Text(Text),
+    Image(Png),
+}
+impl Body {
+    fn format(&self) -> Format {
+        match self {
+            Self::Text(_) => Format::TextUtf8,
+            Self::Image(_) => Format::ImagePng,
+        }
+    }
+    fn bytes(&self) -> &Bytes {
+        match self {
+            Self::Text(value) => value.encoded(),
+            Self::Image(value) => value.encoded(),
+        }
+    }
+    fn value(&self) -> Value {
+        match self {
+            Self::Text(value) => Value::Text(value.clone()),
+            Self::Image(value) => Value::Image(value.clone()),
+        }
+    }
+    fn mime_types(&self) -> &[&str] {
+        match self {
+            Self::Text(_) => &[TEXT, "text/plain"],
+            Self::Image(_) => &[PNG],
+        }
+    }
+}
+#[derive(Clone)]
+struct State {
+    snapshot: Snapshot,
+    text_type: Option<&'static str>,
+    active: bool,
     closed: bool,
 }
-fn invalidate_selection(changes: &watch::Sender<Snapshot>, generation: &mut u64) {
-    *generation = generation.wrapping_add(1);
-    // A lease which has not consumed the previous value must not receive it
-    // after ownership moves, including after our own remote paste.
-    changes.send_replace(Snapshot {
-        generation: *generation,
-        ..Default::default()
-    });
+impl State {
+    fn empty() -> Self {
+        Self {
+            snapshot: Snapshot {
+                generation: 0,
+                owned: false,
+                representations: Vec::new(),
+            },
+            text_type: None,
+            active: false,
+            closed: false,
+        }
+    }
+    fn advance(&mut self) -> Result<(), Error> {
+        self.snapshot.generation = self
+            .snapshot
+            .generation
+            .checked_add(1)
+            .ok_or(Error::Unavailable)?;
+        Ok(())
+    }
+    fn published(&mut self, body: &Body) -> Result<Snapshot, Error> {
+        self.advance()?;
+        self.snapshot.owned = true;
+        self.snapshot.representations = vec![Representation {
+            format: body.format(),
+            bytes: Some(body.bytes().len() as u64),
+        }];
+        self.text_type = (body.format() == Format::TextUtf8).then_some(TEXT);
+        Ok(self.snapshot.clone())
+    }
+    fn changed(
+        &mut self,
+        changed: &SelectionOwnerChanged,
+        body: &mut Option<Body>,
+        pending: &mut Option<Body>,
+        policy: &Policy,
+    ) -> Result<(), Error> {
+        if changed.session_is_owner() == Some(true) {
+            if let Some(value) = pending.take() {
+                *body = Some(value);
+            }
+            if self.snapshot.owned && body.is_some() {
+                return Ok(());
+            }
+            self.advance()?;
+            self.snapshot.owned = true;
+            self.text_type = None;
+            self.snapshot.representations = body
+                .as_ref()
+                .map(|value| {
+                    vec![Representation {
+                        format: value.format(),
+                        bytes: Some(value.bytes().len() as u64),
+                    }]
+                })
+                .unwrap_or_default();
+            return Ok(());
+        }
+        self.advance()?;
+        self.snapshot.owned = false;
+        self.snapshot.representations.clear();
+        self.text_type = None;
+        *body = None;
+        if changed.session_is_owner() != Some(false)
+            || changed.mime_types().len() > policy.native_types
+        {
+            return Ok(());
+        }
+        self.text_type = [TEXT, "text/plain", "UTF8_STRING"]
+            .into_iter()
+            .find(|wanted| changed.mime_types().iter().any(|mime| mime == wanted));
+        if self.text_type.is_some() {
+            self.snapshot.representations.push(Representation {
+                format: Format::TextUtf8,
+                bytes: None,
+            });
+        }
+        if changed.mime_types().iter().any(|mime| mime == PNG) {
+            self.snapshot.representations.push(Representation {
+                format: Format::ImagePng,
+                bytes: None,
+            });
+        }
+        Ok(())
+    }
+}
+struct Guard {
+    _original: NativeLifetime,
+    _body: Arc<OwnedSemaphorePermit>,
+    // Drain acknowledgement follows descriptor, purpose and permit cleanup.
+    running: Option<Running>,
+}
+#[derive(Default)]
+struct Bodies(Mutex<(usize, Weak<Semaphore>)>);
+impl Bodies {
+    fn get(&self, maximum: usize) -> Result<Arc<Semaphore>, Error> {
+        let mut pool = self.0.lock().map_err(unavailable)?;
+        if let Some(bodies) = pool.1.upgrade() {
+            return if pool.0 == maximum {
+                Ok(bodies)
+            } else {
+                Err(Error::Settings)
+            };
+        }
+        let bodies = Arc::new(Semaphore::new(maximum));
+        *pool = (maximum, Arc::downgrade(&bodies));
+        Ok(bodies)
+    }
+}
+// Field order closes the descriptor before releasing purpose/body admission.
+struct NativeIo {
+    fd: Descriptor,
+    _held: Guard,
+}
+enum Direction {
+    Read,
+    Write,
+}
+enum Descriptor {
+    Reader(pipe::Receiver),
+    Writer(pipe::Sender),
+    Socket(UnixStream),
+}
+impl Descriptor {
+    async fn read(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Reader(fd) => {
+                fd.readable().await?;
+                fd.try_read(buffer)
+            }
+            Self::Socket(fd) => {
+                fd.readable().await?;
+                fd.try_read(buffer)
+            }
+            Self::Writer(_) => Err(std::io::ErrorKind::InvalidInput.into()),
+        }
+    }
+    async fn write(&self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Writer(fd) => {
+                fd.writable().await?;
+                fd.try_write(buffer)
+            }
+            Self::Socket(fd) => {
+                fd.writable().await?;
+                fd.try_write(buffer)
+            }
+            Self::Reader(_) => Err(std::io::ErrorKind::InvalidInput.into()),
+        }
+    }
+}
+impl NativeIo {
+    fn new(fd: OwnedFd, held: Guard, direction: Direction) -> Result<Self, Error> {
+        struct Opening {
+            fd: OwnedFd,
+            held: Guard,
+        }
+        let opening = Opening { fd, held };
+        let stat = rustix::fs::fstat(&opening.fd).map_err(std::io::Error::from)?;
+        let fd = match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::Fifo => match direction {
+                Direction::Read => Descriptor::Reader(pipe::Receiver::from_owned_fd(opening.fd)?),
+                Direction::Write => Descriptor::Writer(pipe::Sender::from_owned_fd(opening.fd)?),
+            },
+            rustix::fs::FileType::Socket => {
+                let stream = std::os::unix::net::UnixStream::from(opening.fd);
+                stream.set_nonblocking(true)?;
+                Descriptor::Socket(UnixStream::from_std(stream)?)
+            }
+            _ => return Err(Error::Unsupported),
+        };
+        Ok(Self {
+            fd,
+            _held: opening.held,
+        })
+    }
+    async fn read(&self, limit: usize, policy: &Policy) -> Result<Bytes, Error> {
+        let reading = async {
+            let mut bytes = Vec::new();
+            let mut buffer = vec![0; policy.portal.selection_chunk_bytes as usize];
+            loop {
+                match self.fd.read(&mut buffer).await {
+                    Ok(0) => return Ok(Bytes::from(bytes)),
+                    Ok(n) => {
+                        if bytes.len().saturating_add(n) > limit {
+                            return Err(Error::Contract(rds_core::clipboard::Error::TooLarge));
+                        }
+                        let needed = bytes.len() + n;
+                        if needed > bytes.capacity() {
+                            let capacity =
+                                bytes.capacity().saturating_mul(2).max(needed).min(limit);
+                            bytes
+                                .try_reserve_exact(capacity - bytes.len())
+                                .map_err(unavailable)?;
+                        }
+                        bytes.extend_from_slice(&buffer[..n]);
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_millis(policy.operation_timeout_ms), reading)
+            .await
+            .map_err(unavailable)?
+    }
+    async fn write(&self, body: &Body, policy: &Policy) -> Result<(), Error> {
+        let writing = async {
+            let mut bytes = body.bytes().as_ref();
+            while !bytes.is_empty() {
+                let chunk = &bytes[..bytes
+                    .len()
+                    .min(policy.portal.selection_chunk_bytes as usize)];
+                match self.fd.write(chunk).await {
+                    Ok(0) => return Err(Error::Unavailable),
+                    Ok(n) => bytes = &bytes[n..],
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(())
+        };
+        tokio::time::timeout(Duration::from_millis(policy.operation_timeout_ms), writing)
+            .await
+            .map_err(unavailable)?
+    }
+}
+enum Command {
+    Read {
+        generation: u64,
+        format: Format,
+        reply: oneshot::Sender<Result<Value, Error>>,
+    },
+    Publish {
+        generation: u64,
+        body: Body,
+        reply: oneshot::Sender<Result<Snapshot, Error>>,
+    },
 }
 struct Job {
-    text: String,
-    reply: oneshot::Sender<Result<(), DesktopError>>,
-    running: crate::clipboard::ownership::Running,
+    command: Command,
+    held: Guard,
 }
-pub(super) struct Group {
+enum Completed {
+    Read {
+        generation: u64,
+        reply: oneshot::Sender<Result<Value, Error>>,
+        value: Result<Value, Error>,
+        _io: NativeIo,
+    },
+    Write,
+}
+type Pending = Pin<Box<dyn Future<Output = Completed> + Send>>;
+struct Core {
     jobs: mpsc::Sender<Job>,
-    changes: watch::Receiver<Snapshot>,
-    leases: Arc<Semaphore>,
+    changes: watch::Receiver<State>,
+    bodies: Arc<Semaphore>,
+    policy: Policy,
     live: Arc<AtomicBool>,
-    watchers: Arc<AtomicUsize>,
+    activate: Mutex<Option<oneshot::Sender<()>>>,
     stop: Mutex<Option<oneshot::Sender<()>>>,
     finished: watch::Receiver<bool>,
 }
+#[derive(Clone)]
+pub(super) struct Group(Arc<Core>);
 impl Group {
-    pub(super) async fn start(
+    /// Subscribe before Start. No clipboard method runs until local activation;
+    /// directed owner signals emitted during Start remain in these streams.
+    pub(super) async fn prepare(
         proxy: Clipboard,
         session: Arc<Session<RemoteDesktop>>,
+        policy: Policy,
     ) -> Result<Self, DesktopError> {
+        policy.validate().map_err(desktop)?;
         let proxy = Arc::new(proxy);
-        // Session's public wire serialization is its object path. Avoid
-        // private ashpd APIs and never format session/token data for logs.
-        let value = serde_json::to_value(session.as_ref()).map_err(|_| error())?;
-        let session_path = value.as_str().ok_or_else(error)?.to_owned();
-        // Subscribe before returning readiness; no backend/native object is
-        // opened later by a remote clipboard request.
-        let owners = bounded(proxy.receive_signal("SelectionOwnerChanged")).await?;
-        let transfers = bounded(proxy.receive_signal("SelectionTransfer")).await?;
-        let (jobs, mut requests) = mpsc::channel::<Job>(4);
-        let (changes, receiver) = watch::channel(Snapshot::default());
+        let path =
+            serde_json::to_value(session.as_ref()).map_err(|_| desktop(Error::Unavailable))?;
+        let path = path
+            .as_str()
+            .ok_or_else(|| desktop(Error::Unavailable))?
+            .to_owned();
+        let timeout = Duration::from_millis(policy.operation_timeout_ms);
+        let owners = tokio::time::timeout(timeout, proxy.receive_signal("SelectionOwnerChanged"))
+            .await
+            .map_err(|_| desktop(Error::Unavailable))?
+            .map_err(|_| desktop(Error::Unavailable))?;
+        let transfers = tokio::time::timeout(timeout, proxy.receive_signal("SelectionTransfer"))
+            .await
+            .map_err(|_| desktop(Error::Unavailable))?
+            .map_err(|_| desktop(Error::Unavailable))?;
+        let (jobs, mut requests) = mpsc::channel::<Job>(policy.pending_operations);
+        let (changes, receiver) = watch::channel(State::empty());
+        let (activation, activated) = oneshot::channel();
         let (stop, stopped) = oneshot::channel();
         let (finished, joined) = watch::channel(false);
-        let live = Arc::new(AtomicBool::new(true));
-        let state = live.clone();
-        let watchers = Arc::new(AtomicUsize::new(0));
-        let watching = watchers.clone();
+        let live = Arc::new(AtomicBool::new(false));
+        // Outstanding native calls retain the same semaphore across a physical
+        // portal owner replacement; a fresh session cannot reset this budget.
+        static BODIES: OnceLock<Bodies> = OnceLock::new();
+        let bodies = BODIES
+            .get_or_init(Bodies::default)
+            .get(policy.native_body_operations)
+            .map_err(desktop)?;
+        let worker_bodies = bodies.clone();
+        let worker_policy = policy.clone();
+        let worker_live = live.clone();
         tokio::spawn(async move {
             struct Seal {
                 live: Arc<AtomicBool>,
-                changes: watch::Sender<Snapshot>,
+                changes: watch::Sender<State>,
                 finished: watch::Sender<bool>,
             }
             impl Drop for Seal {
                 fn drop(&mut self) {
                     self.live.store(false, Ordering::Release);
-                    self.changes.send_replace(Snapshot {
-                        closed: true,
-                        ..Default::default()
-                    });
+                    self.changes.send_modify(|state| state.closed = true);
                     self.finished.send_replace(true);
                 }
             }
-            let _seal = Seal {
-                live: state.clone(),
-                changes: changes.clone(),
+            let seal = Seal {
+                live: worker_live.clone(),
+                changes,
                 finished,
             };
-            tokio::pin!(stopped, owners, transfers);
-            let mut pending = JoinSet::new();
-            let mut offered: Option<Arc<str>> = None;
-            let mut generation = 0u64;
-            let mut reading = false;
-            let mut wanted: Option<(u64, String)> = None;
-            let mut writing = 0usize;
-            let mut cleanup = tokio::time::interval(Duration::from_millis(250));
-            // Signals describe selection ownership, not application text.
-            // Never sample the clipboard on subscribe or log its contents.
+            tokio::pin!(activated, stopped, owners, transfers);
+            tokio::select! { biased; _ = &mut stopped => return, result = &mut activated => if result.is_err() { return; } }
+            worker_live.store(true, Ordering::Release);
+            let mut state = State::empty();
+            state.active = true;
+            seal.changes.send_replace(state.clone());
+            let mut body: Option<Body> = None;
+            let mut own_pending = None;
+            let mut pending = FuturesUnordered::<Pending>::new();
             loop {
                 tokio::select! {
                     biased;
                     _ = &mut stopped => break,
-                    message = transfers.next() => {
-                        let Some(message) = message else { break; };
-                        let Ok((path, requested, serial)) = message.body().deserialize::<(OwnedObjectPath, String, u32)>() else { continue; };
-                        if path.as_str() != session_path { continue; }
-                        let text = offered.clone().filter(|_| matches!(requested.as_str(), MIME | "text/plain" | "UTF8_STRING"));
-                        if writing >= 4 || text.is_none() {
-                            let _ = bounded(proxy.selection_write_done(&session, serial, false)).await;
-                            continue;
-                        }
-                        writing += 1;
-                        let proxy = proxy.clone(); let session = session.clone();
-                        pending.spawn(async move {
-                            let outcome = async {
-                                let fd: OwnedFd = bounded(proxy.selection_write(&session, serial)).await?.into();
-                                write_text(fd, &text.ok_or_else(error)?).await
-                            }.await;
-                            let _ = bounded(proxy.selection_write_done(&session, serial, outcome.is_ok())).await;
-                            (generation, None, false)
-                        });
-                    },
                     message = owners.next() => {
                         let Some(message) = message else { break; };
-                        let Ok((path, selection)) = message.body().deserialize::<(OwnedObjectPath, SelectionOwnerChanged)>() else { continue; };
-                        if path.as_str() != session_path { continue; }
-                        invalidate_selection(&changes, &mut generation);
-                        wanted = None;
-                        if selection.session_is_owner() == Some(true) { continue; }
-                        // An external owner invalidates our advertised bytes.
-                        offered = None;
-                        if selection.session_is_owner() != Some(false) || watching.load(Ordering::Acquire) == 0 { continue; }
-                        let Some(format) = mime(selection.mime_types()) else { continue; };
-                        wanted = Some((generation, format.to_owned()));
+                        let Ok((selected, owner)) = message.body().deserialize::<(OwnedObjectPath, SelectionOwnerChanged)>() else { continue; };
+                        if selected.as_str() != path { continue; }
+                        if state.changed(&owner, &mut body, &mut own_pending, &worker_policy).is_err() { break; }
+                        seal.changes.send_replace(state.clone());
                     },
-                    result = pending.join_next(), if !pending.is_empty() => {
-                        match result {
-                            Some(Ok((seen, text, true))) => {
-                                reading = false;
-                                if seen == generation && watching.load(Ordering::Acquire) > 0 && let Some(text) = text {
-                                    changes.send_replace(Snapshot { text: Some(text), generation, closed: false });
-                                }
-                            },
-                            Some(Ok((_, _, false))) => writing = writing.saturating_sub(1),
-                            Some(Err(_)) => break,
-                            None => {},
-                        }
+                    message = transfers.next() => {
+                        let Some(message) = message else { break; };
+                        let Ok((selected, requested, serial)) = message.body().deserialize::<(OwnedObjectPath, String, u32)>() else { continue; };
+                        if selected.as_str() != path { continue; }
+                        let value = body.clone().filter(|value| value.mime_types().contains(&requested.as_str()));
+                        let permit = worker_bodies.clone().try_acquire_owned();
+                        let (Some(value), Ok(permit)) = (value, permit) else {
+                            let _ = proxy.selection_write_done(&session, serial, false).await;
+                            continue;
+                        };
+                        let proxy = proxy.clone(); let session = session.clone(); let policy = worker_policy.clone();
+                        pending.push(Box::pin(async move {
+                            let admission = Arc::new(permit);
+                            let held = Guard { running: None, _body: admission.clone(), _original: session.clone() };
+                            let result = async {
+                                let fd: OwnedFd = proxy.selection_write(&session, serial).await.map_err(unavailable)?.into();
+                                let io = NativeIo::new(fd, held, Direction::Write)?;
+                                io.write(&value, &policy).await
+                            }.await;
+                            let _ = proxy.selection_write_done(&session, serial, result.is_ok()).await;
+                            drop(admission);
+                            Completed::Write
+                        }));
                     },
-                    _ = tokio::task::yield_now(), if wanted.is_some() && !reading => {
-                        let Some((seen, format)) = wanted.take() else { continue; };
-                        if watching.load(Ordering::Acquire) == 0 { continue; }
-                        reading = true;
-                        let proxy = proxy.clone(); let session = session.clone();
-                        pending.spawn(async move {
-                            let text = async {
-                                let fd: OwnedFd = bounded(proxy.selection_read(&session, &format)).await?.into();
-                                read_text(fd).await
-                            }.await.ok().map(Arc::<str>::from);
-                            (seen, text, true)
-                        });
-                    },
-                    _ = cleanup.tick() => {
-                        if watching.load(Ordering::Acquire) == 0 {
-                            wanted = None;
-                            if changes.borrow().text.is_some() {
-                                changes.send_replace(Snapshot { generation, ..Default::default() });
-                            }
+                    complete = pending.next(), if !pending.is_empty() => {
+                        if let Some(Completed::Read { generation, reply, value, _io }) = complete {
+                            let value = if state.snapshot.generation == generation { value } else { Err(Error::Changed) };
+                            let _ = reply.send(value);
                         }
                     },
                     job = requests.recv() => {
                         let Some(job) = job else { break; };
-                        if job.reply.is_closed() || job.running.closed() { continue; }
-                        if job.text.len() > MAX_TEXT_BYTES { let _ = job.reply.send(Err(error())); continue; }
-                        let previous = offered.take();
-                        offered = Some(Arc::from(job.text));
-                        let result = bounded(proxy.set_selection(&session, SetSelectionOptions::default().set_mime_types(&[MIME, "text/plain"])) ).await;
-                        if result.is_err() { offered = previous; }
-                        let _ = job.reply.send(result);
+                        if job.held.running.as_ref().is_some_and(Running::closed) { continue; }
+                        match job.command {
+                            Command::Read { generation, format, reply } => {
+                                if reply.is_closed() { continue; }
+                                if generation != state.snapshot.generation { let _ = reply.send(Err(Error::Changed)); continue; }
+                                if !state.snapshot.representations.iter().any(|r| r.format == format) { let _ = reply.send(Err(Error::Unsupported)); continue; }
+                                if state.snapshot.owned {
+                                    let value = body.as_ref().filter(|body| body.format() == format).map(Body::value).ok_or(Error::Unsupported);
+                                    let _ = reply.send(value); continue;
+                                }
+                                let target = match format { Format::TextUtf8 => state.text_type, Format::ImagePng => Some(PNG), Format::Files => None };
+                                let Some(target) = target else { let _ = reply.send(Err(Error::Unsupported)); continue; };
+                                // This retained native job outlives its async waiter's timeout.
+                                let fd = match proxy.selection_read(&session, target).await {
+                                    Ok(fd) => OwnedFd::from(fd),
+                                    Err(_) => { let _ = reply.send(Err(Error::Unavailable)); continue; }
+                                };
+                                let io = match NativeIo::new(fd, job.held, Direction::Read) { Ok(io) => io, Err(error) => { let _ = reply.send(Err(error)); continue; } };
+                                let policy = worker_policy.clone();
+                                pending.push(Box::pin(async move {
+                                    let value = async {
+                                        let bytes = io.read(policy.limits.representation_bytes(format) as usize, &policy).await?;
+                                        match format {
+                                            Format::TextUtf8 => Ok(Value::Text(Text::new(bytes, &policy.limits)?)),
+                                            Format::ImagePng => Ok(Value::Image(Png::new(bytes, &policy.limits)?)),
+                                            Format::Files => Err(Error::Unsupported),
+                                        }
+                                    }.await;
+                                    Completed::Read { generation, reply, value, _io: io }
+                                }));
+                            },
+                            Command::Publish { generation, body: value, reply } => {
+                                if reply.is_closed() { continue; }
+                                if generation != state.snapshot.generation { let _ = reply.send(Err(Error::Changed)); continue; }
+                                let previous = body.replace(value.clone());
+                                // SetSelection's reply acknowledges native publication. The
+                                // portal supplies no cross-client compare-and-set operation.
+                                let result = proxy.set_selection(&session, SetSelectionOptions::default().set_mime_types(value.mime_types())).await;
+                                let result = if result.is_ok() {
+                                    own_pending = Some(value.clone());
+                                    state.published(&value)
+                                } else { body = previous; Err(Error::Unavailable) };
+                                seal.changes.send_replace(state.clone());
+                                let _ = reply.send(result);
+                                drop(job.held);
+                            },
+                        }
                     },
                 }
             }
-            state.store(false, Ordering::Release);
-            changes.send_replace(Snapshot {
-                closed: true,
-                ..Default::default()
-            });
-            pending.abort_all();
-            while pending.join_next().await.is_some() {}
+            worker_live.store(false, Ordering::Release);
+
+            requests.close();
+            // These futures own only nonblocking descriptors and retained guards;
+            // dropping them synchronously closes I/O before releasing admission.
+            drop(pending);
+            while let Some(job) = requests.recv().await {
+                drop(job);
+            }
+            drop(body);
+            drop(own_pending);
+            drop(proxy);
+            drop(session);
+            drop(seal);
         });
-        Ok(Self {
+        Ok(Self(Arc::new(Core {
             jobs,
             changes: receiver,
-            leases: Arc::new(Semaphore::new(8)),
+            bodies,
+            policy,
             live,
-            watchers,
+            activate: Mutex::new(Some(activation)),
             stop: Mutex::new(Some(stop)),
             finished: joined,
-        })
+        })))
+    }
+    pub(super) async fn activate(&self) -> Result<(), DesktopError> {
+        self.0
+            .activate
+            .lock()
+            .map_err(|_| desktop(Error::Unavailable))?
+            .take()
+            .ok_or_else(|| desktop(Error::Unavailable))?
+            .send(())
+            .map_err(|_| desktop(Error::Unavailable))?;
+        let mut changes = self.0.changes.clone();
+        loop {
+            let state = changes.borrow_and_update().clone();
+            if state.closed {
+                return Err(desktop(Error::Unavailable));
+            }
+            if state.active {
+                return Ok(());
+            }
+            changes
+                .changed()
+                .await
+                .map_err(|_| desktop(Error::Unavailable))?;
+        }
     }
     pub(super) fn available(&self) -> bool {
-        self.live.load(Ordering::Acquire)
+        self.0.live.load(Ordering::Acquire)
+    }
+    fn lease(&self, original: Option<NativeLifetime>) -> Result<Lease, Error> {
+        if !self.available() {
+            return Err(Error::Unavailable);
+        }
+        let owner = Owner::new();
+        if let Some(original) = original
+            && !owner.retain(original)
+        {
+            return Err(Error::Changed);
+        }
+        Ok(Lease {
+            group: self.clone(),
+            owner,
+        })
+    }
+    pub(super) fn native(
+        &self,
+        original: NativeLifetime,
+    ) -> Result<Arc<dyn Provider>, DesktopError> {
+        Ok(Arc::new(self.lease(Some(original)).map_err(desktop)?))
     }
     pub(super) fn worker(&self, watching: bool) -> Result<Box<dyn ClipboardBackend>, DesktopError> {
-        if !self.available() {
-            return Err(error());
-        }
-        let permit = self
-            .leases
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| error())?;
-        let mut changes = self.changes.clone();
-        let seen = changes.borrow_and_update().generation;
-        if watching {
-            self.watchers.fetch_add(1, Ordering::AcqRel);
-        }
-        Ok(Box::new(Lease {
-            jobs: self.jobs.clone(),
-            changes,
+        let provider = self.lease(None).map_err(desktop)?;
+        let owner = provider.owner.clone();
+        let seen = self.0.changes.borrow().snapshot.generation;
+        Ok(Box::new(crate::clipboard::native::Legacy::new(
+            Arc::new(provider),
+            owner,
             watching,
-            seen,
-            watchers: self.watchers.clone(),
-            _permit: permit,
-            owner: crate::clipboard::ownership::Owner::new(),
-        }))
+            Some(seen),
+        )))
+    }
+    fn stop(&self) {
+        self.0.live.store(false, Ordering::Release);
+
+        if let Ok(mut stop) = self.0.stop.lock()
+            && let Some(stop) = stop.take()
+        {
+            let _ = stop.send(());
+        }
     }
     pub(super) async fn close(&self) {
-        self.request_close();
-        let mut finished = self.finished.clone();
+        self.stop();
+        let mut finished = self.0.finished.clone();
         while !*finished.borrow_and_update() {
             if finished.changed().await.is_err() {
                 break;
             }
         }
     }
-    fn request_close(&self) {
-        if let Ok(mut stop) = self.stop.lock()
+}
+impl Drop for Core {
+    fn drop(&mut self) {
+        if let Ok(stop) = self.stop.get_mut()
             && let Some(stop) = stop.take()
         {
             let _ = stop.send(());
         }
     }
 }
-impl Drop for Group {
-    fn drop(&mut self) {
-        self.request_close();
-    }
-}
 struct Lease {
-    owner: Arc<crate::clipboard::ownership::Owner>,
-    jobs: mpsc::Sender<Job>,
-    changes: watch::Receiver<Snapshot>,
-    watching: bool,
-    seen: u64,
-    watchers: Arc<AtomicUsize>,
-    _permit: OwnedSemaphorePermit,
+    group: Group,
+    owner: Arc<Owner>,
 }
 impl Drop for Lease {
     fn drop(&mut self) {
         self.owner.close();
-        if self.watching {
-            self.watchers.fetch_sub(1, Ordering::AcqRel);
-        }
     }
 }
-impl ClipboardBackend for Lease {
-    fn retain(&mut self, context: crate::clipboard::NativeLifetime) -> bool {
-        self.owner.retain(context)
-    }
-    fn close(&mut self) -> ClipboardFuture<'_, ()> {
-        if self.watching {
-            self.watching = false;
-            self.watchers.fetch_sub(1, Ordering::AcqRel);
+impl Lease {
+    async fn call<T: Send>(
+        &self,
+        original: NativeLifetime,
+        command: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Command + Send,
+    ) -> Result<T, Error> {
+        if !self.group.available() {
+            return Err(Error::Unavailable);
         }
+        let running = self.owner.begin().ok_or(Error::Changed)?;
+        let permit = self
+            .group
+            .0
+            .bodies
+            .clone()
+            .try_acquire_owned()
+            .map_err(unavailable)?;
+        let (reply, result) = oneshot::channel();
+        self.group
+            .0
+            .jobs
+            .try_send(Job {
+                command: command(reply),
+                held: Guard {
+                    running: Some(running),
+                    _body: Arc::new(permit),
+                    _original: original,
+                },
+            })
+            .map_err(unavailable)?;
+        let value = tokio::time::timeout(
+            Duration::from_millis(self.group.0.policy.operation_timeout_ms),
+            result,
+        )
+        .await
+        .map_err(unavailable)?
+        .map_err(unavailable)??;
+        if self.owner.closed() {
+            return Err(Error::Changed);
+        }
+        Ok(value)
+    }
+}
+impl Provider for Lease {
+    fn close(&self) -> ClipboardFuture<'_, ()> {
+        self.owner.close();
         Box::pin(self.owner.drain())
     }
-    fn publish(&mut self, text: String) -> ClipboardFuture<'_, Result<(), DesktopError>> {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            receive: vec![Format::TextUtf8, Format::ImagePng],
+            offer: vec![Format::TextUtf8, Format::ImagePng],
+            shortcut: ShortcutModifier::Control,
+            limits: self.group.0.policy.limits.clone(),
+        }
+    }
+    fn current(&self) -> Operation<'_, Snapshot> {
         Box::pin(async move {
-            if self.changes.borrow().closed || text.len() > MAX_TEXT_BYTES {
-                return Err(error());
+            let _running = self.owner.begin().ok_or(Error::Changed)?;
+            let state = self.group.0.changes.borrow().clone();
+            if state.closed || !self.group.available() {
+                return Err(Error::Unavailable);
             }
-            let (reply, outcome) = oneshot::channel();
-            let running = self.owner.begin().ok_or_else(error)?;
-            self.jobs
-                .try_send(Job {
-                    text,
-                    reply,
-                    running,
-                })
-                .map_err(|_| error())?;
-            tokio::time::timeout(TIMEOUT, outcome)
-                .await
-                .map_err(|_| error())?
-                .map_err(|_| error())?
+            Ok(state.snapshot)
         })
     }
-    fn next_change(&mut self) -> ClipboardFuture<'_, Option<String>> {
+    fn changed(&self, after: u64) -> Operation<'_, Snapshot> {
         Box::pin(async move {
-            if !self.watching {
-                self.owner.closed_signal().await;
-                return None;
-            }
+            let _running = self.owner.begin().ok_or(Error::Changed)?;
+            let mut changes = self.group.0.changes.clone();
             loop {
-                tokio::select! {
-                    _ = self.owner.closed_signal() => return None,
-                    result = self.changes.changed() => result.ok()?,
-                };
-                let snapshot = self.changes.borrow_and_update().clone();
-                if snapshot.closed {
-                    return None;
+                let state = changes.borrow_and_update().clone();
+                if state.closed || !self.group.available() {
+                    return Err(Error::Unavailable);
                 }
-                if snapshot.generation != self.seen
-                    && let Some(text) = snapshot.text
-                {
-                    self.seen = snapshot.generation;
-                    return Some(text.to_string());
+                if state.snapshot.generation != after {
+                    return Ok(state.snapshot);
                 }
+                tokio::select! { _ = self.owner.closed_signal() => return Err(Error::Changed), result = changes.changed() => result.map_err(unavailable)?, }
             }
+        })
+    }
+    fn read(
+        &self,
+        generation: u64,
+        format: Format,
+        original: NativeLifetime,
+    ) -> Operation<'_, Value> {
+        Box::pin(self.call(original, move |reply| Command::Read {
+            generation,
+            format,
+            reply,
+        }))
+    }
+    fn publish(
+        &self,
+        generation: u64,
+        value: Publication,
+        original: NativeLifetime,
+    ) -> Operation<'_, Snapshot> {
+        Box::pin(async move {
+            let body = match value {
+                Publication::Text(value) => Body::Text(value),
+                Publication::Image(value) => Body::Image(value),
+                Publication::Files(_) => return Err(Error::Unsupported),
+            };
+            self.group
+                .0
+                .policy
+                .limits
+                .validate_value(body.format(), body.bytes())?;
+            self.call(original, move |reply| Command::Publish {
+                generation,
+                body,
+                reply,
+            })
+            .await
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn ownership_change_discards_unread_text_but_delivers_its_later_read() {
-        let (jobs, _) = mpsc::channel(4);
-        let (changes, receiver) = watch::channel(Snapshot::default());
-        let (finished, joined) = watch::channel(false);
-        let group = Group {
-            jobs,
-            changes: receiver,
-            leases: Arc::new(Semaphore::new(8)),
-            live: Arc::new(AtomicBool::new(true)),
-            watchers: Arc::new(AtomicUsize::new(0)),
-            stop: Mutex::new(None),
-            finished: joined,
-        };
-        let mut lease = group.worker(true).unwrap();
-        changes.send_replace(Snapshot {
-            text: Some(Arc::from("old")),
-            generation: 1,
-            closed: false,
-        });
-        let mut generation = 1;
-        invalidate_selection(&changes, &mut generation);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), lease.next_change())
-                .await
-                .is_err()
-        );
-        changes.send_replace(Snapshot {
-            text: Some(Arc::from("new")),
-            generation,
-            closed: false,
-        });
-        assert_eq!(lease.next_change().await.as_deref(), Some("new"));
-        drop(finished);
-    }
-    #[tokio::test]
-    async fn pipe_utf8_is_bounded_and_no_blocking_task_survives_timeout() {
-        let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
-        let value = "Привет\nclipboard ✓";
-        let (text, result) = tokio::join!(read_text(read.into()), write_text(write.into(), value));
-        assert!(result.is_ok());
-        assert_eq!(text.unwrap(), value);
-        let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
-        let stalled = tokio::time::timeout(Duration::from_millis(20), read_text(read.into())).await;
-        assert!(stalled.is_err());
-        assert_eq!(
-            rustix::io::write(&write, b"x"),
-            Err(rustix::io::Errno::PIPE)
-        );
-    }
-    #[test]
-    fn only_bounded_utf8_text_formats_are_selected() {
-        assert_eq!(mime(&["image/png".into(), MIME.into()]), Some(MIME));
-        assert_eq!(mime(&["application/vnd.portal.filetransfer".into()]), None);
-        assert_eq!(mime(&vec![MIME.into(); 65]), None);
-    }
-
-    #[tokio::test]
-    async fn invalid_utf8_and_oversized_selections_are_refused() {
-        let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
-        rustix::io::write(&write, &[0xff]).unwrap();
-        drop(write);
-        assert!(read_text(read.into()).await.is_err());
-
-        let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
-        let oversized = "x".repeat(MAX_TEXT_BYTES + 1);
-        let (result, _) = tokio::join!(read_text(read.into()), async {
-            let fd = nonblocking(write.into()).unwrap();
-            let mut bytes = oversized.as_bytes();
-            while !bytes.is_empty() {
-                let mut ready = fd.writable().await.unwrap();
-                match ready.try_io(|fd| {
-                    rustix::io::write(fd.get_ref(), bytes).map_err(std::io::Error::from)
-                }) {
-                    Ok(Ok(n)) if n > 0 => bytes = &bytes[n..],
-                    Ok(_) => break,
-                    Err(_) => {}
-                }
-            }
-        });
-        assert!(result.is_err());
-        let (_, write) = std::os::unix::net::UnixStream::pair().unwrap();
-        assert!(write_text(write.into(), &oversized).await.is_err());
-    }
-}
+mod tests;
