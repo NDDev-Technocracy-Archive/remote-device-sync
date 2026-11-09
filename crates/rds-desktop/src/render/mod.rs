@@ -14,6 +14,8 @@ mod design;
 #[cfg(feature = "viewer")]
 mod gpu;
 #[cfg(feature = "viewer")]
+mod native_clipboard;
+#[cfg(feature = "viewer")]
 mod observation;
 #[cfg(feature = "viewer")]
 pub use observation::{RenderStageTiming, RenderTimings, RendererInfo};

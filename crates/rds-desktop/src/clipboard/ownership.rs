@@ -66,7 +66,7 @@ impl Owner {
     #[cfg(any(
         test,
         all(target_os = "linux", feature = "x11"),
-        all(target_os = "macos", feature = "host")
+        all(target_os = "macos", any(feature = "host", feature = "viewer"))
     ))]
     pub(crate) async fn closed_signal(&self) {
         loop {

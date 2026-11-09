@@ -121,68 +121,6 @@ pub(super) fn remote_activity() -> RemoteActivity {
 fn clipboard_error(error: crate::clipboard::native::Error) -> crate::DesktopError {
     crate::DesktopError::Input(error.to_string())
 }
-#[cfg(target_os = "macos")]
-fn clipboard_board() -> Result<crate::clipboard::macos::Board, crate::DesktopError> {
-    let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
-        crate::DesktopError::Input("clipboard viewer access requires the main thread".into())
-    })?;
-    let policy = crate::clipboard::native::Policy::shipped().map_err(clipboard_error)?;
-    let files = policy.selection_budget().map_err(clipboard_error)?;
-    crate::clipboard::macos::Board::general(files).map_err(clipboard_error)
-}
-#[cfg(target_os = "macos")]
-pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
-    use crate::clipboard::native::{Policy, Value};
-    let board = clipboard_board()?;
-    let policy = Policy::shipped().map_err(clipboard_error)?;
-    let snapshot = board.snapshot(&policy).map_err(clipboard_error)?;
-    if !snapshot
-        .representations
-        .iter()
-        .any(|r| r.format == rds_core::clipboard::Format::TextUtf8)
-    {
-        return Ok(None);
-    }
-    match board
-        .read(
-            snapshot.generation,
-            rds_core::clipboard::Format::TextUtf8,
-            &policy,
-            None,
-        )
-        .map_err(clipboard_error)?
-    {
-        Value::Text(text) => Ok(Some(text.as_str().to_owned())),
-        _ => Ok(None),
-    }
-}
-#[cfg(target_os = "macos")]
-pub(super) fn clipboard_generation() -> Result<i64, crate::DesktopError> {
-    clipboard_board()?
-        .generation()
-        .map(|generation| generation as i64)
-        .map_err(clipboard_error)
-}
-#[cfg(not(target_os = "macos"))]
-pub(super) fn clipboard_generation() -> Result<i64, crate::DesktopError> {
-    Err(crate::DesktopError::Input(
-        "native clipboard publication unavailable".into(),
-    ))
-}
-#[cfg(target_os = "macos")]
-pub(super) fn publish_text(generation: i64, text: &str) -> Result<(), crate::DesktopError> {
-    use crate::clipboard::native::{Policy, Publication, Text};
-    let policy = Policy::shipped().map_err(clipboard_error)?;
-    let text = Text::new(
-        bytes::Bytes::copy_from_slice(text.as_bytes()),
-        &policy.limits,
-    )
-    .map_err(clipboard_error)?;
-    clipboard_board()?
-        .publish(generation as u64, Publication::Text(text), &policy)
-        .map(|_| ())
-        .map_err(clipboard_error)
-}
 #[doc(hidden)]
 #[cfg(target_os = "macos")]
 pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
@@ -205,18 +143,6 @@ pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
         "native AppKit probe requires macOS".into(),
     ))
 }
-#[cfg(not(target_os = "macos"))]
-pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
-    Ok(None)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(super) fn publish_text(_generation: i64, _text: &str) -> Result<(), crate::DesktopError> {
-    Err(crate::DesktopError::Input(
-        "native clipboard publication is unavailable on this viewer".into(),
-    ))
-}
-
 #[cfg(target_os = "macos")]
 pub fn choose_resolution() -> Option<u32> {
     use objc2_app_kit::{NSAlert, NSApplication};
