@@ -218,13 +218,11 @@ impl Clipboard {
     ) -> Result<Pending<i64>, Error> {
         let provider = self.provider()?;
         let generation = generation.try_into().map_err(|_| Error::Changed)?;
-        let text = crate::clipboard::native::Text::new(
-            bytes::Bytes::from(text),
-            &provider.capabilities().limits,
-        )?;
+        let limits = provider.capabilities().limits;
         let original: NativeLifetime = Arc::new((self.original.clone(), purpose));
         let updates = self.updates.clone();
         self.operation(scope, async move {
+            let text = crate::clipboard::native::Text::new(bytes::Bytes::from(text), &limits)?;
             let snapshot = provider
                 .publish(generation, Publication::Text(text), original)
                 .await?;

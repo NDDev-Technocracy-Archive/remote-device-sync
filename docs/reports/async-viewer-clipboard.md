@@ -22,7 +22,9 @@ ordering/refusal. The isolated Linux lane additionally uses a dedicated Xvfb
 selection owner and the actual X11 facade; OS-dependent cases run serially.
 These fixtures are not receiving-application acceptance.
 
-Source checks pass. Native compilation, unit/Xvfb cases and physical application
+Source checks pass. The first native build exposed a sibling-module visibility
+error and a missing trait import in the Mac probe; both are corrected in the
+next source cut. Native compilation, unit/Xvfb cases and physical application
 copy/paste are pending for this candidate. No installed application, signature,
 permission, saved connection, device pin or shared build/cache configuration was
 changed. The native Wayland viewer, negotiated native-mode manager integration,

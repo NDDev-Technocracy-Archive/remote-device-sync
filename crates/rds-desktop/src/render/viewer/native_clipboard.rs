@@ -11,12 +11,17 @@ enum Operation {
 
 pub(super) struct Gesture {
     operation: Operation,
-    epoch: u64,
-    tab: Option<crate::render::workspace::TabId>,
-    revision: Option<u64>,
+    binding: Binding,
     queued: VecDeque<Held>,
     paste_key: PasteKey,
     started: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Binding {
+    epoch: u64,
+    tab: Option<crate::render::workspace::TabId>,
+    revision: Option<u64>,
 }
 
 struct Held {
@@ -85,10 +90,18 @@ impl App {
                 .map(|tab| tab.revision)
         })
     }
+    fn native_gesture_binding(&self) -> Binding {
+        Binding {
+            epoch: lock(&self.session.handle.state).report.session_epoch,
+            tab: self.session.tab,
+            revision: self.native_gesture_revision(),
+        }
+    }
     pub(super) fn native_copy(&mut self) {
         if self.native_gesture.is_some() {
             return;
         }
+        let binding = self.native_gesture_binding();
         self.workspace_copying();
         let pending = self
             .session
@@ -100,9 +113,7 @@ impl App {
             Ok(pending) => {
                 self.native_gesture = Some(Gesture {
                     operation: Operation::Copy(pending),
-                    epoch: lock(&self.session.handle.state).report.session_epoch,
-                    tab: self.session.tab,
-                    revision: self.native_gesture_revision(),
+                    binding,
                     queued: VecDeque::new(),
                     paste_key: PasteKey::Waiting,
                     started: Instant::now(),
@@ -110,8 +121,8 @@ impl App {
             }
             Err(error) => {
                 lock(&self.session.handle.state).clipboard.reset();
-                if let Some(deck) = &mut self.workspace {
-                    deck.clipboard_owner = None;
+                if let (Some(deck), Some(id)) = (&mut self.workspace, self.session.tab) {
+                    deck.cancel_clipboard_tab(id);
                 }
                 self.session
                     .handle
@@ -127,19 +138,24 @@ impl App {
                 .notice("Clipboard is busy; try pasting again");
             return false;
         }
+        let binding = self.native_gesture_binding();
+        let purpose: crate::clipboard::NativeLifetime = Arc::new((
+            self.session.handle.clone(),
+            binding.epoch,
+            binding.tab,
+            binding.revision,
+        ));
         let pending = self
             .session
             .native
             .as_ref()
             .ok_or(crate::clipboard::native::Error::Unavailable)
-            .and_then(|native| native.read(self.session.native_purpose()));
+            .and_then(|native| native.read(purpose));
         match pending {
             Ok(pending) => {
                 self.native_gesture = Some(Gesture {
                     operation: Operation::Paste(pending),
-                    epoch: lock(&self.session.handle.state).report.session_epoch,
-                    tab: self.session.tab,
-                    revision: self.native_gesture_revision(),
+                    binding,
                     queued: VecDeque::new(),
                     paste_key: PasteKey::Waiting,
                     started: Instant::now(),
@@ -172,19 +188,25 @@ impl App {
         let Some(mut gesture) = self.native_gesture.take() else {
             return;
         };
-        if gesture.epoch != lock(&self.session.handle.state).report.session_epoch {
+        if gesture.binding.epoch != lock(&self.session.handle.state).report.session_epoch {
+            lock(&self.session.handle.state).clipboard.reset();
             self.session
                 .handle
                 .notice("Clipboard gesture canceled: session changed");
             return;
         }
-        if gesture.tab != self.session.tab
-            || gesture.revision != self.native_gesture_revision()
+        if gesture.binding.tab != self.session.tab
+            || gesture.binding.revision != self.native_gesture_revision()
             || !self
                 .window
                 .as_ref()
                 .is_some_and(|window| window.has_focus())
             || !self.workspace_clipboard_enabled()
+            || self
+                .workspace
+                .as_ref()
+                .and_then(|deck| deck.chrome.as_ref())
+                .is_some_and(|chrome| chrome.editing())
         {
             self.native_gesture = Some(gesture);
             self.cancel_native_gesture(event_loop);

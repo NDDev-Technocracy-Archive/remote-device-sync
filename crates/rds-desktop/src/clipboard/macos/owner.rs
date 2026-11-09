@@ -18,7 +18,7 @@ use crate::clipboard::{
 };
 
 #[cfg(all(feature = "viewer", feature = "host"))]
-use crate::clipboard::native::Text;
+use crate::clipboard::{ClipboardBackend, native::Text};
 
 static POOL: OnceLock<Mutex<Weak<Core>>> = OnceLock::new();
 static NATIVE_OWNER: Semaphore = Semaphore::const_new(1);
