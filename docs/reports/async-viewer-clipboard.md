@@ -30,6 +30,13 @@ handshake cases. Its subsequent viewer-only build exposed a close-signal feature
 gate still limited to hosting. The next cut corrects that gate and explicitly
 checks denied viewer-only Clippy as well as the combined role.
 
+The following cut at `be40731fa37a27a159f9a37186f6b2f3b10d0769` passes
+the complete Linux native lane, including viewer-only denied Clippy, all desktop
+and handshake cases, and the five Xvfb cases. Mac combined-role denied Clippy
+passes; the new viewer-only denied lane identifies an unused serving-only
+scaling module. Its declaration now follows the actual Linux capture and Mac
+hosting consumers, retaining unit-test coverage without suppressing warnings.
+
 A bounded keyless native-input qualification example is retained independently
 of product packages. It attaches only to an existing admitted manager session
 and sends explicit fixture focus/shortcut chords. It reads neither clipboard
