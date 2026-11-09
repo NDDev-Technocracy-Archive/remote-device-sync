@@ -67,6 +67,7 @@ jobs:
           cargo clippy --locked -p rds-agent -p rds-desktop -p rds-cli --all-targets --features "$FEATURES" -- -D warnings
           cargo test --locked -p rds-desktop -p rds-agent -p rds-cli --lib --bins --features "$FEATURES"
           cargo test --locked -p rds-agent --test native_clipboard --features "$FEATURES"
+          cargo test --locked -p rds-audio
       - name: Build the synthetic workspace qualification tool
         env:
           TARGET: ${{ matrix.target }}
