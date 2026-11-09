@@ -40,10 +40,11 @@ enum Message {
 }
 struct Job {
     command: Command,
-    running: Running,
-    _core: Arc<Core>,
-    _body: Option<OwnedSemaphorePermit>,
     _operation_original: Option<NativeLifetime>,
+    _body: Option<OwnedSemaphorePermit>,
+    _core: Arc<Core>,
+    // Acknowledge drain only after the original purpose and body credit drop.
+    running: Running,
 }
 enum Command {
     Current(oneshot::Sender<Result<Snapshot, Error>>),
@@ -463,6 +464,7 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     drop(legacy);
     drop(gated);
     drop(external);
+    cleanup_order(&group).await?;
     provider.close().await;
     if !matches!(provider.current().await, Err(Error::Changed)) || retained.upgrade().is_none() {
         return Err(Error::Publication);
@@ -471,7 +473,37 @@ pub(crate) async fn probe() -> Result<u32, Error> {
     if retained.upgrade().is_some() {
         return Err(Error::Publication);
     }
-    Ok(8 + file_cases)
+    Ok(9 + file_cases)
+}
+
+#[cfg(feature = "viewer")]
+async fn cleanup_order(group: &Group) -> Result<(), Error> {
+    let provider = group.native(Arc::new(()))?;
+    let current = provider.current().await?;
+    let (original, mut cleanup) = crate::clipboard::ownership::probe::Cleanup::held();
+    let Value::Text(_) = provider
+        .read(current.generation, Format::TextUtf8, original)
+        .await?
+    else {
+        return Err(Error::Publication);
+    };
+    cleanup.entered().await?;
+    let mut closing = provider.close();
+    let pending =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(closing.as_mut().poll(cx).is_pending()))
+            .await;
+    let held = group.0.bodies.available_permits() == group.0.policy.native_body_operations - 1;
+    cleanup.release().await?;
+    if !pending || !held {
+        return Err(Error::Io(std::io::Error::other(
+            "native clipboard acknowledged drain or released body credit before original-purpose cleanup",
+        )));
+    }
+    closing.await;
+    if group.0.bodies.available_permits() != group.0.policy.native_body_operations {
+        return Err(Error::Publication);
+    }
+    Ok(())
 }
 
 fn execute(job: Job, board: &mut Board, policy: &Policy) {
