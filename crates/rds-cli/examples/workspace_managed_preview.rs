@@ -277,7 +277,9 @@ fn serve(endpoint: Endpoint, computer: usize, stats: Stats) -> tokio::task::Join
                                 let config = SessionConfig {
                                     frame_route: Some(UniHello::DesktopFrames { id: session }),
                                     payload_receipts,
-                                    reverse_clipboard: clipboard,
+                                    clipboard: rds_desktop::ServingClipboard::Text {
+                                        reverse: clipboard,
+                                    },
                                     input_sink: Some(Box::new(Sink {
                                         index,
                                         display: hello.display,

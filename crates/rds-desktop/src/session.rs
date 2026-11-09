@@ -341,6 +341,19 @@ pub trait FrameProducer: Send + 'static {
 }
 
 /// Everything `serve_desktop` needs beyond the negotiated hello.
+pub enum ServingClipboard {
+    /// Existing text wire; reverse offers require explicit DesktopV5 admission.
+    Text { reverse: bool },
+    /// DesktopV6 excludes legacy text even when no native provider was admitted.
+    Native(Option<Box<crate::clipboard::peer::Prepared>>),
+}
+impl Default for ServingClipboard {
+    fn default() -> Self {
+        Self::Text { reverse: false }
+    }
+}
+
+/// Everything `serve_desktop` needs beyond the negotiated hello.
 #[derive(Default)]
 pub struct SessionConfig {
     /// Original caller scope/key/budget retained by real native work, even when
@@ -362,9 +375,9 @@ pub struct SessionConfig {
     /// Deny input even when a backend is available. Encoder steering and
     /// heartbeats remain usable. The agent derives this from verified grants.
     pub view_only: bool,
-    /// The V5 greeting explicitly opted into native→viewer text clipboard
-    /// offers. Legacy sessions keep only the original viewer→native paste.
-    pub reverse_clipboard: bool,
+    /// Explicit negotiated clipboard mode. Native admission never silently
+    /// opens a text worker or another platform backend.
+    pub clipboard: ServingClipboard,
     /// Input backend override. `None` lazily probes on the input worker.
     /// Synthetic sessions should supply a synthetic sink, never the host's.
     pub input_sink: Option<Box<dyn crate::InputSink>>,
@@ -653,6 +666,25 @@ pub async fn serve_desktop_with(
     config: SessionConfig,
 ) -> Result<(), DesktopError> {
     let mut send = SessionSend(send);
+    let (reverse_clipboard, native_mode, native_clipboard) = match config.clipboard {
+        ServingClipboard::Text { reverse } => (reverse, false, None),
+        ServingClipboard::Native(prepared) => (false, true, prepared.map(|peer| *peer)),
+    };
+    if config.view_only && native_clipboard.is_some() {
+        return Err(DesktopError::Input(
+            "view-only native clipboard refused".into(),
+        ));
+    }
+    if let Some(peer) = &native_clipboard {
+        let (desktop, side) = peer.binding();
+        if side != rds_core::clipboard::Side::Responder
+            || config.frame_route != Some(rds_core::UniHello::DesktopFrames { id: desktop })
+        {
+            return Err(DesktopError::Input(
+                "native clipboard desktop binding mismatch".into(),
+            ));
+        }
+    }
     if config.payload_receipts
         && !matches!(
             config.frame_route,
@@ -692,6 +724,10 @@ pub async fn serve_desktop_with(
         .min(u64::from(u32::MAX));
     let controls = ProducerControls::new(4_000_000_u64.min(ceiling));
     let capture_stop = crate::producer_signal::Stop(controls.wake.clone());
+    let native_clipboard = native_clipboard
+        .map(crate::clipboard::peer::Prepared::start)
+        .transpose()
+        .map_err(|error| DesktopError::Input(error.to_string()))?;
     let native = crate::clipboard::ownership::Owner::new();
     if let Some(context) = config.native_lifetime.clone()
         && !native.retain(context)
@@ -711,10 +747,11 @@ pub async fn serve_desktop_with(
     // No backend is opened for a view-only session. Blocking platform calls
     // run on one bounded, session-owned worker, outside the async executor.
     let mut input = None;
-    let clipboard_supported = config
-        .source
-        .as_ref()
-        .is_none_or(|source| source.clipboard_supported());
+    let clipboard_supported = !native_mode
+        && config
+            .source
+            .as_ref()
+            .is_none_or(|source| source.clipboard_supported());
     let mut input_sink = config.input_sink;
     if !config.view_only
         && input_sink.is_none()
@@ -1290,7 +1327,7 @@ pub async fn serve_desktop_with(
     // not cancellation-safe.  Keep it in one reader task while the session
     // loop also waits for native clipboard changes; canceling a `select!`
     // branch must never discard a half-read control frame.
-    let mut watching = config.reverse_clipboard && !config.view_only && clipboard_supported;
+    let mut watching = reverse_clipboard && !config.view_only && clipboard_supported;
     let clipboard_lifetime: crate::clipboard::NativeLifetime =
         Arc::new(native.begin().ok_or_else(native_closed)?);
     let mut clipboard = watching.then(|| {
@@ -1481,7 +1518,22 @@ pub async fn serve_desktop_with(
                         // Reverse clipboard is an explicit capability AND a
                         // control scope; view-only cannot exfiltrate a seat's
                         // clipboard even when it requests the V5 greeting.
-                        if !config.reverse_clipboard || config.view_only {
+                        if native_mode {
+                            if write_control_reply(
+                                &mut send.0,
+                                &DesktopEvent::ClipboardError {
+                                    id,
+                                    code: ClipboardErrorCode::UnsupportedFormat,
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                        if !reverse_clipboard || config.view_only {
                             break;
                         }
                         let result = if watching {
@@ -1515,7 +1567,11 @@ pub async fn serve_desktop_with(
                                 &mut send.0,
                                 &DesktopEvent::ClipboardError {
                                     id,
-                                    code: ClipboardErrorCode::Unavailable,
+                                    code: if native_mode {
+                                        ClipboardErrorCode::UnsupportedFormat
+                                    } else {
+                                        ClipboardErrorCode::Unavailable
+                                    },
                                 },
                             )
                             .await
@@ -1603,6 +1659,9 @@ pub async fn serve_desktop_with(
             Some(Err(e)) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
         },
     };
+    if let Some(peer) = &native_clipboard {
+        peer.handle().close();
+    }
     native.close();
     drop(capture_stop);
     let _ = send.0.reset(0u32.into());
@@ -1617,6 +1676,11 @@ pub async fn serve_desktop_with(
     }
     drop(clipboard);
     drop(clipboard_lifetime);
+    if let Some(peer) = native_clipboard
+        && let Err(error) = peer.close().await
+    {
+        tracing::debug!(%error, "native clipboard ended during desktop shutdown");
+    }
     // A running spawn_blocking call cannot be aborted. Its guard keeps the
     // original native authority reserved until the OS object is cleaned up.
     native.drain().await;

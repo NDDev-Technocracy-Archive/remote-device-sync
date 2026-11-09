@@ -148,6 +148,15 @@ pub enum StreamHello {
         payload_receipts: bool,
         clipboard: bool,
     },
+    /// Explicit native clipboard capabilities on an isolated desktop. Older
+    /// agents reject this greeting before work; no implicit text downgrade.
+    DesktopV6 {
+        session: [u8; 16],
+        hello: DesktopHello,
+        output_height: u32,
+        payload_receipts: bool,
+        clipboard: clipboard::Capabilities,
+    },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -165,6 +174,12 @@ pub enum HelloAck {
     DesktopV4(DesktopCaps),
     /// DesktopV5 accepted with its explicitly negotiated extensions.
     DesktopV5(DesktopCaps),
+    /// Native mode was understood. None explicitly means no clipboard was
+    /// admitted; it does not permit legacy text messages on this session.
+    DesktopV6 {
+        desktop: DesktopCaps,
+        clipboard: Option<clipboard::Capabilities>,
+    },
 }
 
 /// What the serving side offers.
@@ -662,6 +677,35 @@ mod tests {
             postcard::to_stdvec(&HelloAck::DesktopV5(caps())).unwrap()[0],
             5
         );
+        let clipboard = clipboard::Capabilities {
+            receive: vec![clipboard::Format::TextUtf8, clipboard::Format::ImagePng],
+            offer: vec![clipboard::Format::TextUtf8],
+            shortcut: clipboard::ShortcutModifier::Control,
+            limits: clipboard::Limits::default(),
+        };
+        let native = postcard::to_stdvec(&StreamHello::DesktopV6 {
+            session: [1; 16],
+            hello: hello(),
+            output_height: 1080,
+            payload_receipts: true,
+            clipboard: clipboard.clone(),
+        })
+        .unwrap();
+        assert_eq!(native[0], 14);
+        assert!(
+            matches!(postcard::from_bytes::<StreamHello>(&native).unwrap(),
+            StreamHello::DesktopV6 { clipboard: decoded, .. } if decoded==clipboard)
+        );
+        for admitted in [Some(clipboard.clone()), None] {
+            let ack = postcard::to_stdvec(&HelloAck::DesktopV6 {
+                desktop: caps(),
+                clipboard: admitted.clone(),
+            })
+            .unwrap();
+            assert_eq!(ack[0], 6);
+            assert!(matches!(postcard::from_bytes::<HelloAck>(&ack).unwrap(),
+                HelloAck::DesktopV6 { clipboard: decoded, .. } if decoded==admitted));
+        }
     }
 
     #[test]

@@ -67,7 +67,9 @@ fn serve(endpoint: Endpoint) -> tokio::task::JoinHandle<()> {
                                     SessionConfig {
                                         frame_route: Some(UniHello::DesktopFrames { id: session }),
                                         payload_receipts,
-                                        reverse_clipboard: true,
+                                        clipboard: rds_desktop::ServingClipboard::Text {
+                                            reverse: true,
+                                        },
                                         input_sink: Some(Box::new(ScopedInput(display))),
                                         producer: Some(Box::new(SyntheticProducer::new(
                                             5,

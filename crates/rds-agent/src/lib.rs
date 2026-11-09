@@ -37,6 +37,8 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 mod authz;
 mod limits;
+#[cfg(feature = "desktop")]
+mod native_clipboard;
 mod revocations;
 pub mod settings;
 mod sys;
@@ -704,7 +706,20 @@ async fn serve_stream(
             }
         };
     rds_net::wire::prioritize_control(&send, &hello)?;
-    if matches!(&hello,StreamHello::DesktopV3 { output_height,.. } | StreamHello::DesktopV4 { output_height,.. } | StreamHello::DesktopV5 { output_height,.. } if *output_height!=0 && !(16..=4320).contains(output_height))
+    if matches!(&hello, StreamHello::DesktopV6 { session, clipboard, .. }
+        if *session == [0;16] || clipboard.validate().is_err())
+    {
+        write_frame(
+            &mut send,
+            &HelloAck::Error {
+                message: "invalid native clipboard negotiation".into(),
+            },
+        )
+        .await?;
+        send.finish()?;
+        anyhow::bail!("invalid native clipboard negotiation");
+    }
+    if matches!(&hello,StreamHello::DesktopV3 { output_height,.. } | StreamHello::DesktopV4 { output_height,.. } | StreamHello::DesktopV5 { output_height,.. } | StreamHello::DesktopV6 { output_height,.. } if *output_height!=0 && !(16..=4320).contains(output_height))
     {
         write_frame(
             &mut send,
@@ -843,7 +858,8 @@ async fn serve_stream(
         StreamHello::DesktopV2 { session, .. }
         | StreamHello::DesktopV3 { session, .. }
         | StreamHello::DesktopV4 { session, .. }
-        | StreamHello::DesktopV5 { session, .. } => {
+        | StreamHello::DesktopV5 { session, .. }
+        | StreamHello::DesktopV6 { session, .. } => {
             rds_core::UniHello::DesktopFrames { id: *session }
         }
         _ => rds_core::UniHello::Desktop,
@@ -852,7 +868,8 @@ async fn serve_stream(
     let output_height = match &hello {
         StreamHello::DesktopV3 { output_height, .. }
         | StreamHello::DesktopV4 { output_height, .. }
-        | StreamHello::DesktopV5 { output_height, .. } => Some(*output_height),
+        | StreamHello::DesktopV5 { output_height, .. }
+        | StreamHello::DesktopV6 { output_height, .. } => Some(*output_height),
         _ => None,
     };
     #[cfg(feature = "desktop")]
@@ -860,6 +877,10 @@ async fn serve_stream(
         &hello,
         StreamHello::DesktopV4 { .. }
             | StreamHello::DesktopV5 {
+                payload_receipts: true,
+                ..
+            }
+            | StreamHello::DesktopV6 {
                 payload_receipts: true,
                 ..
             }
@@ -874,6 +895,13 @@ async fn serve_stream(
     );
     #[cfg(feature = "desktop")]
     let desktop_v5 = matches!(&hello, StreamHello::DesktopV5 { .. });
+    #[cfg(feature = "desktop")]
+    let native_request = match &hello {
+        StreamHello::DesktopV6 {
+            session, clipboard, ..
+        } => Some((*session, clipboard.clone())),
+        _ => None,
+    };
     async move {
         match hello {
             StreamHello::Ping { nonce } => {
@@ -963,7 +991,8 @@ async fn serve_stream(
             | StreamHello::DesktopV2 { hello, .. }
             | StreamHello::DesktopV3 { hello, .. }
             | StreamHello::DesktopV4 { hello, .. }
-            | StreamHello::DesktopV5 { hello, .. } => {
+            | StreamHello::DesktopV5 { hello, .. }
+            | StreamHello::DesktopV6 { hello, .. } => {
                 if desktop.enabled() {
                     #[cfg(feature = "desktop")]
                     match desktop.capabilities().await {
@@ -997,11 +1026,53 @@ async fn serve_stream(
                                 .iter()
                                 .find(|display| display.index == hello.display)
                                 .map(|display| (display.width, display.height));
+                            let native_lifetime: rds_desktop::clipboard::NativeLifetime =
+                                Arc::new((_service_slot.clone(), native_authority));
+                            let view_only =
+                                grant.as_ref().is_some_and(|g| !g.permits_desktop_control());
+                            let native_requested = native_request.is_some();
+                            let negotiated = match native_request {
+                                Some((session, peer)) => match native_clipboard::prepare(
+                                    desktop.source.as_deref(),
+                                    native_clipboard::Admission {
+                                        connection: conn.clone(),
+                                        session,
+                                        display: hello.display,
+                                        peer,
+                                        original: native_lifetime.clone(),
+                                        permitted: !view_only,
+                                    },
+                                ) {
+                                    Ok(negotiated) => negotiated,
+                                    Err(error) => {
+                                        write_frame(
+                                            &mut send,
+                                            &HelloAck::Error {
+                                                message: "native clipboard admission failed".into(),
+                                            },
+                                        )
+                                        .await?;
+                                        send.finish()?;
+                                        anyhow::bail!("native clipboard admission failed: {error}");
+                                    }
+                                },
+                                None => native_clipboard::Negotiated {
+                                    mode: rds_desktop::ServingClipboard::Text {
+                                        reverse: reverse_clipboard,
+                                    },
+                                    advertised: None,
+                                },
+                            };
                             tokio::time::timeout(
                                 policy.timeouts.hello,
                                 write_frame(
                                     &mut send,
-                                    &if desktop_v5 {
+                                    &if native_requested {
+                                        HelloAck::DesktopV6 {
+                                            desktop: caps,
+                                            clipboard: negotiated.advertised,
+                                        }
+                                    } else if desktop_v5 {
                                         HelloAck::DesktopV5(caps)
                                     } else if payload_receipts {
                                         HelloAck::DesktopV4(caps)
@@ -1018,20 +1089,15 @@ async fn serve_stream(
                                 recv,
                                 hello,
                                 rds_desktop::SessionConfig {
-                                    native_lifetime: Some(Arc::new((
-                                        _service_slot.clone(),
-                                        native_authority,
-                                    ))),
+                                    native_lifetime: Some(native_lifetime),
                                     source: desktop.source.clone(),
                                     bitrate_ceiling: max_bps,
-                                    view_only: grant
-                                        .as_ref()
-                                        .is_some_and(|g| !g.permits_desktop_control()),
+                                    view_only,
                                     frame_route: Some(desktop_frame_route),
                                     output_height,
                                     source_extent,
                                     payload_receipts,
-                                    reverse_clipboard,
+                                    clipboard: negotiated.mode,
                                     ..Default::default()
                                 },
                             )
@@ -1211,7 +1277,8 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         | StreamHello::DesktopV2 { .. }
         | StreamHello::DesktopV3 { .. }
         | StreamHello::DesktopV4 { .. }
-        | StreamHello::DesktopV5 { .. } => ServiceKind::Desktop,
+        | StreamHello::DesktopV5 { .. }
+        | StreamHello::DesktopV6 { .. } => ServiceKind::Desktop,
         StreamHello::Sync
         | StreamHello::SyncTransfer { .. }
         | StreamHello::SyncTransferV2 { .. } => ServiceKind::Sync,
@@ -1232,6 +1299,7 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
         | StreamHello::DesktopV3 { hello: h, .. }
         | StreamHello::DesktopV4 { hello: h, .. }
         | StreamHello::DesktopV5 { hello: h, .. }
+        | StreamHello::DesktopV6 { hello: h, .. }
             if !grant.permits_display(h.display) =>
         {
             return Err(format!("display {} outside grant constraints", h.display));
