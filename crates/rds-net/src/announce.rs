@@ -15,7 +15,9 @@ use rand::RngExt;
 use crate::{EndpointAddr, TransportAddr};
 use rds_discovery::client::Client as DirectoryClient;
 use rds_discovery::publisher::{RecordDraft, RecordIssuer};
-use rds_discovery::{DiscoveryError, EndpointRecord, MAX_RECORD_TTL, Service};
+use rds_discovery::{
+    DiscoveryError, EndpointRecord, MAX_DIRECT_ADDRS, MAX_RECORD_TTL, MAX_RELAY_URLS, Service,
+};
 
 use crate::Endpoint;
 
@@ -71,9 +73,6 @@ impl RetryPolicy {
             + Duration::from_millis(rand::rng().random_range(0..=half_ms))
     }
 }
-
-/// Advertised reachability: direct socket addrs + relay urls.
-type Advertised = (Vec<std::net::SocketAddr>, Vec<String>);
 
 /// Running announce task. `Drop` stops publishing; already-published
 /// records expire naturally.
@@ -131,11 +130,22 @@ pub fn announce(endpoint: Endpoint, config: AnnounceConfig) -> Result<Announce, 
         let mut failures = 0u32;
         let mut storage_full = false;
         let mut storage_pause_started: Option<tokio::time::Instant> = None;
+        let mut last_omitted = 0usize;
         loop {
-            let current = split_addrs(&endpoint.addr());
+            let (addrs, relay_urls, omitted) = split_addrs(&endpoint.addr());
+            if omitted != last_omitted {
+                if omitted > 0 {
+                    tracing::warn!(
+                        omitted,
+                        kept = addrs.len(),
+                        "more direct addresses than a record carries; publishing the most reachable"
+                    );
+                }
+                last_omitted = omitted;
+            }
             let draft = RecordDraft {
-                addrs: current.0,
-                relay_urls: current.1,
+                addrs,
+                relay_urls,
                 services: services.clone(),
                 ttl,
             };
@@ -219,23 +229,118 @@ pub fn announce(endpoint: Endpoint, config: AnnounceConfig) -> Result<Announce, 
     Ok(Announce { task })
 }
 
-/// Split an [`EndpointAddr`] into direct socket addrs + relay urls.
-fn split_addrs(addr: &EndpointAddr) -> Advertised {
+/// Split an [`EndpointAddr`] into the direct socket addrs and relay urls a
+/// signed record can carry, and count the direct addrs left out.
+///
+/// A record holds at most [`MAX_DIRECT_ADDRS`] direct addresses, and the
+/// issuer refuses a larger set as a fatal error. A host with many bridges
+/// (Docker, libvirt, Incus) reports more than that, so keep the most reachable:
+/// public addresses, then private IPv4 with home networks before the ranges
+/// container engines take, then IPv6 unique-local, then link-local. The
+/// address set is ordered numerically, so a plain cut kept bridge gateways
+/// such as `10.210.x.1` and dropped the LAN address. Addresses a record
+/// refuses (port 0, unspecified, multicast) are never advertised.
+fn split_addrs(addr: &EndpointAddr) -> (Vec<std::net::SocketAddr>, Vec<String>, usize) {
     let mut addrs = Vec::new();
     let mut relays = Vec::new();
     for t in &addr.addrs {
         match t {
-            TransportAddr::Ip(sock) => addrs.push(*sock),
+            TransportAddr::Ip(sock)
+                if sock.port() != 0 && !sock.ip().is_unspecified() && !sock.ip().is_multicast() =>
+            {
+                addrs.push(*sock)
+            }
             TransportAddr::Relay(url) => relays.push(url.to_string()),
             _ => {}
         }
     }
-    (addrs, relays)
+    addrs.sort_by_key(|sock| reach(sock.ip()));
+    let omitted = addrs.len().saturating_sub(MAX_DIRECT_ADDRS);
+    addrs.truncate(MAX_DIRECT_ADDRS);
+    relays.truncate(MAX_RELAY_URLS);
+    (addrs, relays, omitted)
+}
+
+/// Rank of an address for peers on other hosts: lower is more reachable.
+fn reach(ip: std::net::IpAddr) -> u8 {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            if v4.is_link_local() {
+                6
+            } else if a == 192 && b == 168 {
+                1
+            } else if a == 172 && (16..32).contains(&b) {
+                2
+            } else if a == 10 || (a == 100 && (64..128).contains(&b)) {
+                3
+            } else {
+                0
+            }
+        }
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            if first & 0xffc0 == 0xfe80 {
+                7
+            } else if first & 0xfe00 == 0xfc00 {
+                4
+            } else {
+                0
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint_addr(addrs: impl IntoIterator<Item = &'static str>) -> EndpointAddr {
+        let mut addr = EndpointAddr::new(crate::SecretKey::generate().public());
+        for a in addrs {
+            addr.addrs.insert(TransportAddr::Ip(a.parse().unwrap()));
+        }
+        addr
+    }
+
+    #[test]
+    fn a_host_with_many_bridges_publishes_its_lan_and_public_addresses_first() {
+        // The Ubuntu PC of 13 November: 38 Docker bridges in 10.210.0.0/16 with
+        // IPv6 link-local twins, its LAN address and its public address.
+        let bridges: Vec<&'static str> = (0..38)
+            .flat_map(|n| {
+                [
+                    Box::leak(format!("10.210.{n}.1:3345").into_boxed_str()) as &str,
+                    Box::leak(format!("[fe80::{n:x}:1]:3345").into_boxed_str()) as &str,
+                ]
+            })
+            .collect();
+        let addr = endpoint_addr(bridges.into_iter().chain([
+            "192.168.31.221:3345",
+            "95.31.0.7:3345",
+            "0.0.0.0:3345",
+        ]));
+
+        let (addrs, _, omitted) = split_addrs(&addr);
+
+        assert_eq!(addrs.len(), MAX_DIRECT_ADDRS);
+        assert_eq!(omitted, 76 + 2 - MAX_DIRECT_ADDRS);
+        assert_eq!(addrs[0], "95.31.0.7:3345".parse().unwrap());
+        assert_eq!(addrs[1], "192.168.31.221:3345".parse().unwrap());
+        assert!(addrs.iter().all(|a| !a.ip().is_unspecified()));
+        assert!(addrs[2..].iter().all(|a| a.ip().is_ipv4()));
+    }
+
+    #[test]
+    fn a_small_host_keeps_every_address_it_reports() {
+        let addr = endpoint_addr(["192.168.1.5:3345", "[fe80::1]:3345", "203.0.113.9:3345"]);
+
+        let (addrs, _, omitted) = split_addrs(&addr);
+
+        assert_eq!(omitted, 0);
+        assert_eq!(addrs.len(), 3);
+        assert_eq!(addrs[2], "[fe80::1]:3345".parse().unwrap());
+    }
 
     #[test]
     fn retry_delay_stays_inside_equal_jitter_bounds() {
