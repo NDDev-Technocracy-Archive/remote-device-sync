@@ -22,7 +22,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,7 +47,7 @@ jobs:
   # Tests and lints run side by side as the retired library ran them; one job holding
   # both target trees ran out of runner disk.
   rust:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -86,7 +86,7 @@ jobs:
         cargo test --locked --workspace --no-fail-fast && cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml --lib --no-fail-fast && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay --no-fail-fast && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast && cargo test --locked -p rds-client --features transport-noq --test multiple_desktops --no-fail-fast && cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --no-fail-fast && { [ "$(uname -s)" != "Linux" ] || { cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1 && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24" sh -c 'setxkbmap -keycodes xfree86 -layout us,ru && cargo test --locked -p rds-desktop --features x11 --test x11_native native_alt_navigation_resolves_the_actual_xkb_physical_map -- --ignored --exact --test-threads=1'; }; }
   portal:
     name: Wayland portal boundaries
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -108,7 +108,7 @@ jobs:
       run: cargo test --locked -p rds-agent --features portal --lib
 
   workflows:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
