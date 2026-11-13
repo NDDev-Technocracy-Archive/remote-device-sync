@@ -27,7 +27,15 @@ jobs:
         rustup show active-toolchain
     - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@9fead1382c452a6b791a0a9e464ac6ac66537ac3 # v0.6.51
       with:
-        tools: cargo-deny@0.20.2,cargo-audit@0.23.0
+        tools: cargo-deny@0.20.2
+    - name: Install cargo-audit 0.23.0, checked against their digests
+      run: |
+        set -euo pipefail
+        bin="$HOME/.local/bin"; mkdir -p "$bin"
+        curl -fsSL -o "$RUNNER_TEMP/cargo-audit.tgz" "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.23.0/cargo-audit-x86_64-unknown-linux-musl-v0.23.0.tgz"
+        echo "4f01c74ed84b2dffd0b1d37012a62cdf2a92c96e25bdf8eec7fcc0d4d3eb7811  $RUNNER_TEMP/cargo-audit.tgz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/cargo-audit.tgz" -C "$bin" --strip-components=1 "cargo-audit-x86_64-unknown-linux-musl-v0.23.0/cargo-audit"
+        echo "$bin" >> "$GITHUB_PATH"
     # cargo-machete is not run: in the retired library it never executed (an unsupported flag was
     # swallowed by `|| true`), and a real run reports unused dependencies the product must remove first.
     - name: Supply chain
