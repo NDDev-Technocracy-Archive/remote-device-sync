@@ -25,9 +25,9 @@ jobs:
     - name: Select the Rust toolchain
       run: |
         rustup show active-toolchain
-    - uses: NDDev-Technocracy-Standarts/std-0004-ci-cd-workflows/.github/actions/tools@c192c6adcf22088abf456635de614d42e8fa3f8d # nddev-cicd-v0.6.20
+    - uses: NDDev-Technocracy-OpenNetwork/nddev-ci/actions/hosted-sdk@9fead1382c452a6b791a0a9e464ac6ac66537ac3 # v0.6.51
       with:
-        capability: rust
+        tools: cargo-deny@0.20.2,cargo-audit@0.23.0
     # cargo-machete is not run: in the retired library it never executed (an unsupported flag was
     # swallowed by `|| true`), and a real run reports unused dependencies the product must remove first.
     - name: Supply chain
