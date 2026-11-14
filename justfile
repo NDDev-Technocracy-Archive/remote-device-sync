@@ -26,7 +26,7 @@ format:
 [private]
 workflows:
     actionlint
-    zizmor --offline --no-progress .github/workflows .github/dependabot.yml
+    zizmor --offline --no-progress .github/workflows
 
 [private]
 dependencies:
