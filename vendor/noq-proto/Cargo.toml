@@ -109,7 +109,7 @@ harness = false
 required-features = ["bench"]
 
 [dependencies.aes-gcm]
-version = "0.10.3"
+version = "0.11.0"
 features = ["aes"]
 optional = true
 default-features = false
@@ -260,7 +260,7 @@ features = ["web"]
 version = "1"
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies.getrandom_0_3]
-version = "0.3"
+version = "0.4"
 features = ["wasm_js"]
 package = "getrandom"
 
