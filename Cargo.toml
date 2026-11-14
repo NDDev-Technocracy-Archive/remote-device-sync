@@ -62,7 +62,7 @@ opus = { version = "=0.4.0" }
 postcard = "1"
 proptest = "1"
 rand = "0.10"
-redb = "=4.4.0"
+redb = "=4.5.0"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rustix = { version = "1", features = ["fs"] }
 # Pinned exactly: the release carries PTY encoding, sensitive-debug
